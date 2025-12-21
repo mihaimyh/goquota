@@ -271,7 +271,7 @@ func TestMiddleware_CustomErrorHandler(t *testing.T) {
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
-		OnQuotaExceeded: func(w http.ResponseWriter, r *http.Request, quota *goquota.Quota) {
+		OnQuotaExceeded: func(w http.ResponseWriter, r *http.Request, usage *goquota.Usage) {
 			customErrorCalled = true
 			w.WriteHeader(http.StatusPaymentRequired)
 			w.Write([]byte("custom quota exceeded"))
