@@ -2,6 +2,7 @@ package firestore
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -29,6 +30,13 @@ func setupFirestoreClient(t *testing.T) *firestore.Client {
 	}
 
 	return client
+}
+
+// getTestCollections returns unique collection names for each test run
+func getTestCollections(testName string) (string, string) {
+	timestamp := time.Now().UnixNano()
+	return fmt.Sprintf("test_ent_%s_%d", testName, timestamp),
+		fmt.Sprintf("test_usage_%s_%d", testName, timestamp)
 }
 
 func cleanupFirestore(t *testing.T, client *firestore.Client, collections ...string) {
@@ -83,17 +91,17 @@ func TestFirestore_GetSetEntitlement(t *testing.T) {
 	client := setupFirestoreClient(t)
 	defer client.Close()
 
+	entColl, usageColl := getTestCollections("get_set_ent")
+
 	storage, err := New(client, Config{
-		EntitlementsCollection: "test_entitlements",
-		UsageCollection:        "test_usage",
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
 
-	// Clean up before and after
-	cleanupFirestore(t, client, "test_entitlements", "test_usage")
-	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	defer cleanupFirestore(t, client, entColl, usageColl)
 
 	ctx := context.Background()
 
@@ -127,14 +135,7 @@ func TestFirestore_GetSetEntitlement(t *testing.T) {
 	}
 }
 
-func TestFirestore_ConsumeQuota_Success(t *testing.T) {
-	client := setupFirestoreClient(t)
-	defer client.Close()
-
-	storage, _ := New(client, Config{
-		EntitlementsCollection: "test_entitlements",
-		UsageCollection:        "test_usage",
-	})
+func TestFirestore_ConsumeQuota_Success(t *testing.T) {`r`n`tclient := setupFirestoreClient(t)`r`n`tdefer client.Close()`r`n`r`n`tentColl, usageColl := getTestCollections("TestFirestore_ConsumeQuota_Success")`r`n`r`n`tstorage, _ := New(client, Config{`r`n`t`tEntitlementsCollection: entColl,`r`n`t`tUsageCollection: usageColl,`r`n`t})
 
 	cleanupFirestore(t, client, "test_entitlements", "test_usage")
 	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
@@ -171,14 +172,7 @@ func TestFirestore_ConsumeQuota_Success(t *testing.T) {
 	}
 }
 
-func TestFirestore_ConsumeQuota_Exceeds(t *testing.T) {
-	client := setupFirestoreClient(t)
-	defer client.Close()
-
-	storage, _ := New(client, Config{
-		EntitlementsCollection: "test_entitlements",
-		UsageCollection:        "test_usage",
-	})
+func TestFirestore_ConsumeQuota_Exceeds(t *testing.T) {`r`n`tclient := setupFirestoreClient(t)`r`n`tdefer client.Close()`r`n`r`n`tentColl, usageColl := getTestCollections("TestFirestore_ConsumeQuota_Exceeds")`r`n`r`n`tstorage, _ := New(client, Config{`r`n`t`tEntitlementsCollection: entColl,`r`n`t`tUsageCollection: usageColl,`r`n`t})
 
 	cleanupFirestore(t, client, "test_entitlements", "test_usage")
 	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
@@ -216,14 +210,7 @@ func TestFirestore_ConsumeQuota_Exceeds(t *testing.T) {
 	}
 }
 
-func TestFirestore_ConsumeQuota_Concurrent(t *testing.T) {
-	client := setupFirestoreClient(t)
-	defer client.Close()
-
-	storage, _ := New(client, Config{
-		EntitlementsCollection: "test_entitlements",
-		UsageCollection:        "test_usage",
-	})
+func TestFirestore_ConsumeQuota_Concurrent(t *testing.T) {`r`n`tclient := setupFirestoreClient(t)`r`n`tdefer client.Close()`r`n`r`n`tentColl, usageColl := getTestCollections("TestFirestore_ConsumeQuota_Concurrent")`r`n`r`n`tstorage, _ := New(client, Config{`r`n`t`tEntitlementsCollection: entColl,`r`n`t`tUsageCollection: usageColl,`r`n`t})
 
 	cleanupFirestore(t, client, "test_entitlements", "test_usage")
 	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
@@ -276,14 +263,7 @@ func TestFirestore_ConsumeQuota_Concurrent(t *testing.T) {
 	}
 }
 
-func TestFirestore_ConsumeQuota_NearLimit(t *testing.T) {
-	client := setupFirestoreClient(t)
-	defer client.Close()
-
-	storage, _ := New(client, Config{
-		EntitlementsCollection: "test_entitlements",
-		UsageCollection:        "test_usage",
-	})
+func TestFirestore_ConsumeQuota_NearLimit(t *testing.T) {`r`n`tclient := setupFirestoreClient(t)`r`n`tdefer client.Close()`r`n`r`n`tentColl, usageColl := getTestCollections("TestFirestore_ConsumeQuota_NearLimit")`r`n`r`n`tstorage, _ := New(client, Config{`r`n`t`tEntitlementsCollection: entColl,`r`n`t`tUsageCollection: usageColl,`r`n`t})
 
 	cleanupFirestore(t, client, "test_entitlements", "test_usage")
 	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
@@ -325,14 +305,7 @@ func TestFirestore_ConsumeQuota_NearLimit(t *testing.T) {
 	}
 }
 
-func TestFirestore_ApplyTierChange(t *testing.T) {
-	client := setupFirestoreClient(t)
-	defer client.Close()
-
-	storage, _ := New(client, Config{
-		EntitlementsCollection: "test_entitlements",
-		UsageCollection:        "test_usage",
-	})
+func TestFirestore_ApplyTierChange(t *testing.T) {`r`n`tclient := setupFirestoreClient(t)`r`n`tdefer client.Close()`r`n`r`n`tentColl, usageColl := getTestCollections("TestFirestore_ApplyTierChange")`r`n`r`n`tstorage, _ := New(client, Config{`r`n`t`tEntitlementsCollection: entColl,`r`n`t`tUsageCollection: usageColl,`r`n`t})
 
 	cleanupFirestore(t, client, "test_entitlements", "test_usage")
 	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
@@ -392,14 +365,7 @@ func TestFirestore_ApplyTierChange(t *testing.T) {
 	}
 }
 
-func TestFirestore_MultipleResources(t *testing.T) {
-	client := setupFirestoreClient(t)
-	defer client.Close()
-
-	storage, _ := New(client, Config{
-		EntitlementsCollection: "test_entitlements",
-		UsageCollection:        "test_usage",
-	})
+func TestFirestore_MultipleResources(t *testing.T) {`r`n`tclient := setupFirestoreClient(t)`r`n`tdefer client.Close()`r`n`r`n`tentColl, usageColl := getTestCollections("TestFirestore_MultipleResources")`r`n`r`n`tstorage, _ := New(client, Config{`r`n`t`tEntitlementsCollection: entColl,`r`n`t`tUsageCollection: usageColl,`r`n`t})
 
 	cleanupFirestore(t, client, "test_entitlements", "test_usage")
 	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
@@ -442,14 +408,7 @@ func TestFirestore_MultipleResources(t *testing.T) {
 	}
 }
 
-func TestFirestore_DifferentPeriods(t *testing.T) {
-	client := setupFirestoreClient(t)
-	defer client.Close()
-
-	storage, _ := New(client, Config{
-		EntitlementsCollection: "test_entitlements",
-		UsageCollection:        "test_usage",
-	})
+func TestFirestore_DifferentPeriods(t *testing.T) {`r`n`tclient := setupFirestoreClient(t)`r`n`tdefer client.Close()`r`n`r`n`tentColl, usageColl := getTestCollections("TestFirestore_DifferentPeriods")`r`n`r`n`tstorage, _ := New(client, Config{`r`n`t`tEntitlementsCollection: entColl,`r`n`t`tUsageCollection: usageColl,`r`n`t})
 
 	cleanupFirestore(t, client, "test_entitlements", "test_usage")
 	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
