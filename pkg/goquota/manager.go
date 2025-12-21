@@ -164,7 +164,7 @@ return ErrQuotaExceeded // No quota available for this tier
 }
 
 // Consume via storage (transaction-safe)
-return m.storage.ConsumeQuota(ctx, ConsumeRequest{
+return m.storage.ConsumeQuota(ctx, &ConsumeRequest{
 UserID:   userID,
 Resource: resource,
 Amount:   amount,
@@ -220,7 +220,7 @@ if adjustedLimit < currentUsed {
 adjustedLimit = currentUsed
 }
 
-return m.storage.ApplyTierChange(ctx, TierChangeRequest{
+return m.storage.ApplyTierChange(ctx, &TierChangeRequest{
 UserID:      userID,
 OldTier:     oldTier,
 NewTier:     newTier,

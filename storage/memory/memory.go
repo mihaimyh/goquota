@@ -6,6 +6,7 @@ import (
 "context"
 "fmt"
 "sync"
+"time"
 
 "github.com/mihaimyh/goquota/pkg/goquota"
 )
@@ -72,7 +73,7 @@ return &usageCopy, nil
 }
 
 // ConsumeQuota implements goquota.Storage with transaction-safe consumption
-func (s *Storage) ConsumeQuota(ctx context.Context, req goquota.ConsumeRequest) error {
+func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest) error {
 if req.Amount < 0 {
 return goquota.ErrInvalidAmount
 }
@@ -98,36 +99,37 @@ return goquota.ErrQuotaExceeded
 
 // Update or create usage
 s.usage[key] = &goquota.Usage{
-UserID:   req.UserID,
-Resource: req.Resource,
-Used:     newUsed,
-Limit:    req.Limit,
-Period:   req.Period,
-Tier:     req.Tier,
+UserID:    req.UserID,
+Resource:  req.Resource,
+Used:      newUsed,
+Limit:     req.Limit,
+Period:    req.Period,
+Tier:      req.Tier,
+UpdatedAt: time.Now().UTC(),
 }
 
 return nil
 }
 
 // ApplyTierChange implements goquota.Storage
-func (s *Storage) ApplyTierChange(ctx context.Context, req goquota.TierChangeRequest) error {
+func (s *Storage) ApplyTierChange(ctx context.Context, req *goquota.TierChangeRequest) error {
 s.mu.Lock()
 defer s.mu.Unlock()
 
 // For in-memory implementation, we just update the limit
-// Real implementations would calculate prorated amounts
-key := usageKey(req.UserID, "audio_seconds", req.Period) // Assuming audio_seconds resource
+key := usageKey(req.UserID, "audio_seconds", req.Period)
 
 usage, ok := s.usage[key]
 if !ok {
 // Create new usage with new limit
 s.usage[key] = &goquota.Usage{
-UserID:   req.UserID,
-Resource: "audio_seconds",
-Used:     req.CurrentUsed,
-Limit:    req.NewLimit,
-Period:   req.Period,
-Tier:     req.NewTier,
+UserID:    req.UserID,
+Resource:  "audio_seconds",
+Used:      req.CurrentUsed,
+Limit:     req.NewLimit,
+Period:    req.Period,
+Tier:      req.NewTier,
+UpdatedAt: time.Now().UTC(),
 }
 return nil
 }
@@ -135,6 +137,7 @@ return nil
 // Update existing usage
 usage.Limit = req.NewLimit
 usage.Tier = req.NewTier
+usage.UpdatedAt = time.Now().UTC()
 
 return nil
 }
