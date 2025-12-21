@@ -2,8 +2,9 @@ package goquota
 
 import "time"
 
-// CurrentCycleForStart calculates the current billing cycle for a given subscription start date.
-// It preserves the anniversary day-of-month across months, handling month-end edge cases.
+// CurrentCycleForStart calculates the current billing cycle for a subscription
+// that started at 'start', relative to 'now'. It preserves the day-of-month
+// from the start date across months (anniversary-based billing).
 //
 // For example, if a subscription started on Jan 31, the cycles will be:
 //   - Jan 31 - Feb 28 (or Feb 29 in leap years)
