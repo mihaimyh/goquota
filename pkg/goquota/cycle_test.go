@@ -43,7 +43,7 @@ wantEnd:   time.Date(2023, 2, 10, 0, 0, 0, 0, time.UTC),
 
 for _, tt := range tests {
 t.Run(tt.name, func(t *testing.T) {
-gotS, gotE := currentCycleForStart(start, tt.now)
+gotS, gotE := CurrentCycleForStart(start, tt.now)
 if !gotS.Equal(tt.wantStart) {
 t.Errorf("start: got %v, want %v", gotS, tt.wantStart)
 }
@@ -86,7 +86,7 @@ wantEnd:   time.Date(2024, 2, 29, 0, 0, 0, 0, time.UTC),
 
 for _, tt := range tests {
 t.Run(tt.name, func(t *testing.T) {
-gotS, gotE := currentCycleForStart(start, tt.now)
+gotS, gotE := CurrentCycleForStart(start, tt.now)
 if !gotS.Equal(tt.wantStart) {
 t.Errorf("start: got %v, want %v", gotS, tt.wantStart)
 }
