@@ -136,7 +136,8 @@ func TestFirestore_ConsumeQuota_Success(t *testing.T) {
 		UsageCollection:        "test_usage",
 	})
 
-	cleanupFirestore(t, client, "test_entitlements", "test_usage")`r`n`tdefer cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
 
 	ctx := context.Background()
 	period := goquota.Period{
@@ -179,7 +180,8 @@ func TestFirestore_ConsumeQuota_Exceeds(t *testing.T) {
 		UsageCollection:        "test_usage",
 	})
 
-	cleanupFirestore(t, client, "test_entitlements", "test_usage")`r`n`tdefer cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
 
 	ctx := context.Background()
 	period := goquota.Period{
@@ -223,7 +225,8 @@ func TestFirestore_ConsumeQuota_Concurrent(t *testing.T) {
 		UsageCollection:        "test_usage",
 	})
 
-	cleanupFirestore(t, client, "test_entitlements", "test_usage")`r`n`tdefer cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
 
 	ctx := context.Background()
 	period := goquota.Period{
@@ -282,7 +285,8 @@ func TestFirestore_ConsumeQuota_NearLimit(t *testing.T) {
 		UsageCollection:        "test_usage",
 	})
 
-	cleanupFirestore(t, client, "test_entitlements", "test_usage")`r`n`tdefer cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
 
 	ctx := context.Background()
 	period := goquota.Period{
@@ -330,7 +334,8 @@ func TestFirestore_ApplyTierChange(t *testing.T) {
 		UsageCollection:        "test_usage",
 	})
 
-	cleanupFirestore(t, client, "test_entitlements", "test_usage")`r`n`tdefer cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
 
 	ctx := context.Background()
 	period := goquota.Period{
@@ -396,7 +401,8 @@ func TestFirestore_MultipleResources(t *testing.T) {
 		UsageCollection:        "test_usage",
 	})
 
-	cleanupFirestore(t, client, "test_entitlements", "test_usage")`r`n`tdefer cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
 
 	ctx := context.Background()
 	period := goquota.Period{
@@ -445,7 +451,8 @@ func TestFirestore_DifferentPeriods(t *testing.T) {
 		UsageCollection:        "test_usage",
 	})
 
-	cleanupFirestore(t, client, "test_entitlements", "test_usage")`r`n`tdefer cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
 
 	ctx := context.Background()
 	now := time.Now().UTC()
