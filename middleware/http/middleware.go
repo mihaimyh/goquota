@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -62,6 +63,8 @@ type Config struct {
 }
 
 // Middleware creates an HTTP middleware that enforces quota limits
+//
+//nolint:gocyclo // Complex function handles rate limiting, quota consumption, and multiple error cases
 func Middleware(config *Config) func(http.Handler) http.Handler {
 	// Set defaults
 	if config.PeriodType == "" {
@@ -117,6 +120,22 @@ func Middleware(config *Config) func(http.Handler) http.Handler {
 
 			_, err = config.Manager.Consume(ctx, userID, resource, amount, config.PeriodType)
 			if err != nil {
+				// Check for rate limit exceeded error
+				var rateLimitErr *goquota.RateLimitExceededError
+				if errors.As(err, &rateLimitErr) {
+					// Add rate limit headers
+					if rateLimitErr.Info != nil {
+						w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", rateLimitErr.Info.Limit))
+						w.Header().Set("X-RateLimit-Remaining", fmt.Sprintf("%d", rateLimitErr.Info.Remaining))
+						w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", rateLimitErr.Info.ResetTime.Unix()))
+					}
+					if rateLimitErr.RetryAfter > 0 {
+						w.Header().Set("Retry-After", fmt.Sprintf("%.0f", rateLimitErr.RetryAfter.Seconds()))
+					}
+					http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+					return
+				}
+
 				if err == goquota.ErrQuotaExceeded {
 					// Get current usage for error response
 					usage, err := config.Manager.GetQuota(ctx, userID, resource, config.PeriodType)
@@ -135,6 +154,9 @@ func Middleware(config *Config) func(http.Handler) http.Handler {
 				}
 				return
 			}
+
+			// Add rate limit headers on success (if available from rate limit check)
+			// Note: We could enhance this to get rate limit info even on success
 
 			// Quota consumed successfully, proceed to handler
 			next.ServeHTTP(w, r)

@@ -2,6 +2,7 @@ package goquota
 
 import (
 	"context"
+	"time"
 )
 
 // CircuitBreakerStorage wraps a Storage implementation with circuit breaker protection.
@@ -92,4 +93,25 @@ func (s *CircuitBreakerStorage) GetConsumptionRecord(ctx context.Context,
 		return e
 	})
 	return record, err
+}
+
+//nolint:gocritic // Named return values would reduce readability here
+func (s *CircuitBreakerStorage) CheckRateLimit(
+	ctx context.Context, req *RateLimitRequest,
+) (bool, int, time.Time, error) {
+	var allowed bool
+	var remaining int
+	var resetTime time.Time
+	err := s.cb.Execute(ctx, func() error {
+		var e error
+		allowed, remaining, resetTime, e = s.storage.CheckRateLimit(ctx, req)
+		return e
+	})
+	return allowed, remaining, resetTime, err
+}
+
+func (s *CircuitBreakerStorage) RecordRateLimitRequest(ctx context.Context, req *RateLimitRequest) error {
+	return s.cb.Execute(ctx, func() error {
+		return s.storage.RecordRateLimitRequest(ctx, req)
+	})
 }

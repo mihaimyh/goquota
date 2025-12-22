@@ -16,10 +16,11 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Transaction-safe** - Prevent over-consumption with atomic operations
 - **Idempotency Keys** - Prevent double-charging on retries with client-provided idempotency keys
 - **Refund Support** - Gracefully handle failed operations with idempotency and audit trails
+- **Rate Limiting** - Time-based request frequency limits (requests per second/minute/hour) with token bucket and sliding window algorithms
 - **Soft Limits & Warnings** - Trigger callbacks when usage approaches limits (e.g. 80%)
 - **Fallback Strategies** - Graceful degradation when storage is unavailable (cache, optimistic, secondary storage)
 - **Observability** - Built-in Prometheus metrics and structured logging
-- **HTTP Middlewares** - Easy integration with standard `net/http` servers
+- **HTTP Middlewares** - Easy integration with standard `net/http` servers with rate limit headers
 
 ## Installation
 
@@ -44,15 +45,32 @@ func main() {
     // Create storage
     storage := memory.New()
 
-    // Configure tiers
+    // Configure tiers with rate limits
     config := goquota.Config{
         DefaultTier: "free",
         Tiers: map[string]goquota.TierConfig{
             "free": {
                 MonthlyQuotas: map[string]int{"api_calls": 100},
+                // Rate limits: 10 requests per second with burst of 20
+                RateLimits: map[string]goquota.RateLimitConfig{
+                    "api_calls": {
+                        Algorithm: "token_bucket",
+                        Rate:      10,
+                        Window:    time.Second,
+                        Burst:     20,
+                    },
+                },
             },
             "pro": {
                 MonthlyQuotas: map[string]int{"api_calls": 10000},
+                // Rate limits: 100 requests per second (sliding window)
+                RateLimits: map[string]goquota.RateLimitConfig{
+                    "api_calls": {
+                        Algorithm: "sliding_window",
+                        Rate:      100,
+                        Window:    time.Second,
+                    },
+                },
             },
         },
     }
@@ -135,6 +153,45 @@ storage := memory.New()
 ```
 
 ## Advanced Features
+
+### Rate Limiting
+
+Enforce time-based request frequency limits in addition to quota limits. Rate limiting prevents API abuse and protects backend services.
+
+**Token Bucket Algorithm** - Allows burst traffic with configurable refill rate:
+```go
+RateLimits: map[string]goquota.RateLimitConfig{
+    "api_calls": {
+        Algorithm: "token_bucket",
+        Rate:      10,              // 10 requests per window
+        Window:    time.Second,      // 1 second window
+        Burst:     20,              // Allow up to 20 requests in burst
+    },
+}
+```
+
+**Sliding Window Algorithm** - More precise rate limiting:
+```go
+RateLimits: map[string]goquota.RateLimitConfig{
+    "api_calls": {
+        Algorithm: "sliding_window",
+        Rate:      100,             // 100 requests per window
+        Window:    time.Minute,     // 1 minute window
+    },
+}
+```
+
+Rate limits are checked **before** quota consumption, so rate-limited requests don't consume quota. When a rate limit is exceeded, the system returns `ErrRateLimitExceeded` with reset time information.
+
+**HTTP Middleware Integration** - Rate limit headers are automatically added:
+- `X-RateLimit-Limit`: Total rate limit
+- `X-RateLimit-Remaining`: Remaining requests in current window
+- `X-RateLimit-Reset`: Unix timestamp when the limit resets
+- `Retry-After`: Seconds until the limit resets
+
+**Distributed Rate Limiting** - Rate limits work across multiple instances using Redis or Firestore storage backends, ensuring consistent enforcement in distributed systems.
+
+**Graceful Degradation** - If storage is unavailable for rate limiting, requests are allowed (with logging) to prevent rate limiting from blocking legitimate requests during outages.
 
 ### Idempotency Keys
 
@@ -246,6 +303,8 @@ The library exposes Prometheus metrics by default via the `metrics` package.
 - `goquota_fallback_usage_total{trigger="circuit_open"}`
 - `goquota_optimistic_consumption_total`
 - `goquota_fallback_hits_total{strategy="cache"}`
+- `goquota_rate_limit_check_duration_seconds{resource="api_calls"}`
+- `goquota_rate_limit_exceeded_total{resource="api_calls"}`
 
 ## HTTP Middleware
 
@@ -272,6 +331,8 @@ quotaMiddleware := httpMiddleware.Middleware(httpMiddleware.Config{
 http.Handle("/api/endpoint", quotaMiddleware(yourHandler))
 ```
 
+The middleware automatically handles both quota limits and rate limits. When a rate limit is exceeded, it returns `429 Too Many Requests` with appropriate headers.
+
 ## Anniversary-Based Billing & Proration
 
 `goquota` is designed for real-world subscription billing:
@@ -290,6 +351,7 @@ See the [examples](examples/) directory:
 - [Firestore Integration](examples/firestore/)
 - [HTTP Server](examples/http-server/)
 - [Fallback Strategies](examples/fallback/)
+- [Rate Limiting](examples/rate-limiting/)
 
 ## API Reference
 

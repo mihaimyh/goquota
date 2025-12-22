@@ -166,7 +166,7 @@ Features that enhance quota flexibility and control.
 
 ### 2.1 Rate Limiting
 
-**Status**: 🔴 Not Started  
+**Status**: ✅ Implemented  
 **Priority**: Medium  
 **Effort**: Medium
 
@@ -174,11 +174,34 @@ Time-based rate limiting in addition to quota limits.
 
 **Features**:
 
-- Requests per second/minute/hour limits
-- Token bucket algorithm
-- Sliding window rate limiting
-- Per-endpoint rate limits
-- Burst allowance
+- ✅ Requests per second/minute/hour limits
+- ✅ Token bucket algorithm
+- ✅ Sliding window rate limiting
+- ✅ Per-resource rate limits
+- ✅ Burst allowance
+- ✅ Storage-backed distributed rate limiting (Redis, Firestore, Memory)
+- ✅ In-memory fallback for single-instance deployments
+- ✅ HTTP middleware integration with rate limit headers
+- ✅ Metrics integration
+
+**Implementation**:
+
+- `pkg/goquota/rate_limiter.go` - Rate limiter interface and factory
+- `pkg/goquota/rate_limiter_storage.go` - Storage-backed rate limiter
+- `pkg/goquota/rate_limiter_memory.go` - In-memory rate limiter fallback
+- `storage/redis/redis.go` - Redis rate limiting (Lua scripts)
+- `storage/firestore/firestore.go` - Firestore rate limiting (transactions)
+- `storage/memory/memory.go` - Memory storage rate limiting
+- `pkg/goquota/manager.go` - Rate limiting integration in Manager
+- `middleware/http/middleware.go` - HTTP middleware rate limit support
+- `examples/rate-limiting/` - Working example
+
+**Benefits**:
+
+- Prevents API abuse and protects backend services
+- Distributed rate limiting across multiple instances
+- Configurable per-tier and per-resource
+- Graceful degradation when storage unavailable
 
 ### 2.2 Quota Reservations
 
@@ -842,7 +865,7 @@ Complete API documentation.
 **Focus**: Advanced features
 
 - ✅ Conditional Consumption (TryConsume) (completed)
-- Rate limiting
+- ✅ Rate limiting (completed)
 - Quota reservations
 - Webhooks & events
 - Admin API

@@ -67,6 +67,40 @@ type TierConfig struct {
 	// WarningThresholds maps resource names to a list of usage percentages (e.g., [0.8, 0.9])
 	// that should trigger warnings.
 	WarningThresholds map[string][]float64
+
+	// RateLimits maps resource names to rate limit configurations
+	// Rate limits enforce time-based request frequency (e.g., 10 requests/second)
+	// while quotas enforce total usage limits (e.g., 1000 requests/month)
+	RateLimits map[string]RateLimitConfig
+}
+
+// RateLimitConfig defines rate limiting configuration for a resource
+type RateLimitConfig struct {
+	// Algorithm specifies the rate limiting algorithm to use
+	// Options: "token_bucket" (allows burst traffic) or "sliding_window" (precise rate limiting)
+	Algorithm string
+
+	// Rate is the number of requests allowed per window
+	Rate int
+
+	// Window is the time window for the rate limit (e.g., 1s, 1m, 1h)
+	Window time.Duration
+
+	// Burst is the maximum burst capacity for token bucket algorithm
+	// For sliding window, this field is ignored
+	Burst int
+}
+
+// RateLimitInfo contains information about a rate limit check result
+type RateLimitInfo struct {
+	// Remaining is the number of requests remaining in the current window
+	Remaining int
+
+	// ResetTime is when the rate limit window resets
+	ResetTime time.Time
+
+	// Limit is the total rate limit for the window
+	Limit int
 }
 
 // CacheConfig holds cache configuration

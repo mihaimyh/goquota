@@ -21,6 +21,8 @@ type Metrics struct {
 	fallbackUsageTotal         *prometheus.CounterVec
 	optimisticConsumptionTotal *prometheus.CounterVec
 	fallbackHitsTotal          *prometheus.CounterVec
+	rateLimitCheckDuration     *prometheus.HistogramVec
+	rateLimitExceededTotal     *prometheus.CounterVec
 }
 
 // NewMetrics creates a new Prometheus metrics implementation.
@@ -95,6 +97,19 @@ func NewMetrics(reg prometheus.Registerer, namespace string) *Metrics {
 			Name:      "fallback_hits_total",
 			Help:      "Total number of successful fallback operations.",
 		}, []string{"strategy"}),
+
+		rateLimitCheckDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "rate_limit_check_duration_seconds",
+			Help:      "Latency of rate limit checks.",
+			Buckets:   prometheus.DefBuckets,
+		}, []string{"resource"}),
+
+		rateLimitExceededTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "rate_limit_exceeded_total",
+			Help:      "Total number of rate limit exceeded events.",
+		}, []string{"resource"}),
 	}
 }
 
@@ -138,6 +153,17 @@ func (m *Metrics) RecordOptimisticConsumption(amount int) {
 
 func (m *Metrics) RecordFallbackHit(strategy string) {
 	m.fallbackHitsTotal.WithLabelValues(strategy).Inc()
+}
+
+func (m *Metrics) RecordRateLimitCheck(_, resource string, allowed bool, duration time.Duration) {
+	m.rateLimitCheckDuration.WithLabelValues(resource).Observe(duration.Seconds())
+	if !allowed {
+		m.rateLimitExceededTotal.WithLabelValues(resource).Inc()
+	}
+}
+
+func (m *Metrics) RecordRateLimitExceeded(_, resource string) {
+	m.rateLimitExceededTotal.WithLabelValues(resource).Inc()
 }
 
 // DefaultMetrics returns a Metrics implementation using the default Prometheus registerer.

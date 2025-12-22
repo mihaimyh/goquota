@@ -30,6 +30,12 @@ type Metrics interface {
 
 	// RecordFallbackHit records a successful fallback operation (strategy indicates which strategy succeeded)
 	RecordFallbackHit(strategy string)
+
+	// RecordRateLimitCheck records a rate limit check with duration
+	RecordRateLimitCheck(userID, resource string, allowed bool, duration time.Duration)
+
+	// RecordRateLimitExceeded records when a rate limit is exceeded
+	RecordRateLimitExceeded(userID, resource string)
 }
 
 // NoopMetrics is a no-op implementation of the Metrics interface.
@@ -44,3 +50,5 @@ func (n *NoopMetrics) RecordCircuitBreakerStateChange(_ string)                 
 func (n *NoopMetrics) RecordFallbackUsage(_ string)                              {}
 func (n *NoopMetrics) RecordOptimisticConsumption(_ int)                         {}
 func (n *NoopMetrics) RecordFallbackHit(_ string)                                {}
+func (n *NoopMetrics) RecordRateLimitCheck(_, _ string, _ bool, _ time.Duration) {}
+func (n *NoopMetrics) RecordRateLimitExceeded(_, _ string)                       {}

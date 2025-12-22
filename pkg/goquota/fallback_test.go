@@ -135,6 +135,15 @@ func (m *mockFallbackStorage) GetConsumptionRecord(_ context.Context, _ string) 
 	return nil, nil
 }
 
+//nolint:gocritic // Named return values would reduce readability here
+func (m *mockFallbackStorage) CheckRateLimit(_ context.Context, _ *RateLimitRequest) (bool, int, time.Time, error) {
+	return true, 100, time.Now().Add(time.Hour), nil
+}
+
+func (m *mockFallbackStorage) RecordRateLimitRequest(_ context.Context, _ *RateLimitRequest) error {
+	return nil
+}
+
 // mockMetrics is a mock metrics implementation for testing
 type mockMetrics struct {
 	fallbackUsageCount         int
@@ -166,6 +175,9 @@ func (m *mockMetrics) RecordOptimisticConsumption(amount int) {
 func (m *mockMetrics) RecordFallbackHit(strategy string) {
 	m.fallbackHits[strategy]++
 }
+
+func (m *mockMetrics) RecordRateLimitCheck(_, _ string, _ bool, _ time.Duration) {}
+func (m *mockMetrics) RecordRateLimitExceeded(_, _ string)                       {}
 
 // mockLogger is a mock logger implementation for testing
 type mockLogger struct{}

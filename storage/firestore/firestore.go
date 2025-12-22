@@ -556,6 +556,190 @@ func (s *Storage) GetConsumptionRecord(ctx context.Context, idempotencyKey strin
 	return record, nil
 }
 
+// CheckRateLimit implements goquota.Storage
+//
+//nolint:gocritic // Named return values would reduce readability here
+func (s *Storage) CheckRateLimit(ctx context.Context, req *goquota.RateLimitRequest) (bool, int, time.Time, error) {
+	if req == nil {
+		return false, 0, time.Time{}, fmt.Errorf("rate limit request is required")
+	}
+
+	doc := s.rateLimitDoc(req.UserID, req.Resource)
+	var allowed bool
+	var remaining int
+	var resetTime time.Time
+
+	err := s.client.RunTransaction(ctx, func(_ context.Context, tx *firestore.Transaction) error {
+		snap, err := tx.Get(doc)
+		if err != nil && status.Code(err) != codes.NotFound {
+			return err
+		}
+
+		switch req.Algorithm {
+		case "token_bucket":
+			return s.checkTokenBucket(tx, doc, snap, req, &allowed, &remaining, &resetTime)
+		case "sliding_window":
+			return s.checkSlidingWindow(ctx, tx, doc, snap, req, &allowed, &remaining, &resetTime)
+		default:
+			return fmt.Errorf("unknown rate limit algorithm: %s", req.Algorithm)
+		}
+	})
+
+	if err != nil {
+		return false, 0, time.Time{}, fmt.Errorf("failed to check rate limit: %w", err)
+	}
+
+	return allowed, remaining, resetTime, nil
+}
+
+func (s *Storage) checkTokenBucket(
+	tx *firestore.Transaction, doc *firestore.DocumentRef, snap *firestore.DocumentSnapshot,
+	req *goquota.RateLimitRequest, allowed *bool, remaining *int, resetTime *time.Time,
+) error {
+	burst := req.Burst
+	if burst <= 0 {
+		burst = req.Rate
+	}
+
+	tokens := burst
+	lastRefill := req.Now
+
+	if snap.Exists() {
+		data := snap.Data()
+		tokens = getInt(data, "tokens")
+		lastRefill = getTime(data, "lastRefill")
+		if lastRefill.IsZero() {
+			lastRefill = req.Now
+		}
+	}
+
+	// Refill tokens based on elapsed time
+	elapsed := req.Now.Sub(lastRefill)
+	if elapsed > 0 {
+		tokensToAdd := int(float64(req.Rate) * elapsed.Seconds() / req.Window.Seconds())
+		if tokensToAdd > 0 {
+			tokens = intMin(tokens+tokensToAdd, burst)
+			lastRefill = req.Now
+		}
+	}
+
+	// Check if we have tokens
+	if tokens <= 0 {
+		*allowed = false
+		*remaining = 0
+		// Calculate when next token will be available
+		*resetTime = lastRefill.Add(req.Window / time.Duration(req.Rate))
+	} else {
+		// Consume a token
+		tokens--
+		*allowed = true
+		*remaining = tokens
+
+		// Calculate reset time (when bucket will be full)
+		if tokens < burst {
+			tokensNeeded := burst - tokens
+			*resetTime = req.Now.Add(time.Duration(tokensNeeded) * req.Window / time.Duration(req.Rate))
+		} else {
+			*resetTime = req.Now.Add(req.Window)
+		}
+	}
+
+	// Update state
+	now := time.Now().UTC()
+	return tx.Set(doc, map[string]interface{}{
+		"tokens":     tokens,
+		"lastRefill": lastRefill,
+		"updatedAt":  now,
+	}, firestore.MergeAll)
+}
+
+func (s *Storage) checkSlidingWindow(
+	ctx context.Context, tx *firestore.Transaction, doc *firestore.DocumentRef,
+	_ *firestore.DocumentSnapshot, req *goquota.RateLimitRequest,
+	allowed *bool, remaining *int, resetTime *time.Time,
+) error {
+	// For sliding window, we need to query timestamps outside the transaction first
+	// Then use transaction to atomically add and verify
+	timestampsRef := doc.Collection("timestamps")
+	cutoff := req.Now.Add(-req.Window)
+
+	// Query timestamps within the window (outside transaction for read)
+	query := timestampsRef.Where("timestamp", ">", cutoff).OrderBy("timestamp", firestore.Asc).Limit(req.Rate + 1)
+	iter := query.Documents(ctx)
+	defer iter.Stop()
+
+	var timestamps []time.Time
+	var oldestTime time.Time
+	for {
+		docSnap, err := iter.Next()
+		if err != nil {
+			break
+		}
+		data := docSnap.Data()
+		if ts, ok := data["timestamp"].(time.Time); ok {
+			timestamps = append(timestamps, ts)
+			if oldestTime.IsZero() || ts.Before(oldestTime) {
+				oldestTime = ts
+			}
+		}
+	}
+
+	count := len(timestamps)
+
+	if count >= req.Rate {
+		*allowed = false
+		*remaining = 0
+		if !oldestTime.IsZero() {
+			*resetTime = oldestTime.Add(req.Window)
+		} else {
+			*resetTime = req.Now.Add(req.Window)
+		}
+		return nil
+	}
+
+	// Add current timestamp atomically in transaction
+	timestampDoc := timestampsRef.NewDoc()
+	err := tx.Set(timestampDoc, map[string]interface{}{
+		"timestamp": req.Now,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to record timestamp: %w", err)
+	}
+
+	*allowed = true
+	*remaining = req.Rate - count - 1
+
+	if !oldestTime.IsZero() {
+		*resetTime = oldestTime.Add(req.Window)
+	} else {
+		*resetTime = req.Now.Add(req.Window)
+	}
+
+	return nil
+}
+
+// RecordRateLimitRequest implements goquota.Storage
+func (s *Storage) RecordRateLimitRequest(_ context.Context, _ *goquota.RateLimitRequest) error {
+	// For sliding window, timestamps are already recorded in CheckRateLimit
+	// For token bucket, no additional recording is needed
+	// This method is a no-op for Firestore
+	return nil
+}
+
+// rateLimitDoc returns the Firestore document reference for rate limiting
+func (s *Storage) rateLimitDoc(userID, resource string) *firestore.DocumentRef {
+	docID := fmt.Sprintf("%s_%s", userID, resource)
+	return s.client.Collection("rate_limits").Doc(docID)
+}
+
+// intMin returns the minimum of two integers
+func intMin(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // usageDoc returns the Firestore document reference for usage tracking
 func (s *Storage) usageDoc(userID, resource string, period goquota.Period) *firestore.DocumentRef {
 	// Structure: billing_usage/{userID}/periods/{periodKey}_{resource}

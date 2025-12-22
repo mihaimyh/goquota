@@ -1,6 +1,9 @@
 package goquota
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 var (
 	// ErrQuotaExceeded is returned when quota limit is reached
@@ -29,4 +32,20 @@ var (
 
 	// ErrOptimisticLimitExceeded is returned when optimistic allowance limit is exceeded
 	ErrOptimisticLimitExceeded = errors.New("optimistic limit exceeded")
+
+	// ErrRateLimitExceeded is returned when rate limit is exceeded
+	ErrRateLimitExceeded = errors.New("rate limit exceeded")
 )
+
+// RateLimitExceededError provides detailed information about a rate limit exceeded error
+type RateLimitExceededError struct {
+	// Info contains rate limit information (remaining, reset time, limit)
+	Info *RateLimitInfo
+
+	// RetryAfter is the duration until the rate limit resets
+	RetryAfter time.Duration
+}
+
+func (e *RateLimitExceededError) Error() string {
+	return ErrRateLimitExceeded.Error()
+}

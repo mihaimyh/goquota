@@ -197,6 +197,118 @@ func (s *Storage) loadScripts() {
 		
 		return 'ok'
 	`)
+
+	// Token bucket rate limiting
+	s.scripts["tokenBucket"] = redis.NewScript(`
+		local key = KEYS[1]
+		local now = tonumber(ARGV[1])
+		local rate = tonumber(ARGV[2])
+		local window = tonumber(ARGV[3])
+		local burst = tonumber(ARGV[4])
+		local ttl = tonumber(ARGV[5])
+		
+		-- Get current state
+		local data = redis.call('HMGET', key, 'tokens', 'lastRefill')
+		local tokens = burst
+		local lastRefill = now
+		
+		if data[1] and data[2] then
+			tokens = tonumber(data[1]) or burst
+			lastRefill = tonumber(data[2]) or now
+		end
+		
+		-- Refill tokens based on elapsed time
+		local elapsed = now - lastRefill
+		if elapsed > 0 then
+			local tokensToAdd = math.floor(rate * elapsed / window)
+			if tokensToAdd > 0 then
+				tokens = math.min(tokens + tokensToAdd, burst)
+				lastRefill = now
+			end
+		end
+		
+		-- Check if we have tokens
+		local allowed = 1
+		local remaining = tokens
+		local resetTime = now + window
+		
+		if tokens <= 0 then
+			allowed = 0
+			remaining = 0
+			-- Calculate when next token will be available
+			resetTime = lastRefill + math.ceil(window / rate)
+		else
+			-- Consume a token
+			tokens = tokens - 1
+			remaining = tokens
+			
+			-- Calculate reset time (when bucket will be full)
+			if tokens < burst then
+				local tokensNeeded = burst - tokens
+				resetTime = now + math.ceil(tokensNeeded * window / rate)
+			end
+		end
+		
+		-- Update state
+		redis.call('HMSET', key, 'tokens', tokens, 'lastRefill', lastRefill)
+		if ttl > 0 then
+			redis.call('EXPIRE', key, ttl)
+		end
+		
+		return {allowed, remaining, resetTime}
+	`)
+
+	// Sliding window rate limiting
+	s.scripts["slidingWindow"] = redis.NewScript(`
+		local key = KEYS[1]
+		local now = tonumber(ARGV[1])
+		local limit = tonumber(ARGV[2])
+		local window = tonumber(ARGV[3])
+		local ttl = tonumber(ARGV[4])
+		
+		-- Remove timestamps outside the window
+		local cutoff = now - window
+		redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+		
+		-- Count current requests in window
+		local count = redis.call('ZCARD', key)
+		
+		local allowed = 1
+		local remaining = limit - count
+		local resetTime = now + window
+		
+		if count >= limit then
+			allowed = 0
+			remaining = 0
+			-- Get oldest timestamp still in window
+			local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+			if oldest and #oldest >= 2 then
+				local oldestTime = tonumber(oldest[2])
+				if oldestTime then
+					resetTime = oldestTime + window
+				end
+			end
+		else
+			-- Add current timestamp
+			redis.call('ZADD', key, now, now)
+			remaining = limit - count - 1
+			
+			-- Get oldest timestamp for reset time
+			local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+			if oldest and #oldest >= 2 then
+				local oldestTime = tonumber(oldest[2])
+				if oldestTime then
+					resetTime = oldestTime + window
+				end
+			end
+		end
+		
+		if ttl > 0 then
+			redis.call('EXPIRE', key, ttl)
+		end
+		
+		return {allowed, remaining, resetTime}
+	`)
 }
 
 // GetEntitlement implements goquota.Storage
@@ -689,6 +801,100 @@ func (s *Storage) refundKey(idempotencyKey string) string {
 // consumptionKey generates the Redis key for consumption records
 func (s *Storage) consumptionKey(idempotencyKey string) string {
 	return fmt.Sprintf("%sconsumption:%s", s.config.KeyPrefix, idempotencyKey)
+}
+
+// rateLimitKey generates the Redis key for rate limiting
+func (s *Storage) rateLimitKey(userID, resource string) string {
+	return fmt.Sprintf("%sratelimit:%s:%s", s.config.KeyPrefix, userID, resource)
+}
+
+// CheckRateLimit implements goquota.Storage
+//
+//nolint:gocritic // Named return values would reduce readability here
+func (s *Storage) CheckRateLimit(ctx context.Context, req *goquota.RateLimitRequest) (bool, int, time.Time, error) {
+	if req == nil {
+		return false, 0, time.Time{}, fmt.Errorf("rate limit request is required")
+	}
+
+	key := s.rateLimitKey(req.UserID, req.Resource)
+	nowUnix := req.Now.Unix()
+	ttl := int64(req.Window.Seconds() * 2) // Store for 2x window to allow cleanup
+
+	var result interface{}
+	var err error
+
+	switch req.Algorithm {
+	case "token_bucket":
+		burst := req.Burst
+		if burst <= 0 {
+			burst = req.Rate
+		}
+		result, err = s.scripts["tokenBucket"].Run(
+			ctx,
+			s.client,
+			[]string{key},
+			nowUnix,
+			req.Rate,
+			int64(req.Window.Seconds()),
+			burst,
+			ttl,
+		).Result()
+	case "sliding_window":
+		result, err = s.scripts["slidingWindow"].Run(
+			ctx,
+			s.client,
+			[]string{key},
+			nowUnix,
+			req.Rate,
+			int64(req.Window.Seconds()),
+			ttl,
+		).Result()
+	default:
+		return false, 0, time.Time{}, fmt.Errorf("unknown rate limit algorithm: %s", req.Algorithm)
+	}
+
+	if err != nil {
+		return false, 0, time.Time{}, fmt.Errorf("failed to execute rate limit script: %w", err)
+	}
+
+	// Type assert result to []interface{}
+	resultSlice, ok := result.([]interface{})
+	if !ok {
+		return false, 0, time.Time{}, fmt.Errorf("unexpected result type from rate limit script: %T", result)
+	}
+
+	// Parse result: {allowed, remaining, resetTime}
+	if len(resultSlice) != 3 {
+		return false, 0, time.Time{}, fmt.Errorf("unexpected result format from rate limit script")
+	}
+
+	allowedInt, ok := resultSlice[0].(int64)
+	if !ok {
+		return false, 0, time.Time{}, fmt.Errorf("invalid allowed value")
+	}
+	allowed := allowedInt == 1
+
+	remainingInt, ok := resultSlice[1].(int64)
+	if !ok {
+		return false, 0, time.Time{}, fmt.Errorf("invalid remaining value")
+	}
+	remaining := int(remainingInt)
+
+	resetTimeInt, ok := resultSlice[2].(int64)
+	if !ok {
+		return false, 0, time.Time{}, fmt.Errorf("invalid reset time value")
+	}
+	resetTime := time.Unix(resetTimeInt, 0).UTC()
+
+	return allowed, remaining, resetTime, nil
+}
+
+// RecordRateLimitRequest implements goquota.Storage
+func (s *Storage) RecordRateLimitRequest(_ context.Context, _ *goquota.RateLimitRequest) error {
+	// For sliding window, the timestamp is already recorded in CheckRateLimit
+	// This method is a no-op for Redis since we use sorted sets which handle it atomically
+	// For other algorithms, this is also a no-op
+	return nil
 }
 
 // Close closes the Redis client connection

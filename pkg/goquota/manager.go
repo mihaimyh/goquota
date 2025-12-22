@@ -25,6 +25,7 @@ type Manager struct {
 	metrics          Metrics
 	logger           Logger
 	fallbackStrategy FallbackStrategy
+	rateLimiter      RateLimiter
 	// singleflight groups to prevent cache stampede
 	entitlementGroup singleflight.Group
 	usageGroup       singleflight.Group
@@ -45,6 +46,7 @@ func NewManager(storage Storage, config *Config) (*Manager, error) {
 	logger := initializeLogger(config.Logger)
 	currentStorage := initializeCircuitBreaker(storage, config.CircuitBreakerConfig, metrics)
 	fallbackStrategy := initializeFallback(config, cache, metrics, logger)
+	rateLimiter := NewRateLimiter(currentStorage, false) // Use storage-backed rate limiter
 
 	return &Manager{
 		storage:          currentStorage,
@@ -53,6 +55,7 @@ func NewManager(storage Storage, config *Config) (*Manager, error) {
 		metrics:          metrics,
 		logger:           logger,
 		fallbackStrategy: fallbackStrategy,
+		rateLimiter:      rateLimiter,
 	}, nil
 }
 
@@ -410,6 +413,28 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 
 	default:
 		return 0, ErrInvalidPeriod
+	}
+
+	// Check rate limit before quota consumption
+	allowed, info, err := m.checkRateLimit(ctx, userID, resource, tier)
+	if err != nil {
+		// If storage error, allow request (graceful degradation)
+		// Log error but don't block quota consumption
+		m.logger.Warn("rate limit check failed, allowing request",
+			Field{"userId", userID},
+			Field{"resource", resource},
+			Field{"error", err},
+		)
+	} else if !allowed {
+		// Rate limit exceeded
+		retryAfter := time.Until(info.ResetTime)
+		if retryAfter < 0 {
+			retryAfter = 0
+		}
+		return 0, &RateLimitExceededError{
+			Info:       info,
+			RetryAfter: retryAfter,
+		}
 	}
 
 	// Get limit for tier
@@ -872,6 +897,40 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 	}
 
 	return err
+}
+
+// checkRateLimit checks if a request is allowed based on rate limiting configuration
+func (m *Manager) checkRateLimit(ctx context.Context, userID, resource, tier string) (bool, *RateLimitInfo, error) {
+	// Get tier configuration
+	tierConfig, ok := m.config.Tiers[tier]
+	if !ok {
+		// Fall back to default tier
+		tierConfig, ok = m.config.Tiers[m.config.DefaultTier]
+		if !ok {
+			// No tier config, no rate limiting
+			return true, nil, nil
+		}
+	}
+
+	// Check if rate limiting is configured for this resource
+	rateLimitConfig, ok := tierConfig.RateLimits[resource]
+	if !ok {
+		// No rate limit configured for this resource
+		return true, nil, nil
+	}
+
+	// Check rate limit
+	start := time.Now()
+	allowed, info, err := m.rateLimiter.Allow(ctx, userID, resource, rateLimitConfig)
+	duration := time.Since(start)
+
+	// Record metrics
+	m.metrics.RecordRateLimitCheck(userID, resource, allowed, duration)
+	if !allowed {
+		m.metrics.RecordRateLimitExceeded(userID, resource)
+	}
+
+	return allowed, info, err
 }
 
 // getLimitForResource returns the quota limit for a resource based on tier and period type

@@ -11,22 +11,44 @@ import (
 	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
+// tokenBucketState represents the state of a token bucket
+type tokenBucketState struct {
+	mu         sync.Mutex
+	tokens     int
+	lastRefill time.Time
+	capacity   int
+	refillRate int
+	window     time.Duration
+}
+
+// slidingWindowState represents the state of a sliding window
+type slidingWindowState struct {
+	mu         sync.Mutex
+	timestamps []time.Time
+	window     time.Duration
+	limit      int
+}
+
 // Storage implements goquota.Storage using in-memory maps
 type Storage struct {
-	mu           sync.RWMutex
-	entitlements map[string]*goquota.Entitlement
-	usage        map[string]*goquota.Usage
-	refunds      map[string]*goquota.RefundRecord      // keyed by idempotency key
-	consumptions map[string]*goquota.ConsumptionRecord // keyed by idempotency key
+	mu             sync.RWMutex
+	entitlements   map[string]*goquota.Entitlement
+	usage          map[string]*goquota.Usage
+	refunds        map[string]*goquota.RefundRecord      // keyed by idempotency key
+	consumptions   map[string]*goquota.ConsumptionRecord // keyed by idempotency key
+	tokenBuckets   map[string]*tokenBucketState          // keyed by userID:resource
+	slidingWindows map[string]*slidingWindowState        // keyed by userID:resource
 }
 
 // New creates a new in-memory storage adapter
 func New() *Storage {
 	return &Storage{
-		entitlements: make(map[string]*goquota.Entitlement),
-		usage:        make(map[string]*goquota.Usage),
-		refunds:      make(map[string]*goquota.RefundRecord),
-		consumptions: make(map[string]*goquota.ConsumptionRecord),
+		entitlements:   make(map[string]*goquota.Entitlement),
+		usage:          make(map[string]*goquota.Usage),
+		refunds:        make(map[string]*goquota.RefundRecord),
+		consumptions:   make(map[string]*goquota.ConsumptionRecord),
+		tokenBuckets:   make(map[string]*tokenBucketState),
+		slidingWindows: make(map[string]*slidingWindowState),
 	}
 }
 
@@ -299,6 +321,160 @@ func (s *Storage) GetConsumptionRecord(_ context.Context, idempotencyKey string)
 	return &recordCopy, nil
 }
 
+// CheckRateLimit implements goquota.Storage
+//
+//nolint:gocritic // Named return values would reduce readability here
+func (s *Storage) CheckRateLimit(_ context.Context, req *goquota.RateLimitRequest) (bool, int, time.Time, error) {
+	if req == nil {
+		return false, 0, time.Time{}, fmt.Errorf("rate limit request is required")
+	}
+
+	key := rateLimitKey(req.UserID, req.Resource)
+
+	switch req.Algorithm {
+	case "token_bucket":
+		return s.checkTokenBucket(key, req)
+	case "sliding_window":
+		return s.checkSlidingWindow(key, req)
+	default:
+		return false, 0, time.Time{}, fmt.Errorf("unknown rate limit algorithm: %s", req.Algorithm)
+	}
+}
+
+//nolint:gocritic // Named return values would reduce readability here
+func (s *Storage) checkTokenBucket(key string, req *goquota.RateLimitRequest) (bool, int, time.Time, error) {
+	burst := req.Burst
+	if burst <= 0 {
+		burst = req.Rate
+	}
+
+	s.mu.Lock()
+	bucket, exists := s.tokenBuckets[key]
+	if !exists {
+		bucket = &tokenBucketState{
+			tokens:     burst,
+			lastRefill: req.Now,
+			capacity:   burst,
+			refillRate: req.Rate,
+			window:     req.Window,
+		}
+		s.tokenBuckets[key] = bucket
+	}
+	s.mu.Unlock()
+
+	bucket.mu.Lock()
+	defer bucket.mu.Unlock()
+
+	// Refill tokens based on elapsed time
+	elapsed := req.Now.Sub(bucket.lastRefill)
+	if elapsed > 0 {
+		tokensToAdd := int(float64(bucket.refillRate) * elapsed.Seconds() / bucket.window.Seconds())
+		if tokensToAdd > 0 {
+			bucket.tokens = intMin(bucket.tokens+tokensToAdd, bucket.capacity)
+			bucket.lastRefill = req.Now
+		}
+	}
+
+	// Check if we have tokens
+	if bucket.tokens <= 0 {
+		// Calculate when next token will be available
+		nextTokenTime := bucket.lastRefill.Add(bucket.window / time.Duration(bucket.refillRate))
+		if nextTokenTime.Before(req.Now) {
+			nextTokenTime = req.Now.Add(bucket.window / time.Duration(bucket.refillRate))
+		}
+		return false, 0, nextTokenTime, nil
+	}
+
+	// Consume a token
+	bucket.tokens--
+
+	// Calculate reset time (when bucket will be full again)
+	resetTime := req.Now.Add(bucket.window)
+	if bucket.tokens < bucket.capacity {
+		// Calculate time until full
+		tokensNeeded := bucket.capacity - bucket.tokens
+		timeToFull := time.Duration(float64(tokensNeeded) * float64(bucket.window) / float64(bucket.refillRate))
+		resetTime = req.Now.Add(timeToFull)
+	}
+
+	return true, bucket.tokens, resetTime, nil
+}
+
+//nolint:gocritic // Named return values would reduce readability here
+func (s *Storage) checkSlidingWindow(key string, req *goquota.RateLimitRequest) (bool, int, time.Time, error) {
+	s.mu.Lock()
+	window, exists := s.slidingWindows[key]
+	if !exists {
+		window = &slidingWindowState{
+			timestamps: make([]time.Time, 0),
+			window:     req.Window,
+			limit:      req.Rate,
+		}
+		s.slidingWindows[key] = window
+	}
+	s.mu.Unlock()
+
+	window.mu.Lock()
+	defer window.mu.Unlock()
+
+	// Remove timestamps outside the window
+	cutoff := req.Now.Add(-window.window)
+	validStart := 0
+	for i, ts := range window.timestamps {
+		if ts.After(cutoff) {
+			validStart = i
+			break
+		}
+	}
+	window.timestamps = window.timestamps[validStart:]
+
+	// Check if we're within the limit
+	if len(window.timestamps) >= window.limit {
+		// Find the oldest timestamp still in the window
+		oldestInWindow := window.timestamps[0]
+		resetTime := oldestInWindow.Add(window.window)
+		return false, 0, resetTime, nil
+	}
+
+	// Add current timestamp
+	window.timestamps = append(window.timestamps, req.Now)
+
+	remaining := window.limit - len(window.timestamps)
+	resetTime := req.Now.Add(window.window)
+	if len(window.timestamps) > 0 {
+		// Reset time is when the oldest request expires
+		oldest := window.timestamps[0]
+		resetTime = oldest.Add(window.window)
+	}
+
+	return true, remaining, resetTime, nil
+}
+
+// RecordRateLimitRequest implements goquota.Storage
+func (s *Storage) RecordRateLimitRequest(_ context.Context, req *goquota.RateLimitRequest) error {
+	if req == nil {
+		return fmt.Errorf("rate limit request is required")
+	}
+
+	// For sliding window, timestamps are already recorded in CheckRateLimit
+	// For token bucket, no additional recording is needed
+	// This method is a no-op for Memory storage
+	return nil
+}
+
+// rateLimitKey generates a unique key for rate limiting
+func rateLimitKey(userID, resource string) string {
+	return fmt.Sprintf("%s:%s", userID, resource)
+}
+
+// intMin returns the minimum of two integers
+func intMin(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // Clear removes all data (useful for testing)
 func (s *Storage) Clear(_ context.Context) error {
 	s.mu.Lock()
@@ -308,5 +484,7 @@ func (s *Storage) Clear(_ context.Context) error {
 	s.usage = make(map[string]*goquota.Usage)
 	s.refunds = make(map[string]*goquota.RefundRecord)
 	s.consumptions = make(map[string]*goquota.ConsumptionRecord)
+	s.tokenBuckets = make(map[string]*tokenBucketState)
+	s.slidingWindows = make(map[string]*slidingWindowState)
 	return nil
 }

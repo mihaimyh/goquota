@@ -60,6 +60,15 @@ func (m *mockStorage) GetConsumptionRecord(_ context.Context, _ string) (*Consum
 	return m.consumptionRecord, nil
 }
 
+//nolint:gocritic // Named return values would reduce readability here
+func (m *mockStorage) CheckRateLimit(_ context.Context, _ *RateLimitRequest) (bool, int, time.Time, error) {
+	return true, 100, time.Now().Add(time.Hour), nil
+}
+
+func (m *mockStorage) RecordRateLimitRequest(_ context.Context, _ *RateLimitRequest) error {
+	return nil
+}
+
 // Phase 2: Circuit Breaker Storage Tests
 
 func TestCircuitBreakerStorage_SetUsage_OpenCircuit(t *testing.T) {
