@@ -70,8 +70,27 @@ func NewManager(storage Storage, config Config) (*Manager, error) {
 		logger = &NoopLogger{}
 	}
 
+	// Initialize circuit breaker
+	currentStorage := storage
+	if config.CircuitBreakerConfig != nil && config.CircuitBreakerConfig.Enabled {
+		if config.CircuitBreakerConfig.FailureThreshold == 0 {
+			config.CircuitBreakerConfig.FailureThreshold = 5
+		}
+		if config.CircuitBreakerConfig.ResetTimeout == 0 {
+			config.CircuitBreakerConfig.ResetTimeout = 30 * time.Second
+		}
+		cb := NewDefaultCircuitBreaker(
+			config.CircuitBreakerConfig.FailureThreshold,
+			config.CircuitBreakerConfig.ResetTimeout,
+			func(state CircuitBreakerState) {
+				metrics.RecordCircuitBreakerStateChange(string(state))
+			},
+		)
+		currentStorage = NewCircuitBreakerStorage(storage, cb)
+	}
+
 	return &Manager{
-		storage: storage,
+		storage: currentStorage,
 		config:  config,
 		cache:   cache,
 		metrics: metrics,

@@ -87,6 +87,18 @@ type CacheConfig struct {
 	MaxUsage int
 }
 
+// CircuitBreakerConfig holds circuit breaker configuration
+type CircuitBreakerConfig struct {
+	// Enabled determines if the circuit breaker is active
+	Enabled bool
+
+	// FailureThreshold is the number of consecutive failures before opening the circuit (default: 5)
+	FailureThreshold int
+
+	// ResetTimeout is the duration to wait before transitioning from Open to Half-Open (default: 30 seconds)
+	ResetTimeout time.Duration
+}
+
 // Config holds quota manager configuration
 type Config struct {
 	// Tiers maps tier names to their quota limits
@@ -110,6 +122,9 @@ type Config struct {
 
 	// WarningHandler is called when a warning threshold is crossed (optional)
 	WarningHandler WarningHandler
+
+	// CircuitBreakerConfig configures the circuit breaker
+	CircuitBreakerConfig *CircuitBreakerConfig
 }
 
 // WarningHandler is the interface for handling quota warnings
