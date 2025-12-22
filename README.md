@@ -20,7 +20,7 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Soft Limits & Warnings** - Trigger callbacks when usage approaches limits (e.g. 80%)
 - **Fallback Strategies** - Graceful degradation when storage is unavailable (cache, optimistic, secondary storage)
 - **Observability** - Built-in Prometheus metrics and structured logging
-- **HTTP Middlewares** - Easy integration with standard `net/http` servers with rate limit headers
+- **HTTP Middlewares** - Easy integration with standard `net/http` servers and Gin framework with rate limit headers
 
 ## Installation
 
@@ -368,6 +368,100 @@ http.Handle("/api/endpoint", quotaMiddleware(yourHandler))
 
 The middleware automatically handles both quota limits and rate limits. When a rate limit is exceeded, it returns `429 Too Many Requests` with appropriate headers.
 
+### Gin Framework Middleware
+
+Native middleware for the [Gin](https://github.com/gin-gonic/gin) web framework.
+
+```go
+import (
+    "github.com/gin-gonic/gin"
+    ginMiddleware "github.com/mihaimyh/goquota/middleware/gin"
+)
+
+// Create Gin router
+r := gin.Default()
+
+// Mock authentication middleware (sets UserID in context)
+r.Use(func(c *gin.Context) {
+    userID := c.GetHeader("X-User-ID")
+    if userID != "" {
+        c.Set("UserID", userID) // Set in context for quota middleware
+    }
+    c.Next()
+})
+
+// Apply quota middleware
+api := r.Group("/api")
+api.Use(ginMiddleware.Middleware(ginMiddleware.Config{
+    Manager:     manager,
+    GetUserID:   ginMiddleware.FromContext("UserID"), // Recommended: Extract from context (set by auth middleware)
+    GetResource: ginMiddleware.FixedResource("api_calls"),
+    GetAmount:   ginMiddleware.FixedAmount(1),
+    PeriodType:  goquota.PeriodTypeDaily,
+}))
+
+api.GET("/data", func(c *gin.Context) {
+    c.String(200, "Data retrieved successfully")
+})
+```
+
+**Framework-Specific Extractors:**
+- `FromContext(key)` - Extract from Gin context (recommended for auth middleware integration)
+- `FromHeader(headerName)` - Extract from HTTP header
+- `FromParam(paramName)` - Extract from route parameter
+- `FromQuery(queryName)` - Extract from query parameter
+
+**Custom Error Responses:**
+The middleware supports callback-based error handling for complete customization:
+
+```go
+api.Use(ginMiddleware.Middleware(ginMiddleware.Config{
+    Manager:     manager,
+    GetUserID:   ginMiddleware.FromContext("UserID"),
+    GetResource: ginMiddleware.FixedResource("api_calls"),
+    GetAmount:   ginMiddleware.FixedAmount(1),
+    PeriodType:  goquota.PeriodTypeDaily,
+    // Custom error responses
+    OnQuotaExceeded: func(c *gin.Context, usage *goquota.Usage) {
+        c.JSON(http.StatusPaymentRequired, gin.H{
+            "error": gin.H{
+                "code":    "QUOTA_EXCEEDED",
+                "message": "Monthly quota exceeded",
+                "details": gin.H{
+                    "used":  usage.Used,
+                    "limit": usage.Limit,
+                },
+            },
+        })
+    },
+    OnRateLimitExceeded: func(c *gin.Context, retryAfter time.Duration, info *goquota.RateLimitInfo) {
+        c.JSON(http.StatusTooManyRequests, gin.H{
+            "error":      "Rate limit exceeded",
+            "retry_after": retryAfter.Seconds(),
+        })
+    },
+}))
+```
+
+**Dynamic Cost Calculation:**
+Calculate quota consumption based on request type:
+
+```go
+api.Use(ginMiddleware.Middleware(ginMiddleware.Config{
+    Manager:     manager,
+    GetUserID:   ginMiddleware.FromContext("UserID"),
+    GetResource: ginMiddleware.FixedResource("api_calls"),
+    GetAmount: ginMiddleware.DynamicCost(func(c *gin.Context) int {
+        // POST requests cost 5, GET requests cost 1
+        if c.Request.Method == "POST" {
+            return 5
+        }
+        return 1
+    }),
+    PeriodType: goquota.PeriodTypeDaily,
+}))
+```
+
 ## Anniversary-Based Billing & Proration
 
 `goquota` is designed for real-world subscription billing:
@@ -385,6 +479,7 @@ See the [examples](examples/) directory:
 - [Redis Integration](examples/redis/)
 - [Firestore Integration](examples/firestore/)
 - [HTTP Server](examples/http-server/)
+- [Gin Framework](examples/gin/)
 - [Fallback Strategies](examples/fallback/)
 - [Rate Limiting](examples/rate-limiting/)
 
