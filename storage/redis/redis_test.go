@@ -370,7 +370,6 @@ func TestStorage_ApplyTierChange(t *testing.T) {
 		}
 
 		// Apply tier change
-		// Apply tier change
 		tierReq := &goquota.TierChangeRequest{
 			UserID:      "user1",
 			Resource:    "audio_seconds",
@@ -396,6 +395,153 @@ func TestStorage_ApplyTierChange(t *testing.T) {
 		}
 		if usage.Tier != "pro" {
 			t.Errorf("Expected tier=pro, got %s", usage.Tier)
+		}
+	})
+}
+
+func TestStorage_RefundQuota(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.Close()
+
+	storage, err := New(client, DefaultConfig())
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:   time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC),
+		Type:  goquota.PeriodTypeMonthly,
+	}
+
+	t.Run("refund quota successfully", func(t *testing.T) {
+		userID := "refund_user_1"
+		resource := "api_calls"
+
+		// 1. Consume 100
+		_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:   userID,
+			Resource: resource,
+			Amount:   100,
+			Tier:     "pro",
+			Period:   period,
+			Limit:    1000,
+		})
+		if err != nil {
+			t.Fatalf("Initial ConsumeQuota failed: %v", err)
+		}
+
+		// 2. Refund 50
+		req := &goquota.RefundRequest{
+			UserID:         userID,
+			Resource:       resource,
+			Amount:         50,
+			PeriodType:     goquota.PeriodTypeMonthly,
+			Period:         period,
+			IdempotencyKey: "refund_id_1",
+			Reason:         "test refund",
+		}
+
+		if err := storage.RefundQuota(ctx, req); err != nil {
+			t.Fatalf("RefundQuota failed: %v", err)
+		}
+
+		// 3. Verify usage is 50
+		usage, err := storage.GetUsage(ctx, userID, resource, period)
+		if err != nil {
+			t.Fatalf("GetUsage failed: %v", err)
+		}
+		if usage.Used != 50 {
+			t.Errorf("Expected used=50 after refund, got %d", usage.Used)
+		}
+
+		// 4. Verify refund record exists
+		record, err := storage.GetRefundRecord(ctx, "refund_id_1")
+		if err != nil {
+			t.Fatalf("GetRefundRecord failed: %v", err)
+		}
+		if record == nil {
+			t.Fatal("Refund record not found")
+		}
+		if record.Amount != 50 {
+			t.Errorf("Refund record amount mismatch: got %d, want 50", record.Amount)
+		}
+	})
+
+	t.Run("idempotency check", func(t *testing.T) {
+		userID := "refund_user_2"
+		resource := "api_calls"
+
+		// 1. Consume 100
+		_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:   userID,
+			Resource: resource,
+			Amount:   100,
+			Tier:     "pro",
+			Period:   period,
+			Limit:    1000,
+		})
+		if err != nil {
+			t.Fatalf("ConsumeQuota failed: %v", err)
+		}
+
+		// 2. First Refund
+		req := &goquota.RefundRequest{
+			UserID:         userID,
+			Resource:       resource,
+			Amount:         10,
+			PeriodType:     goquota.PeriodTypeMonthly,
+			Period:         period,
+			IdempotencyKey: "refund_unique_key",
+		}
+		if err := storage.RefundQuota(ctx, req); err != nil {
+			t.Fatalf("First RefundQuota failed: %v", err)
+		}
+
+		// 3. Second Refund (Same Key)
+		if err := storage.RefundQuota(ctx, req); err != nil {
+			t.Fatalf("Duplicate RefundQuota failed (should succeed silently): %v", err)
+		}
+
+		// 4. Verify usage decreased only once (100 - 10 = 90)
+		usage, _ := storage.GetUsage(ctx, userID, resource, period)
+		if usage.Used != 90 {
+			t.Errorf("Expected used=90 after idempotent refund, got %d", usage.Used)
+		}
+	})
+
+	t.Run("refund exceeds usage (full refund to 0)", func(t *testing.T) {
+		userID := "refund_user_3"
+		resource := "api_calls"
+
+		// 1. Consume 50
+		storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:   userID,
+			Resource: resource,
+			Amount:   50,
+			Tier:     "pro",
+			Period:   period,
+			Limit:    1000,
+		})
+
+		// 2. Refund 100 (more than used)
+		req := &goquota.RefundRequest{
+			UserID:         userID,
+			Resource:       resource,
+			Amount:         100,
+			PeriodType:     goquota.PeriodTypeMonthly,
+			Period:         period,
+			IdempotencyKey: "refund_over",
+		}
+		if err := storage.RefundQuota(ctx, req); err != nil {
+			t.Fatalf("RefundQuota failed: %v", err)
+		}
+
+		// 3. Verify usage is 0, not negative
+		usage, _ := storage.GetUsage(ctx, userID, resource, period)
+		if usage.Used != 0 {
+			t.Errorf("Expected used=0 (clamped), got %d", usage.Used)
 		}
 	})
 }
