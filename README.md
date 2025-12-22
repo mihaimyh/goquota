@@ -17,6 +17,7 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Idempotency Keys** - Prevent double-charging on retries with client-provided idempotency keys
 - **Refund Support** - Gracefully handle failed operations with idempotency and audit trails
 - **Soft Limits & Warnings** - Trigger callbacks when usage approaches limits (e.g. 80%)
+- **Fallback Strategies** - Graceful degradation when storage is unavailable (cache, optimistic, secondary storage)
 - **Observability** - Built-in Prometheus metrics and structured logging
 - **HTTP Middlewares** - Easy integration with standard `net/http` servers
 
@@ -196,6 +197,45 @@ manager.SetWarningCallback(func(ctx context.Context, userID, resource string, pc
 })
 ```
 
+### Fallback Strategies
+
+Enable graceful degradation when storage is unavailable. Supports multiple fallback strategies that can be combined.
+
+```go
+import (
+    "time"
+    "github.com/mihaimyh/goquota/pkg/goquota"
+    "github.com/mihaimyh/goquota/storage/memory"
+)
+
+// Configure fallback strategies
+config := goquota.Config{
+    // ... other config ...
+    CacheConfig: &goquota.CacheConfig{
+        Enabled: true,
+        EntitlementTTL: 5 * time.Minute,
+        UsageTTL: 30 * time.Second,
+    },
+    FallbackConfig: &goquota.FallbackConfig{
+        Enabled:                    true,
+        FallbackToCache:            true,  // Use cached data when storage fails
+        OptimisticAllowance:        true,  // Allow optimistic consumption
+        OptimisticAllowancePercentage: 10.0, // Up to 10% of quota
+        SecondaryStorage:           secondaryStorage, // Optional secondary storage
+        MaxStaleness:               5 * time.Minute, // Max cache age
+    },
+}
+
+manager, _ := goquota.NewManager(primaryStorage, &config)
+```
+
+**Available Strategies:**
+- **Cache Fallback**: Falls back to cached data when storage fails (validates staleness)
+- **Optimistic Allowance**: Allows quota consumption optimistically up to a configurable percentage
+- **Secondary Storage**: Falls back to a secondary storage backend (works with any Storage implementation)
+
+Fallback strategies are tried in order when storage failures occur, enabling continued operation during outages.
+
 ### Metrics
 
 The library exposes Prometheus metrics by default via the `metrics` package.
@@ -203,6 +243,9 @@ The library exposes Prometheus metrics by default via the `metrics` package.
 - `goquota_ops_total{operation="consume", status="success"}`
 - `goquota_ops_latency_seconds`
 - `goquota_usage_ratio`
+- `goquota_fallback_usage_total{trigger="circuit_open"}`
+- `goquota_optimistic_consumption_total`
+- `goquota_fallback_hits_total{strategy="cache"}`
 
 ## HTTP Middleware
 
@@ -246,6 +289,7 @@ See the [examples](examples/) directory:
 - [Redis Integration](examples/redis/)
 - [Firestore Integration](examples/firestore/)
 - [HTTP Server](examples/http-server/)
+- [Fallback Strategies](examples/fallback/)
 
 ## API Reference
 
