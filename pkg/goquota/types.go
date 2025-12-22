@@ -99,6 +99,54 @@ type CircuitBreakerConfig struct {
 	ResetTimeout time.Duration
 }
 
+// FallbackConfig holds fallback strategy configuration
+type FallbackConfig struct {
+	// Enabled determines if fallback strategies are active
+	Enabled bool
+
+	// FallbackToCache enables falling back to cached data when storage fails
+	FallbackToCache bool
+
+	// OptimisticAllowance enables optimistic quota consumption when storage is unavailable
+	OptimisticAllowance bool
+
+	// OptimisticAllowancePercentage is the maximum percentage of quota to allow optimistically (default: 10%)
+	// For example, if limit is 1000 and percentage is 10%, up to 100 units can be consumed optimistically
+	OptimisticAllowancePercentage float64
+
+	// SecondaryStorage is an optional secondary storage backend to use when primary storage fails
+	// If nil, secondary storage fallback is disabled
+	SecondaryStorage Storage
+
+	// ManualOverrideMode enables manual override mode (for future use)
+	ManualOverrideMode bool
+
+	// MaxStaleness is the maximum age of cached data to use for fallback (default: 5 minutes)
+	// Cached data older than this will not be used for fallback
+	MaxStaleness time.Duration
+}
+
+// FallbackStrategy defines the interface for fallback strategies
+// Fallback strategies provide degraded mode operation when storage is unavailable
+type FallbackStrategy interface {
+	// ShouldFallback determines if an error warrants using fallback strategies
+	// Returns true if the error indicates storage unavailability (e.g., circuit open, network error)
+	// Returns false for business logic errors (e.g., quota exceeded, invalid tier)
+	ShouldFallback(err error) bool
+
+	// GetFallbackUsage attempts to retrieve usage data from fallback sources
+	// Returns usage data if available from fallback, or error if fallback unavailable
+	GetFallbackUsage(ctx context.Context, userID, resource string, period Period) (*Usage, error)
+
+	// GetFallbackEntitlement attempts to retrieve entitlement data from fallback sources
+	// Returns entitlement data if available from fallback, or error if fallback unavailable
+	GetFallbackEntitlement(ctx context.Context, userID string) (*Entitlement, error)
+
+	// AllowOptimisticConsumption checks if optimistic consumption is allowed for the given usage and amount
+	// Returns true if the consumption can be allowed optimistically (within configured limits)
+	AllowOptimisticConsumption(usage *Usage, amount int) bool
+}
+
 // Config holds quota manager configuration
 type Config struct {
 	// Tiers maps tier names to their quota limits
@@ -128,6 +176,9 @@ type Config struct {
 
 	// IdempotencyKeyTTL is the TTL for idempotency keys (default: 24 hours)
 	IdempotencyKeyTTL time.Duration
+
+	// FallbackConfig configures fallback strategies for degraded mode operation
+	FallbackConfig *FallbackConfig
 }
 
 // WarningHandler is the interface for handling quota warnings

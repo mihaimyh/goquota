@@ -21,6 +21,15 @@ type Metrics interface {
 
 	// RecordCircuitBreakerStateChange records a circuit breaker state change.
 	RecordCircuitBreakerStateChange(state string)
+
+	// RecordFallbackUsage records that fallback was used (trigger indicates why, e.g., "circuit_open", "storage_error")
+	RecordFallbackUsage(trigger string)
+
+	// RecordOptimisticConsumption records an optimistic quota consumption
+	RecordOptimisticConsumption(amount int)
+
+	// RecordFallbackHit records a successful fallback operation (strategy indicates which strategy succeeded)
+	RecordFallbackHit(strategy string)
 }
 
 // NoopMetrics is a no-op implementation of the Metrics interface.
@@ -32,3 +41,6 @@ func (n *NoopMetrics) RecordCacheHit(_ string)                                  
 func (n *NoopMetrics) RecordCacheMiss(_ string)                                  {}
 func (n *NoopMetrics) RecordStorageOperation(_ string, _ time.Duration, _ error) {}
 func (n *NoopMetrics) RecordCircuitBreakerStateChange(_ string)                  {}
+func (n *NoopMetrics) RecordFallbackUsage(_ string)                              {}
+func (n *NoopMetrics) RecordOptimisticConsumption(_ int)                         {}
+func (n *NoopMetrics) RecordFallbackHit(_ string)                                {}

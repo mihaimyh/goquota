@@ -20,4 +20,13 @@ var (
 
 	// ErrInvalidPeriod is returned for invalid period type
 	ErrInvalidPeriod = errors.New("invalid period")
+
+	// ErrFallbackUnavailable is returned when fallback strategy is unavailable
+	ErrFallbackUnavailable = errors.New("fallback unavailable")
+
+	// ErrStaleCache is returned when cached data is too stale for fallback
+	ErrStaleCache = errors.New("stale cache")
+
+	// ErrOptimisticLimitExceeded is returned when optimistic allowance limit is exceeded
+	ErrOptimisticLimitExceeded = errors.New("optimistic limit exceeded")
 )

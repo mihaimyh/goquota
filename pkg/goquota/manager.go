@@ -19,11 +19,12 @@ func WithWarningHandler(ctx context.Context, handler WarningHandler) context.Con
 
 // Manager manages quota consumption and tracking across multiple resources and time periods
 type Manager struct {
-	storage Storage
-	config  Config
-	cache   Cache
-	metrics Metrics
-	logger  Logger
+	storage          Storage
+	config           Config
+	cache            Cache
+	metrics          Metrics
+	logger           Logger
+	fallbackStrategy FallbackStrategy
 	// singleflight groups to prevent cache stampede
 	entitlementGroup singleflight.Group
 	usageGroup       singleflight.Group
@@ -43,13 +44,15 @@ func NewManager(storage Storage, config *Config) (*Manager, error) {
 	metrics := initializeMetrics(config.Metrics)
 	logger := initializeLogger(config.Logger)
 	currentStorage := initializeCircuitBreaker(storage, config.CircuitBreakerConfig, metrics)
+	fallbackStrategy := initializeFallback(config, cache, metrics, logger)
 
 	return &Manager{
-		storage: currentStorage,
-		config:  *config,
-		cache:   cache,
-		metrics: metrics,
-		logger:  logger,
+		storage:          currentStorage,
+		config:           *config,
+		cache:            cache,
+		metrics:          metrics,
+		logger:           logger,
+		fallbackStrategy: fallbackStrategy,
 	}, nil
 }
 
@@ -129,6 +132,48 @@ func initializeCircuitBreaker(storage Storage, cbConfig *CircuitBreakerConfig, m
 	)
 
 	return NewCircuitBreakerStorage(storage, cb)
+}
+
+// initializeFallback creates and configures fallback strategy based on config
+func initializeFallback(config *Config, cache Cache, metrics Metrics, logger Logger) FallbackStrategy {
+	if config.FallbackConfig == nil || !config.FallbackConfig.Enabled {
+		return nil
+	}
+
+	fbConfig := config.FallbackConfig
+	var strategies []FallbackStrategy
+
+	// Add cache fallback if enabled
+	if fbConfig.FallbackToCache {
+		maxStaleness := fbConfig.MaxStaleness
+		if maxStaleness == 0 {
+			maxStaleness = 5 * time.Minute // default
+		}
+		strategies = append(strategies, NewCacheFallbackStrategy(cache, maxStaleness, metrics, logger))
+	}
+
+	// Add secondary storage fallback if configured
+	if fbConfig.SecondaryStorage != nil {
+		strategies = append(strategies, NewSecondaryStorageFallbackStrategy(fbConfig.SecondaryStorage, metrics, logger))
+	}
+
+	// Add optimistic fallback if enabled
+	if fbConfig.OptimisticAllowance {
+		percentage := fbConfig.OptimisticAllowancePercentage
+		if percentage == 0 {
+			percentage = 10.0 // default 10%
+		}
+		strategies = append(strategies, NewOptimisticFallbackStrategy(percentage, metrics, logger))
+	}
+
+	// Return composite strategy if multiple strategies, single strategy if one, or nil if none
+	if len(strategies) == 0 {
+		return nil
+	}
+	if len(strategies) == 1 {
+		return strategies[0]
+	}
+	return NewCompositeFallbackStrategy(strategies, metrics, logger)
 }
 
 // GetCurrentCycle returns the current billing cycle for a user based on their subscription start date
@@ -230,6 +275,20 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 				Field{"resource", resource},
 				Field{"error", err},
 			)
+
+			// Try fallback if available and error warrants it
+			if m.fallbackStrategy != nil && m.fallbackStrategy.ShouldFallback(err) {
+				m.metrics.RecordFallbackUsage("storage_error")
+				fallbackUsage, fallbackErr := m.fallbackStrategy.GetFallbackUsage(ctx, userID, resource, period)
+				if fallbackErr == nil && fallbackUsage != nil {
+					// Ensure limit is set
+					if fallbackUsage.Limit <= 0 {
+						fallbackUsage.Limit = m.getLimitForResource(resource, tier, periodType)
+					}
+					return fallbackUsage, nil
+				}
+			}
+
 			return nil, err
 		}
 
@@ -372,6 +431,50 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 	})
 	m.metrics.RecordStorageOperation("ConsumeQuota", time.Since(cStart), err)
 
+	// Handle storage failures with fallback
+	if err != nil && err != ErrQuotaExceeded {
+		// Check if we should use fallback
+		if m.fallbackStrategy != nil && m.fallbackStrategy.ShouldFallback(err) {
+			m.metrics.RecordFallbackUsage("storage_error")
+
+			// Try to get current usage from fallback
+			fallbackUsage, fallbackErr := m.fallbackStrategy.GetFallbackUsage(ctx, userID, resource, period)
+			if fallbackErr == nil && fallbackUsage != nil {
+				// Check if optimistic consumption is allowed
+				if m.fallbackStrategy.AllowOptimisticConsumption(fallbackUsage, amount) {
+					// Calculate new used amount optimistically
+					optimisticNewUsed := fallbackUsage.Used + amount
+					m.logger.Info("allowing optimistic consumption",
+						Field{"userId", userID},
+						Field{"resource", resource},
+						Field{"amount", amount},
+						Field{"currentUsed", fallbackUsage.Used},
+						Field{"newUsed", optimisticNewUsed},
+					)
+
+					// Invalidate cache since we're using optimistic data
+					usageKey := userID + ":" + resource + ":" + period.Key()
+					m.cache.InvalidateUsage(usageKey)
+					m.metrics.RecordConsumption(userID, resource, tier, amount, true)
+
+					// Check for warnings
+					m.checkWarnings(ctx, userID, resource, tier, limit, optimisticNewUsed, amount, period)
+
+					return optimisticNewUsed, nil
+				}
+			}
+		}
+
+		// Fallback unavailable or optimistic consumption not allowed - return original error
+		m.metrics.RecordConsumption(userID, resource, tier, amount, false)
+		m.logger.Error("failed to consume quota",
+			Field{"userId", userID},
+			Field{"resource", resource},
+			Field{"error", err},
+		)
+		return 0, err
+	}
+
 	// Invalidate usage cache on successful consumption
 	if err == nil {
 		usageKey := userID + ":" + resource + ":" + period.Key()
@@ -387,12 +490,6 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 				Field{"userId", userID},
 				Field{"resource", resource},
 				Field{"tier", tier},
-			)
-		} else {
-			m.logger.Error("failed to consume quota",
-				Field{"userId", userID},
-				Field{"resource", resource},
-				Field{"error", err},
 			)
 		}
 	}
@@ -648,6 +745,10 @@ func (m *Manager) GetEntitlement(ctx context.Context, userID string) (*Entitleme
 			}
 			m.cache.SetEntitlement(userID, ent, ttl)
 		} else if err != nil && err != ErrEntitlementNotFound {
+			// Try fallback on storage errors
+			if fallbackEnt := m.tryFallbackEntitlement(ctx, userID, err); fallbackEnt != nil {
+				return fallbackEnt, nil
+			}
 			m.logger.Error("failed to get entitlement from storage",
 				Field{"userId", userID},
 				Field{"error", err},
@@ -668,6 +769,20 @@ func (m *Manager) GetEntitlement(ctx context.Context, userID string) (*Entitleme
 		return nil, fmt.Errorf("unexpected type from entitlement fetch: %T", result)
 	}
 	return ent, nil
+}
+
+// tryFallbackEntitlement attempts to get entitlement from fallback strategies
+func (m *Manager) tryFallbackEntitlement(ctx context.Context, userID string, err error) *Entitlement {
+	if m.fallbackStrategy == nil || !m.fallbackStrategy.ShouldFallback(err) {
+		return nil
+	}
+
+	m.metrics.RecordFallbackUsage("storage_error")
+	fallbackEnt, fallbackErr := m.fallbackStrategy.GetFallbackEntitlement(ctx, userID)
+	if fallbackErr == nil && fallbackEnt != nil {
+		return fallbackEnt
+	}
+	return nil
 }
 
 // Refund returns consumed quota back to the user

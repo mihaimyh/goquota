@@ -18,6 +18,9 @@ type Metrics struct {
 	storageOpsDuration         *prometheus.HistogramVec
 	storageOpsErrors           *prometheus.CounterVec
 	circuitBreakerStateChanges *prometheus.CounterVec
+	fallbackUsageTotal         *prometheus.CounterVec
+	optimisticConsumptionTotal *prometheus.CounterVec
+	fallbackHitsTotal          *prometheus.CounterVec
 }
 
 // NewMetrics creates a new Prometheus metrics implementation.
@@ -74,6 +77,24 @@ func NewMetrics(reg prometheus.Registerer, namespace string) *Metrics {
 			Name:      "circuit_breaker_state_changes_total",
 			Help:      "Total number of circuit breaker state changes.",
 		}, []string{"state"}),
+
+		fallbackUsageTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "fallback_usage_total",
+			Help:      "Total number of fallback usage events.",
+		}, []string{"trigger"}),
+
+		optimisticConsumptionTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "optimistic_consumption_total",
+			Help:      "Total amount of quota consumed optimistically.",
+		}, []string{}),
+
+		fallbackHitsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "fallback_hits_total",
+			Help:      "Total number of successful fallback operations.",
+		}, []string{"strategy"}),
 	}
 }
 
@@ -105,6 +126,18 @@ func (m *Metrics) RecordStorageOperation(operation string, duration time.Duratio
 
 func (m *Metrics) RecordCircuitBreakerStateChange(state string) {
 	m.circuitBreakerStateChanges.WithLabelValues(state).Inc()
+}
+
+func (m *Metrics) RecordFallbackUsage(trigger string) {
+	m.fallbackUsageTotal.WithLabelValues(trigger).Inc()
+}
+
+func (m *Metrics) RecordOptimisticConsumption(amount int) {
+	m.optimisticConsumptionTotal.WithLabelValues().Add(float64(amount))
+}
+
+func (m *Metrics) RecordFallbackHit(strategy string) {
+	m.fallbackHitsTotal.WithLabelValues(strategy).Inc()
 }
 
 // DefaultMetrics returns a Metrics implementation using the default Prometheus registerer.
