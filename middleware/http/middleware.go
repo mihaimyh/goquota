@@ -2,9 +2,12 @@
 package http
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 
 	"github.com/mihaimyh/goquota/pkg/goquota"
@@ -253,4 +256,99 @@ func FixedResource(resource string) ResourceExtractor {
 // WithUserID adds user ID to request context
 func WithUserID(ctx context.Context, userID string) context.Context {
 	return context.WithValue(ctx, UserIDKey, userID)
+}
+
+// FromBody returns an AmountExtractor that reads the request body and applies the cost function.
+// It restores the body so it can be read again by subsequent handlers.
+func FromBody(costFunc func([]byte) (int, error)) AmountExtractor {
+	return func(r *http.Request) (int, error) {
+		if r.Body == nil {
+			return 0, nil
+		}
+
+		// Read body
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return 0, err
+		}
+
+		// Restore body for next handler
+		r.Body = io.NopCloser(bytes.NewBuffer(body))
+
+		return costFunc(body)
+	}
+}
+
+// JSONIntField returns an AmountExtractor that extracts an integer amount from a JSON field in the request body.
+func JSONIntField(field string) AmountExtractor {
+	return FromBody(func(body []byte) (int, error) {
+		var data map[string]interface{}
+		if err := json.Unmarshal(body, &data); err != nil {
+			return 0, fmt.Errorf("failed to parse JSON: %w", err)
+		}
+
+		val, ok := data[field]
+		if !ok {
+			return 0, fmt.Errorf("field %q not found", field)
+		}
+
+		switch v := val.(type) {
+		case float64:
+			return int(v), nil
+		case int:
+			return v, nil
+		default:
+			return 0, fmt.Errorf("field %q is not a number: %T", field, v)
+		}
+	})
+}
+
+// JSONDurationMillisToSeconds returns an AmountExtractor that extracts a duration in milliseconds from a JSON field
+// and converts it to seconds (rounding up).
+func JSONDurationMillisToSeconds(field string) AmountExtractor {
+	return FromBody(func(body []byte) (int, error) {
+		var data map[string]interface{}
+		if err := json.Unmarshal(body, &data); err != nil {
+			return 0, fmt.Errorf("failed to parse JSON: %w", err)
+		}
+
+		val, ok := data[field]
+		if !ok {
+			return 0, fmt.Errorf("field %q not found", field)
+		}
+
+		var millis float64
+		switch v := val.(type) {
+		case float64:
+			millis = v
+		case int:
+			millis = float64(v)
+		default:
+			return 0, fmt.Errorf("field %q is not a number: %T", field, v)
+		}
+
+		return int(math.Ceil(millis / 1000.0)), nil
+	})
+}
+
+// JSONStringByteLength returns an AmountExtractor that returns the byte length of a string field in a JSON body.
+func JSONStringByteLength(field string) AmountExtractor {
+	return FromBody(func(body []byte) (int, error) {
+		var data map[string]interface{}
+		if err := json.Unmarshal(body, &data); err != nil {
+			return 0, fmt.Errorf("failed to parse JSON: %w", err)
+		}
+
+		val, ok := data[field]
+		if !ok {
+			return 0, fmt.Errorf("field %q not found", field)
+		}
+
+		s, ok := val.(string)
+		if !ok {
+			return 0, fmt.Errorf("field %q is not a string: %T", field, val)
+		}
+
+		return len(s), nil
+	})
 }
