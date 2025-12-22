@@ -10,13 +10,14 @@ import (
 
 // Metrics implements goquota.Metrics using Prometheus.
 type Metrics struct {
-	consumptionTotal   *prometheus.CounterVec
-	consumptionAmount  *prometheus.HistogramVec
-	quotaCheckDuration *prometheus.HistogramVec
-	cacheHitsTotal     *prometheus.CounterVec
-	cacheMissesTotal   *prometheus.CounterVec
-	storageOpsDuration *prometheus.HistogramVec
-	storageOpsErrors   *prometheus.CounterVec
+	consumptionTotal           *prometheus.CounterVec
+	consumptionAmount          *prometheus.HistogramVec
+	quotaCheckDuration         *prometheus.HistogramVec
+	cacheHitsTotal             *prometheus.CounterVec
+	cacheMissesTotal           *prometheus.CounterVec
+	storageOpsDuration         *prometheus.HistogramVec
+	storageOpsErrors           *prometheus.CounterVec
+	circuitBreakerStateChanges *prometheus.CounterVec
 }
 
 // NewMetrics creates a new Prometheus metrics implementation.
@@ -68,6 +69,11 @@ func NewMetrics(reg prometheus.Registerer, namespace string) *Metrics {
 			Name:      "storage_operation_errors_total",
 			Help:      "Total number of storage operation errors.",
 		}, []string{"operation"}),
+		circuitBreakerStateChanges: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "circuit_breaker_state_changes_total",
+			Help:      "Total number of circuit breaker state changes.",
+		}, []string{"state"}),
 	}
 }
 
@@ -95,6 +101,10 @@ func (m *Metrics) RecordStorageOperation(operation string, duration time.Duratio
 	if err != nil {
 		m.storageOpsErrors.WithLabelValues(operation).Inc()
 	}
+}
+
+func (m *Metrics) RecordCircuitBreakerStateChange(state string) {
+	m.circuitBreakerStateChanges.WithLabelValues(state).Inc()
 }
 
 // DefaultMetrics returns a Metrics implementation using the default Prometheus registerer.

@@ -18,6 +18,9 @@ type Metrics interface {
 
 	// RecordStorageOperation records the duration and status of a storage operation.
 	RecordStorageOperation(operation string, duration time.Duration, err error)
+
+	// RecordCircuitBreakerStateChange records a circuit breaker state change.
+	RecordCircuitBreakerStateChange(state string)
 }
 
 // NoopMetrics is a no-op implementation of the Metrics interface.
@@ -28,3 +31,4 @@ func (n *NoopMetrics) RecordQuotaCheck(userID, resource string, duration time.Du
 func (n *NoopMetrics) RecordCacheHit(cacheType string)                                            {}
 func (n *NoopMetrics) RecordCacheMiss(cacheType string)                                           {}
 func (n *NoopMetrics) RecordStorageOperation(operation string, duration time.Duration, err error) {}
+func (n *NoopMetrics) RecordCircuitBreakerStateChange(state string)                               {}
