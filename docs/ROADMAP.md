@@ -5,7 +5,7 @@ This document outlines planned enhancements to make goquota a comprehensive, pro
 ## Current State
 
 **Version**: 0.x (Pre-1.0)  
-**Test Coverage**: 73%+  
+**Test Coverage**: 80.9%+  
 **Status**: Production-ready core features with room for enhancement
 
 ### Existing Features ✅
@@ -26,19 +26,24 @@ These features are essential for production deployments at scale.
 
 ### 1.1 Caching Layer
 
-**Status**: 🔴 Not Started  
+**Status**: ✅ Implemented  
 **Priority**: Critical  
 **Effort**: Medium
 
-Implement built-in caching to reduce storage backend load and improve performance.
+Built-in caching to reduce storage backend load and improve performance.
 
 **Features**:
 
-- In-memory LRU cache for entitlements
-- Configurable TTL per cache type
-- Cache invalidation on updates
-- Optional Redis-backed distributed cache
-- Cache hit/miss metrics
+- ✅ In-memory LRU cache for entitlements
+- ✅ Configurable TTL per cache type
+- ✅ Cache invalidation on updates
+- ❌ Optional Redis-backed distributed cache
+- ✅ Cache hit/miss metrics
+
+**Implementation**:
+
+- `pkg/goquota/cache.go` - LRU cache with TTL support
+- `examples/caching/` - Working example
 
 **Benefits**:
 
@@ -48,23 +53,31 @@ Implement built-in caching to reduce storage backend load and improve performanc
 
 ### 1.2 Metrics & Observability
 
-**Status**: 🔴 Not Started  
+**Status**: ✅ Implemented  
 **Priority**: Critical  
 **Effort**: Medium
 
-Add comprehensive instrumentation for monitoring and debugging.
+Comprehensive instrumentation for monitoring and debugging.
 
 **Features**:
 
-- Prometheus metrics integration
-- OpenTelemetry support
-- Key metrics:
+- ✅ Prometheus metrics integration
+- ❌ OpenTelemetry support
+- ✅ Key metrics:
   - Quota consumption rate
   - Rejection rate by tier/resource
   - Storage operation latency
   - Cache hit/miss rates
-- Structured logging (zerolog/zap)
-- Distributed tracing support
+- ✅ Structured logging (zerolog)
+- ❌ Distributed tracing support
+
+**Implementation**:
+
+- `pkg/goquota/metrics.go` - Metrics interface
+- `pkg/goquota/metrics/prometheus/` - Prometheus integration
+- `pkg/goquota/logger.go` - Logger interface
+- `pkg/goquota/logger/zerolog/` - Zerolog integration
+- `examples/observability/` - Working example
 
 **Benefits**:
 
@@ -74,19 +87,26 @@ Add comprehensive instrumentation for monitoring and debugging.
 
 ### 1.3 Soft Limits & Warnings
 
-**Status**: 🔴 Not Started  
+**Status**: ✅ Implemented  
 **Priority**: High  
 **Effort**: Low
 
-Enable warning thresholds before hard quota limits.
+Warning thresholds before hard quota limits.
 
 **Features**:
 
-- Configurable warning thresholds (e.g., 80%, 90%)
-- Warning callbacks/webhooks
-- Separate warning vs. exceeded errors
-- Grace period configuration
-- Per-tier threshold customization
+- ✅ Configurable warning thresholds (e.g., 80%, 90%)
+- ✅ Warning callbacks via WarningHandler interface
+- ✅ Context-based warning handler override
+- ❌ Webhooks (only in-process callbacks)
+- ❌ Grace period configuration
+- ✅ Per-tier threshold customization
+
+**Implementation**:
+
+- `pkg/goquota/types.go` - WarningHandler interface
+- `pkg/goquota/warning_test.go` - Comprehensive tests
+- `pkg/goquota/manager.go` - Warning handler integration
 
 **Benefits**:
 
@@ -759,14 +779,14 @@ Complete API documentation.
 
 **Focus**: Production readiness
 
-- ✅ Caching layer
-- ✅ Metrics & observability
-- ✅ Soft limits & warnings
-- ✅ Redis storage adapter
-- ✅ Quota refunds
-- ✅ Circuit breaker
-- ✅ Idempotency keys
-- ✅ Comprehensive documentation
+- ✅ Caching layer (completed)
+- ✅ Metrics & observability (completed)
+- ✅ Soft limits & warnings (completed)
+- ❌ Redis storage adapter
+- ❌ Quota refunds
+- ❌ Circuit breaker
+- ❌ Idempotency keys
+- 🟡 Comprehensive documentation (partial)
 
 ### v1.1 (Target: Q3 2025)
 
