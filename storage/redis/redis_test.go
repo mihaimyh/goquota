@@ -337,6 +337,133 @@ func TestStorage_ConsumeQuota(t *testing.T) {
 			t.Errorf("Expected newUsed=0 for zero amount, got %d", newUsed)
 		}
 	})
+
+	t.Run("with idempotency key - duplicate", func(t *testing.T) {
+		idempotencyKey := "test-key-123"
+		req1 := &goquota.ConsumeRequest{
+			UserID:         "user6",
+			Resource:       "api_calls",
+			Amount:         10,
+			Tier:           "pro",
+			Period:         period,
+			Limit:          100,
+			IdempotencyKey: idempotencyKey,
+		}
+
+		// First consumption
+		newUsed1, err := storage.ConsumeQuota(ctx, req1)
+		if err != nil {
+			t.Fatalf("First ConsumeQuota failed: %v", err)
+		}
+		if newUsed1 != 10 {
+			t.Errorf("Expected newUsed=10, got %d", newUsed1)
+		}
+
+		// Second consumption with same idempotency key - should return cached result
+		req2 := &goquota.ConsumeRequest{
+			UserID:         "user6",
+			Resource:       "api_calls",
+			Amount:         10,
+			Tier:           "pro",
+			Period:         period,
+			Limit:          100,
+			IdempotencyKey: idempotencyKey,
+		}
+
+		newUsed2, err := storage.ConsumeQuota(ctx, req2)
+		if err != nil {
+			t.Fatalf("Second ConsumeQuota failed: %v", err)
+		}
+		if newUsed2 != 10 {
+			t.Errorf("Expected cached newUsed=10, got %d", newUsed2)
+		}
+
+		// Verify usage was only consumed once
+		usage, err := storage.GetUsage(ctx, "user6", "api_calls", period)
+		if err != nil {
+			t.Fatalf("GetUsage failed: %v", err)
+		}
+		if usage.Used != 10 {
+			t.Errorf("Expected usage 10 (consumed once), got %d", usage.Used)
+		}
+
+		// Verify consumption record exists
+		record, err := storage.GetConsumptionRecord(ctx, idempotencyKey)
+		if err != nil {
+			t.Fatalf("GetConsumptionRecord failed: %v", err)
+		}
+		if record == nil {
+			t.Fatal("Expected consumption record, got nil")
+		}
+		if record.NewUsed != 10 {
+			t.Errorf("Expected NewUsed 10, got %d", record.NewUsed)
+		}
+	})
+
+	t.Run("with idempotency key - different keys", func(t *testing.T) {
+		// First consumption with idempotency key 1
+		req1 := &goquota.ConsumeRequest{
+			UserID:         "user7",
+			Resource:       "api_calls",
+			Amount:         5,
+			Tier:           "pro",
+			Period:         period,
+			Limit:          100,
+			IdempotencyKey: "key-1",
+		}
+
+		_, err := storage.ConsumeQuota(ctx, req1)
+		if err != nil {
+			t.Fatalf("First ConsumeQuota failed: %v", err)
+		}
+
+		// Second consumption with different idempotency key - should consume again
+		req2 := &goquota.ConsumeRequest{
+			UserID:         "user7",
+			Resource:       "api_calls",
+			Amount:         5,
+			Tier:           "pro",
+			Period:         period,
+			Limit:          100,
+			IdempotencyKey: "key-2",
+		}
+
+		_, err = storage.ConsumeQuota(ctx, req2)
+		if err != nil {
+			t.Fatalf("Second ConsumeQuota failed: %v", err)
+		}
+
+		// Verify usage was consumed twice
+		usage, err := storage.GetUsage(ctx, "user7", "api_calls", period)
+		if err != nil {
+			t.Fatalf("GetUsage failed: %v", err)
+		}
+		if usage.Used != 10 {
+			t.Errorf("Expected usage 10 (consumed twice), got %d", usage.Used)
+		}
+	})
+}
+
+func TestStorage_GetConsumptionRecord(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.Close()
+
+	storage, err := New(client, DefaultConfig())
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+
+	ctx := context.Background()
+
+	t.Run("not found", func(t *testing.T) {
+		record, err := storage.GetConsumptionRecord(ctx, "non-existent-key")
+		if err != nil {
+			t.Fatalf("GetConsumptionRecord failed: %v", err)
+		}
+		if record != nil {
+			t.Errorf("Expected nil record, got %+v", record)
+		}
+	})
 }
 
 func TestStorage_ApplyTierChange(t *testing.T) {

@@ -17,6 +17,7 @@ type Storage struct {
 	entitlements map[string]*goquota.Entitlement
 	usage        map[string]*goquota.Usage
 	refunds      map[string]*goquota.RefundRecord // keyed by idempotency key
+	consumptions map[string]*goquota.ConsumptionRecord // keyed by idempotency key
 }
 
 // New creates a new in-memory storage adapter
@@ -25,6 +26,7 @@ func New() *Storage {
 		entitlements: make(map[string]*goquota.Entitlement),
 		usage:        make(map[string]*goquota.Usage),
 		refunds:      make(map[string]*goquota.RefundRecord),
+		consumptions: make(map[string]*goquota.ConsumptionRecord),
 	}
 }
 
@@ -86,6 +88,14 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Check for duplicate consumption using idempotency key
+	if req.IdempotencyKey != "" {
+		if existing, exists := s.consumptions[req.IdempotencyKey]; exists {
+			// Duplicate consumption - return cached result (idempotent)
+			return existing.NewUsed, nil
+		}
+	}
+
 	key := usageKey(req.UserID, req.Resource, req.Period)
 	usage, ok := s.usage[key]
 
@@ -108,6 +118,21 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 		Period:    req.Period,
 		Tier:      req.Tier,
 		UpdatedAt: time.Now().UTC(),
+	}
+
+	// Store consumption record for idempotency (if key provided)
+	if req.IdempotencyKey != "" {
+		record := &goquota.ConsumptionRecord{
+			ConsumptionID:  req.IdempotencyKey,
+			UserID:         req.UserID,
+			Resource:       req.Resource,
+			Amount:         req.Amount,
+			Period:         req.Period,
+			Timestamp:      time.Now().UTC(),
+			IdempotencyKey: req.IdempotencyKey,
+			NewUsed:        newUsed,
+		}
+		s.consumptions[req.IdempotencyKey] = record
 	}
 
 	return newUsed, nil
@@ -258,6 +283,21 @@ func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*
 	return &recordCopy, nil
 }
 
+// GetConsumptionRecord implements goquota.Storage
+func (s *Storage) GetConsumptionRecord(ctx context.Context, idempotencyKey string) (*goquota.ConsumptionRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	record, ok := s.consumptions[idempotencyKey]
+	if !ok {
+		return nil, nil // No record found is not an error
+	}
+
+	// Return a copy
+	recordCopy := *record
+	return &recordCopy, nil
+}
+
 // Clear removes all data (useful for testing)
 func (s *Storage) Clear(ctx context.Context) error {
 	s.mu.Lock()
@@ -266,5 +306,6 @@ func (s *Storage) Clear(ctx context.Context) error {
 	s.entitlements = make(map[string]*goquota.Entitlement)
 	s.usage = make(map[string]*goquota.Usage)
 	s.refunds = make(map[string]*goquota.RefundRecord)
+	s.consumptions = make(map[string]*goquota.ConsumptionRecord)
 	return nil
 }

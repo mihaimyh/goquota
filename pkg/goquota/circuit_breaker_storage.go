@@ -81,3 +81,13 @@ func (s *CircuitBreakerStorage) GetRefundRecord(ctx context.Context, idempotency
 	})
 	return record, err
 }
+
+func (s *CircuitBreakerStorage) GetConsumptionRecord(ctx context.Context, idempotencyKey string) (*ConsumptionRecord, error) {
+	var record *ConsumptionRecord
+	err := s.cb.Execute(ctx, func() error {
+		var e error
+		record, e = s.storage.GetConsumptionRecord(ctx, idempotencyKey)
+		return e
+	})
+	return record, err
+}

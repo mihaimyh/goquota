@@ -228,6 +228,146 @@ func TestStorage_ConsumeQuota_NegativeAmount(t *testing.T) {
 	}
 }
 
+func TestStorage_ConsumeQuota_WithIdempotencyKey_Success(t *testing.T) {
+	storage := New()
+	ctx := context.Background()
+
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	idempotencyKey := "test-key-123"
+
+	// First consumption with idempotency key
+	req1 := &goquota.ConsumeRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         5,
+		Tier:           "scholar",
+		Period:         period,
+		Limit:          100,
+		IdempotencyKey: idempotencyKey,
+	}
+
+	used1, err := storage.ConsumeQuota(ctx, req1)
+	if err != nil {
+		t.Fatalf("First ConsumeQuota failed: %v", err)
+	}
+	if used1 != 5 {
+		t.Errorf("Expected 5 used returned, got %d", used1)
+	}
+
+	// Second consumption with same idempotency key - should return cached result
+	req2 := &goquota.ConsumeRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         5,
+		Tier:           "scholar",
+		Period:         period,
+		Limit:          100,
+		IdempotencyKey: idempotencyKey,
+	}
+
+	used2, err := storage.ConsumeQuota(ctx, req2)
+	if err != nil {
+		t.Fatalf("Second ConsumeQuota failed: %v", err)
+	}
+	if used2 != 5 {
+		t.Errorf("Expected cached 5 used returned, got %d", used2)
+	}
+
+	// Verify usage was only consumed once
+	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if usage.Used != 5 {
+		t.Errorf("Expected usage 5 (consumed once), got %d", usage.Used)
+	}
+
+	// Verify consumption record exists
+	record, err := storage.GetConsumptionRecord(ctx, idempotencyKey)
+	if err != nil {
+		t.Fatalf("GetConsumptionRecord failed: %v", err)
+	}
+	if record == nil {
+		t.Fatal("Expected consumption record, got nil")
+	}
+	if record.NewUsed != 5 {
+		t.Errorf("Expected NewUsed 5, got %d", record.NewUsed)
+	}
+	if record.Amount != 5 {
+		t.Errorf("Expected Amount 5, got %d", record.Amount)
+	}
+}
+
+func TestStorage_ConsumeQuota_WithIdempotencyKey_DifferentKeys(t *testing.T) {
+	storage := New()
+	ctx := context.Background()
+
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	// First consumption with idempotency key 1
+	req1 := &goquota.ConsumeRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         5,
+		Tier:           "scholar",
+		Period:         period,
+		Limit:          100,
+		IdempotencyKey: "key-1",
+	}
+
+	_, err := storage.ConsumeQuota(ctx, req1)
+	if err != nil {
+		t.Fatalf("First ConsumeQuota failed: %v", err)
+	}
+
+	// Second consumption with different idempotency key - should consume again
+	req2 := &goquota.ConsumeRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         5,
+		Tier:           "scholar",
+		Period:         period,
+		Limit:          100,
+		IdempotencyKey: "key-2",
+	}
+
+	_, err = storage.ConsumeQuota(ctx, req2)
+	if err != nil {
+		t.Fatalf("Second ConsumeQuota failed: %v", err)
+	}
+
+	// Verify usage was consumed twice
+	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if usage.Used != 10 {
+		t.Errorf("Expected usage 10 (consumed twice), got %d", usage.Used)
+	}
+}
+
+func TestStorage_GetConsumptionRecord_NotFound(t *testing.T) {
+	storage := New()
+	ctx := context.Background()
+
+	record, err := storage.GetConsumptionRecord(ctx, "non-existent-key")
+	if err != nil {
+		t.Fatalf("GetConsumptionRecord failed: %v", err)
+	}
+	if record != nil {
+		t.Errorf("Expected nil record, got %+v", record)
+	}
+}
+
 func TestStorage_ApplyTierChange(t *testing.T) {
 	storage := New()
 	ctx := context.Background()

@@ -523,3 +523,114 @@ func TestFirestore_DifferentPeriods(t *testing.T) {
 		t.Errorf("Expected monthly usage 500, got %d", monthlyUsage.Used)
 	}
 }
+
+func TestFirestore_ConsumeQuota_WithIdempotencyKey(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_ConsumeQuota_WithIdempotencyKey")
+	refundsColl, consumptionsColl := getTestCollections("TestFirestore_ConsumeQuota_WithIdempotencyKey_refunds_consumptions")
+
+	storage, _ := New(client, Config{
+		EntitlementsCollection:  entColl,
+		UsageCollection:          usageColl,
+		RefundsCollection:        refundsColl,
+		ConsumptionsCollection:   consumptionsColl,
+	})
+
+	defer cleanupFirestore(t, client, entColl, usageColl, refundsColl, consumptionsColl)
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	idempotencyKey := "test-key-123"
+
+	// First consumption with idempotency key
+	req1 := &goquota.ConsumeRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         5,
+		Tier:           "scholar",
+		Period:         period,
+		Limit:          100,
+		IdempotencyKey: idempotencyKey,
+	}
+
+	used1, err := storage.ConsumeQuota(ctx, req1)
+	if err != nil {
+		t.Fatalf("First ConsumeQuota failed: %v", err)
+	}
+	if used1 != 5 {
+		t.Errorf("Expected 5 used returned, got %d", used1)
+	}
+
+	// Second consumption with same idempotency key - should return cached result
+	req2 := &goquota.ConsumeRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         5,
+		Tier:           "scholar",
+		Period:         period,
+		Limit:          100,
+		IdempotencyKey: idempotencyKey,
+	}
+
+	used2, err := storage.ConsumeQuota(ctx, req2)
+	if err != nil {
+		t.Fatalf("Second ConsumeQuota failed: %v", err)
+	}
+	if used2 != 5 {
+		t.Errorf("Expected cached 5 used returned, got %d", used2)
+	}
+
+	// Verify usage was only consumed once
+	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if usage.Used != 5 {
+		t.Errorf("Expected usage 5 (consumed once), got %d", usage.Used)
+	}
+
+	// Verify consumption record exists
+	record, err := storage.GetConsumptionRecord(ctx, idempotencyKey)
+	if err != nil {
+		t.Fatalf("GetConsumptionRecord failed: %v", err)
+	}
+	if record == nil {
+		t.Fatal("Expected consumption record, got nil")
+	}
+	if record.NewUsed != 5 {
+		t.Errorf("Expected NewUsed 5, got %d", record.NewUsed)
+	}
+}
+
+func TestFirestore_GetConsumptionRecord_NotFound(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_GetConsumptionRecord_NotFound")
+	_, consumptionsColl := getTestCollections("TestFirestore_GetConsumptionRecord_NotFound_consumptions")
+
+	storage, _ := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+		ConsumptionsCollection: consumptionsColl,
+	})
+
+	defer cleanupFirestore(t, client, entColl, usageColl, consumptionsColl)
+
+	ctx := context.Background()
+
+	record, err := storage.GetConsumptionRecord(ctx, "non-existent-key")
+	if err != nil {
+		t.Fatalf("GetConsumptionRecord failed: %v", err)
+	}
+	if record != nil {
+		t.Errorf("Expected nil record, got %+v", record)
+	}
+}

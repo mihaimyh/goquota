@@ -125,11 +125,29 @@ type Config struct {
 
 	// CircuitBreakerConfig configures the circuit breaker
 	CircuitBreakerConfig *CircuitBreakerConfig
+
+	// IdempotencyKeyTTL is the TTL for idempotency keys (default: 24 hours)
+	IdempotencyKeyTTL time.Duration
 }
 
 // WarningHandler is the interface for handling quota warnings
 type WarningHandler interface {
 	OnWarning(ctx context.Context, usage *Usage, threshold float64)
+}
+
+// ConsumeOption represents an option for the Consume operation
+type ConsumeOption func(*ConsumeOptions)
+
+// ConsumeOptions holds options for the Consume operation
+type ConsumeOptions struct {
+	IdempotencyKey string
+}
+
+// WithIdempotencyKey sets the idempotency key for a consume operation
+func WithIdempotencyKey(key string) ConsumeOption {
+	return func(opts *ConsumeOptions) {
+		opts.IdempotencyKey = key
+	}
 }
 
 // RefundRequest represents a quota refund request
@@ -154,5 +172,18 @@ type RefundRecord struct {
 	Timestamp      time.Time
 	IdempotencyKey string
 	Reason         string
+	Metadata       map[string]string
+}
+
+// ConsumptionRecord represents an audit record for a quota consumption
+type ConsumptionRecord struct {
+	ConsumptionID  string
+	UserID         string
+	Resource       string
+	Amount         int
+	Period         Period
+	Timestamp      time.Time
+	IdempotencyKey string
+	NewUsed        int
 	Metadata       map[string]string
 }

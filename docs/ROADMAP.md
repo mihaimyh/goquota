@@ -635,7 +635,7 @@ Automatic retry for transient failures.
 
 ### 8.4 Idempotency Keys
 
-**Status**: 🔴 Not Started  
+**Status**: ✅ Implemented  
 **Priority**: High  
 **Effort**: Medium
 
@@ -643,10 +643,21 @@ Prevent double-charging on retries.
 
 **Features**:
 
-- Client-provided idempotency keys
-- Automatic deduplication
-- Configurable TTL
-- Key storage management
+- ✅ Client-provided idempotency keys
+- ✅ Automatic deduplication
+- ✅ Configurable TTL (default: 24 hours)
+- ✅ Key storage management
+- ✅ Support for all storage backends (Memory, Firestore, Redis)
+- ✅ Functional options pattern for API extensibility
+
+**Implementation**:
+
+- `pkg/goquota/types.go` - ConsumptionRecord type, ConsumeOptions
+- `pkg/goquota/storage.go` - GetConsumptionRecord interface method
+- `pkg/goquota/manager.go` - Idempotency checking in Consume()
+- `storage/memory/memory.go` - In-memory idempotency support
+- `storage/firestore/firestore.go` - Transaction-safe idempotency
+- `storage/redis/redis.go` - Atomic idempotency via Lua scripts
 
 ---
 
@@ -785,7 +796,7 @@ Complete API documentation.
 - ✅ Redis storage adapter (completed)
 - ✅ Quota refunds (completed)
 - ✅ Circuit breaker (completed)
-- ❌ Idempotency keys
+- ✅ Idempotency keys (completed)
 - 🟡 Comprehensive documentation (partial)
 
 ### v1.1 (Target: Q3 2025)

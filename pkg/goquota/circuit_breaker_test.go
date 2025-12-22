@@ -62,7 +62,7 @@ func TestDefaultCircuitBreaker(t *testing.T) {
 	// Failure in half-open should re-open the circuit
 	// First, let's open it again
 	for i := 0; i < threshold; i++ {
-		cb.Execute(ctx, func() error { return errors.New("fail") })
+		_ = cb.Execute(ctx, func() error { return errors.New("fail") })
 	}
 	assert.Equal(t, StateOpen, cb.State())
 

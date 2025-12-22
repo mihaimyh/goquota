@@ -75,12 +75,41 @@ func New(client redis.UniversalClient, config Config) (*Storage, error) {
 func (s *Storage) loadScripts() {
 	// Consume quota atomically
 	s.scripts["consume"] = redis.NewScript(`
-		local key = KEYS[1]
+		local usageKey = KEYS[1]
+		local consumptionKey = KEYS[2]
 		local amount = tonumber(ARGV[1])
 		local limit = tonumber(ARGV[2])
 		local data = ARGV[3]
+		local ttl = tonumber(ARGV[4])
+		local consumptionData = ARGV[5]
+		local consumptionTTL = tonumber(ARGV[6])
 		
-		local current = redis.call('HGET', key, 'used')
+		-- Check idempotency
+		if consumptionKey ~= "" then
+			local exists = redis.call('EXISTS', consumptionKey)
+			if exists == 1 then
+				-- Idempotency hit - return cached result
+				local record = redis.call('GET', consumptionKey)
+				if record then
+					-- Parse JSON to get newUsed (cjson is available in Redis Lua)
+					local cjson = cjson or require('cjson')
+					local ok, recordData = pcall(cjson.decode, record)
+					if ok and recordData and recordData.newUsed then
+						return {tonumber(recordData.newUsed), 'ok'}
+					end
+					-- Fallback: if JSON parsing fails, still return idempotent (don't consume again)
+					-- Get current usage as fallback
+					local current = redis.call('HGET', usageKey, 'used')
+					local currentUsed = 0
+					if current then
+						currentUsed = tonumber(current)
+					end
+					return {currentUsed, 'ok'}
+				end
+			end
+		end
+		
+		local current = redis.call('HGET', usageKey, 'used')
 		local currentUsed = 0
 		if current then
 			currentUsed = tonumber(current)
@@ -91,11 +120,19 @@ func (s *Storage) loadScripts() {
 			return {currentUsed, 'quota_exceeded'}
 		end
 		
-		redis.call('HSET', key, 'used', newUsed)
-		redis.call('HSET', key, 'data', data)
+		redis.call('HSET', usageKey, 'used', newUsed)
+		redis.call('HSET', usageKey, 'data', data)
 		
-		if tonumber(ARGV[4]) > 0 then
-			redis.call('EXPIRE', key, tonumber(ARGV[4]))
+		if ttl > 0 then
+			redis.call('EXPIRE', usageKey, ttl)
+		end
+		
+		-- Record consumption for idempotency
+		if consumptionKey ~= "" and consumptionData ~= "" then
+			redis.call('SET', consumptionKey, consumptionData)
+			if consumptionTTL > 0 then
+				redis.call('EXPIRE', consumptionKey, consumptionTTL)
+			end
 		end
 		
 		return {newUsed, 'ok'}
@@ -254,7 +291,11 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 		return 0, nil // No-op
 	}
 
-	key := s.usageKey(req.UserID, req.Resource, req.Period)
+	usageKey := s.usageKey(req.UserID, req.Resource, req.Period)
+	consumptionKey := ""
+	if req.IdempotencyKey != "" {
+		consumptionKey = s.consumptionKey(req.IdempotencyKey)
+	}
 
 	// Create usage object
 	usage := &goquota.Usage{
@@ -277,15 +318,39 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 		ttl = int64(s.config.UsageTTL.Seconds())
 	}
 
+	// Prepare consumption record data (if idempotency key provided)
+	var consumptionData string
+	consumptionTTL := int64(24 * 60 * 60) // Default 24 hours
+	if req.IdempotencyKey != "" {
+		// We'll update newUsed after consumption, but create placeholder for now
+		record := &goquota.ConsumptionRecord{
+			ConsumptionID:  req.IdempotencyKey,
+			UserID:         req.UserID,
+			Resource:       req.Resource,
+			Amount:         req.Amount,
+			Period:         req.Period,
+			Timestamp:      time.Now().UTC(),
+			IdempotencyKey: req.IdempotencyKey,
+			NewUsed:        0, // Will be updated by script
+		}
+		recordData, err := json.Marshal(record)
+		if err != nil {
+			return 0, fmt.Errorf("failed to marshal consumption record: %w", err)
+		}
+		consumptionData = string(recordData)
+	}
+
 	// Execute Lua script for atomic consumption
 	result, err := s.scripts["consume"].Run(
 		ctx,
 		s.client,
-		[]string{key},
+		[]string{usageKey, consumptionKey},
 		req.Amount,
 		req.Limit,
 		string(usageData),
 		ttl,
+		consumptionData,
+		consumptionTTL,
 	).Result()
 
 	if err != nil {
@@ -311,6 +376,28 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 
 	if status == "quota_exceeded" {
 		return newUsed, goquota.ErrQuotaExceeded
+	}
+
+	// Update consumption record with actual newUsed value (if idempotency key provided)
+	if req.IdempotencyKey != "" && consumptionKey != "" {
+		record := &goquota.ConsumptionRecord{
+			ConsumptionID:  req.IdempotencyKey,
+			UserID:         req.UserID,
+			Resource:       req.Resource,
+			Amount:         req.Amount,
+			Period:         req.Period,
+			Timestamp:      time.Now().UTC(),
+			IdempotencyKey: req.IdempotencyKey,
+			NewUsed:        newUsed,
+		}
+		recordData, err := json.Marshal(record)
+		if err == nil {
+			// Update the record with correct newUsed
+			if err := s.client.Set(ctx, consumptionKey, string(recordData), time.Duration(consumptionTTL)*time.Second).Err(); err != nil {
+				// Log but don't fail - consumption already succeeded
+				_ = err
+			}
+		}
 	}
 
 	return newUsed, nil
@@ -523,6 +610,29 @@ func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*
 	return &record, nil
 }
 
+// GetConsumptionRecord implements goquota.Storage
+func (s *Storage) GetConsumptionRecord(ctx context.Context, idempotencyKey string) (*goquota.ConsumptionRecord, error) {
+	if idempotencyKey == "" {
+		return nil, nil
+	}
+
+	key := s.consumptionKey(idempotencyKey)
+	data, err := s.client.Get(ctx, key).Bytes()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get consumption record: %w", err)
+	}
+
+	var record goquota.ConsumptionRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal consumption record: %w", err)
+	}
+
+	return &record, nil
+}
+
 // entitlementKey generates the Redis key for an entitlement
 func (s *Storage) entitlementKey(userID string) string {
 	return fmt.Sprintf("%sentitlement:%s", s.config.KeyPrefix, userID)
@@ -536,6 +646,11 @@ func (s *Storage) usageKey(userID, resource string, period goquota.Period) strin
 // refundKey generates the Redis key for refund records
 func (s *Storage) refundKey(idempotencyKey string) string {
 	return fmt.Sprintf("%srefund:%s", s.config.KeyPrefix, idempotencyKey)
+}
+
+// consumptionKey generates the Redis key for consumption records
+func (s *Storage) consumptionKey(idempotencyKey string) string {
+	return fmt.Sprintf("%sconsumption:%s", s.config.KeyPrefix, idempotencyKey)
 }
 
 // Close closes the Redis client connection

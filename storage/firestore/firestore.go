@@ -17,10 +17,11 @@ import (
 
 // Storage implements goquota.Storage using Google Cloud Firestore
 type Storage struct {
-	client                 *firestore.Client
-	entitlementsCollection string
-	usageCollection        string
-	refundsCollection      string
+	client                  *firestore.Client
+	entitlementsCollection  string
+	usageCollection         string
+	refundsCollection       string
+	consumptionsCollection  string
 }
 
 // Config holds Firestore storage configuration
@@ -36,6 +37,10 @@ type Config struct {
 	// RefundsCollection is the Firestore collection for audit logs
 	// Default: "billing_refunds"
 	RefundsCollection string
+
+	// ConsumptionsCollection is the Firestore collection for consumption audit logs
+	// Default: "billing_consumptions"
+	ConsumptionsCollection string
 }
 
 // New creates a new Firestore storage adapter
@@ -54,12 +59,16 @@ func New(client *firestore.Client, config Config) (*Storage, error) {
 	if config.RefundsCollection == "" {
 		config.RefundsCollection = "billing_refunds"
 	}
+	if config.ConsumptionsCollection == "" {
+		config.ConsumptionsCollection = "billing_consumptions"
+	}
 
 	return &Storage{
-		client:                 client,
-		entitlementsCollection: config.EntitlementsCollection,
-		usageCollection:        config.UsageCollection,
-		refundsCollection:      config.RefundsCollection,
+		client:                  client,
+		entitlementsCollection:  config.EntitlementsCollection,
+		usageCollection:         config.UsageCollection,
+		refundsCollection:       config.RefundsCollection,
+		consumptionsCollection:  config.ConsumptionsCollection,
 	}, nil
 }
 
@@ -161,6 +170,22 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 	var newUsed int
 
 	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		// 1. Check idempotency if key provided
+		if req.IdempotencyKey != "" {
+			consumptionDocRef := s.client.Collection(s.consumptionsCollection).Doc(req.IdempotencyKey)
+			snap, err := tx.Get(consumptionDocRef)
+			if err != nil && status.Code(err) != codes.NotFound {
+				return err
+			}
+			if snap.Exists() {
+				// Idempotency hit - return cached result
+				data := snap.Data()
+				newUsed = getInt(data, "newUsed")
+				return nil
+			}
+		}
+
+		// 2. Get current usage
 		snap, err := tx.Get(doc)
 
 		currentUsed := 0
@@ -180,8 +205,9 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 			return goquota.ErrQuotaExceeded
 		}
 
+		// 3. Update usage
 		now := time.Now().UTC()
-		return tx.Set(doc, map[string]interface{}{
+		err = tx.Set(doc, map[string]interface{}{
 			"used":       newUsed,
 			"limit":      currentLimit,
 			"cycleStart": req.Period.Start,
@@ -190,6 +216,31 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 			"resource":   req.Resource,
 			"updatedAt":  now,
 		}, firestore.MergeAll)
+		if err != nil {
+			return err
+		}
+
+		// 4. Create consumption audit record (if idempotency key provided)
+		if req.IdempotencyKey != "" {
+			consumptionDocRef := s.client.Collection(s.consumptionsCollection).Doc(req.IdempotencyKey)
+			err = tx.Create(consumptionDocRef, map[string]interface{}{
+				"consumptionId":  req.IdempotencyKey,
+				"userId":         req.UserID,
+				"resource":       req.Resource,
+				"amount":         req.Amount,
+				"periodStart":    req.Period.Start,
+				"periodEnd":      req.Period.End,
+				"periodType":     string(req.Period.Type),
+				"timestamp":      now,
+				"idempotencyKey": req.IdempotencyKey,
+				"newUsed":        newUsed,
+			})
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
 	})
 
 	return newUsed, err
@@ -387,6 +438,59 @@ func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*
 		Timestamp:      getTime(data, "timestamp"),
 		IdempotencyKey: getString(data, "idempotencyKey"),
 		Reason:         getString(data, "reason"),
+	}
+
+	// Manual metadata extraction
+	if m, ok := data["metadata"].(map[string]interface{}); ok {
+		metadata := make(map[string]string)
+		for k, v := range m {
+			if sVal, ok := v.(string); ok {
+				metadata[k] = sVal
+			}
+		}
+		record.Metadata = metadata
+	}
+
+	return record, nil
+}
+
+// GetConsumptionRecord implements goquota.Storage
+func (s *Storage) GetConsumptionRecord(ctx context.Context, idempotencyKey string) (*goquota.ConsumptionRecord, error) {
+	if idempotencyKey == "" {
+		return nil, nil
+	}
+	doc := s.client.Collection(s.consumptionsCollection).Doc(idempotencyKey)
+	snap, err := doc.Get(ctx)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, nil // Not found is not an error
+		}
+		return nil, fmt.Errorf("failed to get consumption record: %w", err)
+	}
+
+	data := snap.Data()
+
+	periodTypeStr := getString(data, "periodType")
+	var periodType goquota.PeriodType
+	if periodTypeStr == "daily" {
+		periodType = goquota.PeriodTypeDaily
+	} else {
+		periodType = goquota.PeriodTypeMonthly
+	}
+
+	record := &goquota.ConsumptionRecord{
+		ConsumptionID: getString(data, "consumptionId"),
+		UserID:        getString(data, "userId"),
+		Resource:      getString(data, "resource"),
+		Amount:        getInt(data, "amount"),
+		Period: goquota.Period{
+			Start: getTime(data, "periodStart"),
+			End:   getTime(data, "periodEnd"),
+			Type:  periodType,
+		},
+		Timestamp:      getTime(data, "timestamp"),
+		IdempotencyKey: getString(data, "idempotencyKey"),
+		NewUsed:        getInt(data, "newUsed"),
 	}
 
 	// Manual metadata extraction

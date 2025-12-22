@@ -33,16 +33,21 @@ type Storage interface {
 	// GetRefundRecord retrieves a refund record by idempotency key
 	// Returns nil if no record found (not an error)
 	GetRefundRecord(ctx context.Context, idempotencyKey string) (*RefundRecord, error)
+
+	// GetConsumptionRecord retrieves a consumption record by idempotency key
+	// Returns nil if no record found (not an error)
+	GetConsumptionRecord(ctx context.Context, idempotencyKey string) (*ConsumptionRecord, error)
 }
 
 // ConsumeRequest represents a quota consumption request
 type ConsumeRequest struct {
-	UserID   string
-	Resource string
-	Amount   int
-	Tier     string
-	Period   Period
-	Limit    int
+	UserID         string
+	Resource       string
+	Amount         int
+	Tier           string
+	Period         Period
+	Limit          int
+	IdempotencyKey string
 }
 
 // TierChangeRequest represents a tier change with proration

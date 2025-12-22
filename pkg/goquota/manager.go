@@ -36,6 +36,9 @@ func NewManager(storage Storage, config Config) (*Manager, error) {
 	if config.DefaultTier == "" {
 		config.DefaultTier = "explorer"
 	}
+	if config.IdempotencyKeyTTL == 0 {
+		config.IdempotencyKeyTTL = 24 * time.Hour
+	}
 
 	// Initialize cache
 	var cache Cache
@@ -198,12 +201,40 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 
 // Consume consumes quota for a resource
 // Returns the new total used amount and any error
-func (m *Manager) Consume(ctx context.Context, userID, resource string, amount int, periodType PeriodType) (int, error) {
+func (m *Manager) Consume(ctx context.Context, userID, resource string, amount int, periodType PeriodType, opts ...ConsumeOption) (int, error) {
 	if amount < 0 {
 		return 0, ErrInvalidAmount
 	}
 	if amount == 0 {
 		return 0, nil // No-op
+	}
+
+	// Parse options
+	consumeOpts := &ConsumeOptions{}
+	for _, opt := range opts {
+		opt(consumeOpts)
+	}
+
+	// Check for duplicate consumption using idempotency key
+	if consumeOpts.IdempotencyKey != "" {
+		existing, err := m.storage.GetConsumptionRecord(ctx, consumeOpts.IdempotencyKey)
+		if err != nil {
+			m.logger.Error("failed to check consumption idempotency",
+				Field{"userId", userID},
+				Field{"idempotencyKey", consumeOpts.IdempotencyKey},
+				Field{"error", err},
+			)
+			return 0, err
+		}
+		if existing != nil {
+			// Duplicate consumption request - return cached result (idempotent)
+			m.logger.Info("duplicate consumption request ignored",
+				Field{"userId", userID},
+				Field{"resource", resource},
+				Field{"idempotencyKey", consumeOpts.IdempotencyKey},
+			)
+			return existing.NewUsed, nil
+		}
 	}
 
 	// Get entitlement to determine tier (uses cache)
@@ -246,12 +277,13 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 	// Consume via storage (transaction-safe)
 	cStart := time.Now()
 	newUsed, err := m.storage.ConsumeQuota(ctx, &ConsumeRequest{
-		UserID:   userID,
-		Resource: resource,
-		Amount:   amount,
-		Tier:     tier,
-		Period:   period,
-		Limit:    limit,
+		UserID:         userID,
+		Resource:       resource,
+		Amount:         amount,
+		Tier:           tier,
+		Period:         period,
+		Limit:          limit,
+		IdempotencyKey: consumeOpts.IdempotencyKey,
 	})
 	m.metrics.RecordStorageOperation("ConsumeQuota", time.Since(cStart), err)
 
@@ -260,6 +292,7 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		usageKey := userID + ":" + resource + ":" + period.Key()
 		m.cache.InvalidateUsage(usageKey)
 		m.metrics.RecordConsumption(userID, resource, tier, amount, true)
+
 
 		// Check for warnings
 		m.checkWarnings(ctx, userID, resource, tier, limit, newUsed, amount, period)
