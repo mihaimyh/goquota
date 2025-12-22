@@ -254,17 +254,18 @@ func TestStorage_ApplyTierChange(t *testing.T) {
 	}
 
 	// Apply tier change
-	tierChangeReq := &goquota.TierChangeRequest{
+	tierReq := &goquota.TierChangeRequest{
 		UserID:      "user1",
+		Resource:    "audio_seconds",
 		OldTier:     "scholar",
 		NewTier:     "fluent",
 		Period:      period,
 		OldLimit:    3600,
 		NewLimit:    10000,
-		CurrentUsed: 1000,
+		CurrentUsed: 100,
 	}
 
-	err = storage.ApplyTierChange(ctx, tierChangeReq)
+	err = storage.ApplyTierChange(ctx, tierReq)
 	if err != nil {
 		t.Fatalf("ApplyTierChange failed: %v", err)
 	}

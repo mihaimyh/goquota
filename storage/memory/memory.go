@@ -16,6 +16,7 @@ type Storage struct {
 	mu           sync.RWMutex
 	entitlements map[string]*goquota.Entitlement
 	usage        map[string]*goquota.Usage
+	refunds      map[string]*goquota.RefundRecord // keyed by idempotency key
 }
 
 // New creates a new in-memory storage adapter
@@ -23,6 +24,7 @@ func New() *Storage {
 	return &Storage{
 		entitlements: make(map[string]*goquota.Entitlement),
 		usage:        make(map[string]*goquota.Usage),
+		refunds:      make(map[string]*goquota.RefundRecord),
 	}
 }
 
@@ -117,14 +119,14 @@ func (s *Storage) ApplyTierChange(ctx context.Context, req *goquota.TierChangeRe
 	defer s.mu.Unlock()
 
 	// For in-memory implementation, we just update the limit
-	key := usageKey(req.UserID, "audio_seconds", req.Period)
+	key := usageKey(req.UserID, req.Resource, req.Period)
 
 	usage, ok := s.usage[key]
 	if !ok {
 		// Create new usage with new limit
 		s.usage[key] = &goquota.Usage{
 			UserID:    req.UserID,
-			Resource:  "audio_seconds",
+			Resource:  req.Resource,
 			Used:      req.CurrentUsed,
 			Limit:     req.NewLimit,
 			Period:    req.Period,
@@ -162,6 +164,100 @@ func (s *Storage) SetUsage(ctx context.Context, userID, resource string, usage *
 	return nil
 }
 
+// RefundQuota implements goquota.Storage
+func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) error {
+	if req.Amount < 0 {
+		return goquota.ErrInvalidAmount
+	}
+	if req.Amount == 0 {
+		return nil // No-op
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check for duplicate refund
+	if req.IdempotencyKey != "" {
+		if _, exists := s.refunds[req.IdempotencyKey]; exists {
+			// Duplicate refund - return success (idempotent)
+			return nil
+		}
+	}
+
+	// Calculate period
+	var period goquota.Period
+	// Use period from request if available (populated by Manager)
+	if !req.Period.Start.IsZero() {
+		period = req.Period
+	} else {
+		// Fallback for direct usage (though Manager always sets it)
+		now := time.Now().UTC()
+		switch req.PeriodType {
+		case goquota.PeriodTypeMonthly:
+			// Use simple monthly period calculation
+			start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+			end := start.AddDate(0, 1, 0)
+			period = goquota.Period{Start: start, End: end, Type: goquota.PeriodTypeMonthly}
+		case goquota.PeriodTypeDaily:
+			start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+			end := start.Add(24 * time.Hour)
+			period = goquota.Period{Start: start, End: end, Type: goquota.PeriodTypeDaily}
+		default:
+			return goquota.ErrInvalidPeriod
+		}
+	}
+
+	key := usageKey(req.UserID, req.Resource, period)
+	usage, ok := s.usage[key]
+
+	if !ok {
+		// No usage to refund - this is not an error
+		return nil
+	}
+
+	// Refund the quota (decrease used amount)
+	newUsed := usage.Used - req.Amount
+	if newUsed < 0 {
+		newUsed = 0
+	}
+
+	usage.Used = newUsed
+	usage.UpdatedAt = time.Now().UTC()
+
+	// Store refund record for audit trail
+	if req.IdempotencyKey != "" {
+		record := &goquota.RefundRecord{
+			RefundID:       req.IdempotencyKey, // Using idempotency key as refund ID
+			UserID:         req.UserID,
+			Resource:       req.Resource,
+			Amount:         req.Amount,
+			Period:         period,
+			Timestamp:      time.Now().UTC(),
+			IdempotencyKey: req.IdempotencyKey,
+			Reason:         req.Reason,
+			Metadata:       req.Metadata,
+		}
+		s.refunds[req.IdempotencyKey] = record
+	}
+
+	return nil
+}
+
+// GetRefundRecord implements goquota.Storage
+func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*goquota.RefundRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	record, ok := s.refunds[idempotencyKey]
+	if !ok {
+		return nil, nil // No record found is not an error
+	}
+
+	// Return a copy
+	recordCopy := *record
+	return &recordCopy, nil
+}
+
 // Clear removes all data (useful for testing)
 func (s *Storage) Clear(ctx context.Context) error {
 	s.mu.Lock()
@@ -169,5 +265,6 @@ func (s *Storage) Clear(ctx context.Context) error {
 
 	s.entitlements = make(map[string]*goquota.Entitlement)
 	s.usage = make(map[string]*goquota.Usage)
+	s.refunds = make(map[string]*goquota.RefundRecord)
 	return nil
 }

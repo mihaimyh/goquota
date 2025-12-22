@@ -116,3 +116,28 @@ type Config struct {
 type WarningHandler interface {
 	OnWarning(ctx context.Context, usage *Usage, threshold float64)
 }
+
+// RefundRequest represents a quota refund request
+type RefundRequest struct {
+	UserID         string
+	Resource       string
+	Amount         int
+	PeriodType     PeriodType
+	Period         Period // Populated by Manager
+	IdempotencyKey string
+	Reason         string
+	Metadata       map[string]string
+}
+
+// RefundRecord represents an audit record for a refund
+type RefundRecord struct {
+	RefundID       string
+	UserID         string
+	Resource       string
+	Amount         int
+	Period         Period
+	Timestamp      time.Time
+	IdempotencyKey string
+	Reason         string
+	Metadata       map[string]string
+}
