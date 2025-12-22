@@ -197,8 +197,6 @@ func TestMiddleware_NoEntitlement(t *testing.T) {
 	}
 }
 
-type contextKey string
-
 func TestMiddleware_FromContext(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user_from_ctx", "pro")
