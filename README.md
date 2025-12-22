@@ -14,6 +14,7 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Pluggable storage** - Redis (recommended), Firestore, In-Memory, or custom backends
 - **High Performance** - Redis adapter uses atomic Lua scripts for <1ms latency
 - **Transaction-safe** - Prevent over-consumption with atomic operations
+- **Idempotency Keys** - Prevent double-charging on retries with client-provided idempotency keys
 - **Refund Support** - Gracefully handle failed operations with idempotency and audit trails
 - **Soft Limits & Warnings** - Trigger callbacks when usage approaches limits (e.g. 80%)
 - **Observability** - Built-in Prometheus metrics and structured logging
@@ -67,10 +68,20 @@ func main() {
     })
 
     // Consume quota
-    err := manager.Consume(ctx, "user123", "api_calls", 1, goquota.PeriodTypeMonthly)
+    newUsed, err := manager.Consume(ctx, "user123", "api_calls", 1, goquota.PeriodTypeMonthly)
     if err == goquota.ErrQuotaExceeded {
         // Handle quota exceeded
     }
+    
+    // Consume with idempotency key (prevents double-charging on retries)
+    newUsed, err = manager.Consume(
+        ctx, 
+        "user123", 
+        "api_calls", 
+        1, 
+        goquota.PeriodTypeMonthly,
+        goquota.WithIdempotencyKey("unique-request-id-123"),
+    )
 }
 ```
 
@@ -123,6 +134,38 @@ storage := memory.New()
 ```
 
 ## Advanced Features
+
+### Idempotency Keys
+
+Prevent double-charging when clients retry failed requests by providing idempotency keys to `Consume` operations.
+
+```go
+// First request with idempotency key
+newUsed, err := manager.Consume(
+    ctx, 
+    "user123", 
+    "api_calls", 
+    1, 
+    goquota.PeriodTypeMonthly,
+    goquota.WithIdempotencyKey("req_abc123"), // Unique key for this operation
+)
+if err != nil {
+    // Request failed, client retries...
+}
+
+// Retry with same idempotency key - returns cached result, no double-charge
+newUsed, err = manager.Consume(
+    ctx, 
+    "user123", 
+    "api_calls", 
+    1, 
+    goquota.PeriodTypeMonthly,
+    goquota.WithIdempotencyKey("req_abc123"), // Same key
+)
+// Returns the same newUsed value from first request, quota only consumed once
+```
+
+Idempotency keys are automatically deduplicated across all storage backends and have a configurable TTL (default: 24 hours).
 
 ### Quota Refunds
 
@@ -210,7 +253,7 @@ See the [examples](examples/) directory:
 
 ```go
 // Core Operations
-Consume(ctx, userID, resource, amount, periodType) error
+Consume(ctx, userID, resource, amount, periodType, opts ...ConsumeOption) (int, error)
 Refund(ctx, req *RefundRequest) error
 GetQuota(ctx, userID, resource, periodType) (*Usage, error)
 
