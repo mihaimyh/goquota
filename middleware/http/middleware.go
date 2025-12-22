@@ -62,7 +62,7 @@ type Config struct {
 }
 
 // Middleware creates an HTTP middleware that enforces quota limits
-func Middleware(config Config) func(http.Handler) http.Handler {
+func Middleware(config *Config) func(http.Handler) http.Handler {
 	// Set defaults
 	if config.PeriodType == "" {
 		config.PeriodType = goquota.PeriodTypeMonthly
@@ -119,8 +119,8 @@ func Middleware(config Config) func(http.Handler) http.Handler {
 			if err != nil {
 				if err == goquota.ErrQuotaExceeded {
 					// Get current usage for error response
-					usage, _ := config.Manager.GetQuota(ctx, userID, resource, config.PeriodType)
-					if config.OnQuotaExceeded != nil {
+					usage, err := config.Manager.GetQuota(ctx, userID, resource, config.PeriodType)
+					if err == nil && config.OnQuotaExceeded != nil {
 						config.OnQuotaExceeded(w, r, usage)
 					} else {
 						msg := fmt.Sprintf("Quota exceeded: %d/%d %s used", usage.Used, usage.Limit, resource)
@@ -148,7 +148,7 @@ type warningHandler struct {
 	f func(http.ResponseWriter, *http.Request, *goquota.Usage, float64)
 }
 
-func (h *warningHandler) OnWarning(ctx context.Context, usage *goquota.Usage, threshold float64) {
+func (h *warningHandler) OnWarning(_ context.Context, usage *goquota.Usage, threshold float64) {
 	if h.f != nil {
 		h.f(h.w, h.r, usage, threshold)
 	}
@@ -156,14 +156,14 @@ func (h *warningHandler) OnWarning(ctx context.Context, usage *goquota.Usage, th
 
 // DefaultWarningHandler is the default OnWarning implementation.
 // It adds X-Quota-Warning-Threshold and X-Quota-Warning-Used headers.
-func DefaultWarningHandler(w http.ResponseWriter, r *http.Request, usage *goquota.Usage, threshold float64) {
+func DefaultWarningHandler(w http.ResponseWriter, _ *http.Request, usage *goquota.Usage, threshold float64) {
 	w.Header().Add("X-Quota-Warning-Threshold", fmt.Sprintf("%.2f", threshold))
 	w.Header().Add("X-Quota-Warning-Used", fmt.Sprintf("%d", usage.Used))
 	w.Header().Add("X-Quota-Warning-Limit", fmt.Sprintf("%d", usage.Limit))
 }
 
 // HandlerFunc creates an HTTP middleware that enforces quota limits (HandlerFunc version)
-func HandlerFunc(config Config) func(http.HandlerFunc) http.HandlerFunc {
+func HandlerFunc(config *Config) func(http.HandlerFunc) http.HandlerFunc {
 	middleware := Middleware(config)
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +176,7 @@ func HandlerFunc(config Config) func(http.HandlerFunc) http.HandlerFunc {
 
 // FixedAmount returns an AmountExtractor that always returns a fixed amount
 func FixedAmount(amount int) AmountExtractor {
-	return func(r *http.Request) (int, error) {
+	return func(_ *http.Request) (int, error) {
 		return amount, nil
 	}
 }
@@ -248,7 +248,7 @@ func FromHeader(headerName string) UserIDExtractor {
 
 // FixedResource returns a ResourceExtractor that always returns a fixed resource name
 func FixedResource(resource string) ResourceExtractor {
-	return func(r *http.Request) string {
+	return func(_ *http.Request) string {
 		return resource
 	}
 }

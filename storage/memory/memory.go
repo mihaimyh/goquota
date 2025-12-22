@@ -16,7 +16,7 @@ type Storage struct {
 	mu           sync.RWMutex
 	entitlements map[string]*goquota.Entitlement
 	usage        map[string]*goquota.Usage
-	refunds      map[string]*goquota.RefundRecord // keyed by idempotency key
+	refunds      map[string]*goquota.RefundRecord      // keyed by idempotency key
 	consumptions map[string]*goquota.ConsumptionRecord // keyed by idempotency key
 }
 
@@ -31,7 +31,7 @@ func New() *Storage {
 }
 
 // GetEntitlement implements goquota.Storage
-func (s *Storage) GetEntitlement(ctx context.Context, userID string) (*goquota.Entitlement, error) {
+func (s *Storage) GetEntitlement(_ context.Context, userID string) (*goquota.Entitlement, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -46,7 +46,7 @@ func (s *Storage) GetEntitlement(ctx context.Context, userID string) (*goquota.E
 }
 
 // SetEntitlement implements goquota.Storage
-func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) error {
+func (s *Storage) SetEntitlement(_ context.Context, ent *goquota.Entitlement) error {
 	if ent == nil || ent.UserID == "" {
 		return fmt.Errorf("invalid entitlement")
 	}
@@ -61,7 +61,7 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 }
 
 // GetUsage implements goquota.Storage
-func (s *Storage) GetUsage(ctx context.Context, userID, resource string, period goquota.Period) (*goquota.Usage, error) {
+func (s *Storage) GetUsage(_ context.Context, userID, resource string, period goquota.Period) (*goquota.Usage, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -77,7 +77,7 @@ func (s *Storage) GetUsage(ctx context.Context, userID, resource string, period 
 }
 
 // ConsumeQuota implements goquota.Storage with transaction-safe consumption
-func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest) (int, error) {
+func (s *Storage) ConsumeQuota(_ context.Context, req *goquota.ConsumeRequest) (int, error) {
 	if req.Amount < 0 {
 		return 0, goquota.ErrInvalidAmount
 	}
@@ -139,7 +139,7 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 }
 
 // ApplyTierChange implements goquota.Storage
-func (s *Storage) ApplyTierChange(ctx context.Context, req *goquota.TierChangeRequest) error {
+func (s *Storage) ApplyTierChange(_ context.Context, req *goquota.TierChangeRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -175,7 +175,8 @@ func usageKey(userID, resource string, period goquota.Period) string {
 }
 
 // SetUsage implements goquota.Storage
-func (s *Storage) SetUsage(ctx context.Context, userID, resource string, usage *goquota.Usage, period goquota.Period) error {
+func (s *Storage) SetUsage(_ context.Context, userID, resource string,
+	usage *goquota.Usage, period goquota.Period) error {
 	if usage == nil {
 		return fmt.Errorf("usage is required")
 	}
@@ -190,7 +191,7 @@ func (s *Storage) SetUsage(ctx context.Context, userID, resource string, usage *
 }
 
 // RefundQuota implements goquota.Storage
-func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) error {
+func (s *Storage) RefundQuota(_ context.Context, req *goquota.RefundRequest) error {
 	if req.Amount < 0 {
 		return goquota.ErrInvalidAmount
 	}
@@ -269,7 +270,7 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 }
 
 // GetRefundRecord implements goquota.Storage
-func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*goquota.RefundRecord, error) {
+func (s *Storage) GetRefundRecord(_ context.Context, idempotencyKey string) (*goquota.RefundRecord, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -284,7 +285,7 @@ func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*
 }
 
 // GetConsumptionRecord implements goquota.Storage
-func (s *Storage) GetConsumptionRecord(ctx context.Context, idempotencyKey string) (*goquota.ConsumptionRecord, error) {
+func (s *Storage) GetConsumptionRecord(_ context.Context, idempotencyKey string) (*goquota.ConsumptionRecord, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -299,7 +300,7 @@ func (s *Storage) GetConsumptionRecord(ctx context.Context, idempotencyKey strin
 }
 
 // Clear removes all data (useful for testing)
-func (s *Storage) Clear(ctx context.Context) error {
+func (s *Storage) Clear(_ context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

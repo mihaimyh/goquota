@@ -57,7 +57,7 @@ func main() {
     }
 
     // Create manager
-    manager, _ := goquota.NewManager(storage, config)
+    manager, _ := goquota.NewManager(storage, &config)
 
     // Set user entitlement
     ctx := context.Background()

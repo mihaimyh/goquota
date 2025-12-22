@@ -60,7 +60,8 @@ func (s *CircuitBreakerStorage) ApplyTierChange(ctx context.Context, req *TierCh
 	})
 }
 
-func (s *CircuitBreakerStorage) SetUsage(ctx context.Context, userID, resource string, usage *Usage, period Period) error {
+func (s *CircuitBreakerStorage) SetUsage(ctx context.Context, userID, resource string,
+	usage *Usage, period Period) error {
 	return s.cb.Execute(ctx, func() error {
 		return s.storage.SetUsage(ctx, userID, resource, usage, period)
 	})
@@ -82,7 +83,8 @@ func (s *CircuitBreakerStorage) GetRefundRecord(ctx context.Context, idempotency
 	return record, err
 }
 
-func (s *CircuitBreakerStorage) GetConsumptionRecord(ctx context.Context, idempotencyKey string) (*ConsumptionRecord, error) {
+func (s *CircuitBreakerStorage) GetConsumptionRecord(ctx context.Context,
+	idempotencyKey string) (*ConsumptionRecord, error) {
 	var record *ConsumptionRecord
 	err := s.cb.Execute(ctx, func() error {
 		var e error

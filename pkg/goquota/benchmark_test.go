@@ -20,7 +20,7 @@ func BenchmarkManager_Consume(b *testing.B) {
 		},
 	}
 
-	manager, _ := goquota.NewManager(storage, config)
+	manager, _ := goquota.NewManager(storage, &config)
 	ctx := context.Background()
 
 	_ = manager.SetEntitlement(ctx, &goquota.Entitlement{
@@ -47,7 +47,7 @@ func BenchmarkManager_GetQuota(b *testing.B) {
 		},
 	}
 
-	manager, _ := goquota.NewManager(storage, config)
+	manager, _ := goquota.NewManager(storage, &config)
 	ctx := context.Background()
 
 	_ = manager.SetEntitlement(ctx, &goquota.Entitlement{
@@ -72,7 +72,7 @@ func BenchmarkManager_GetCurrentCycle(b *testing.B) {
 		},
 	}
 
-	manager, _ := goquota.NewManager(storage, config)
+	manager, _ := goquota.NewManager(storage, &config)
 	ctx := context.Background()
 
 	_ = manager.SetEntitlement(ctx, &goquota.Entitlement{
@@ -123,7 +123,7 @@ func BenchmarkManager_ApplyTierChange(b *testing.B) {
 		},
 	}
 
-	manager, _ := goquota.NewManager(storage, config)
+	manager, _ := goquota.NewManager(storage, &config)
 	ctx := context.Background()
 
 	_ = manager.SetEntitlement(ctx, &goquota.Entitlement{

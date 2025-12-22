@@ -24,14 +24,15 @@ func TestManager_Refund(t *testing.T) {
 		CacheTTL: time.Minute,
 	}
 
-	manager, err := goquota.NewManager(store, cfg)
+	manager, err := goquota.NewManager(store, &cfg)
 	if err != nil {
 		t.Fatalf("failed to create manager: %v", err)
 	}
 
+	const testResourceAPICalls = "api_calls"
 	ctx := context.Background()
 	userID := "test_user_refund"
-	resource := "api_calls"
+	resource := testResourceAPICalls
 
 	// 1. Initial Consumption
 	_, err = manager.Consume(ctx, userID, resource, 100, goquota.PeriodTypeMonthly)
@@ -126,7 +127,7 @@ func TestManager_Refund_Concurrency(t *testing.T) {
 		},
 		CacheTTL: time.Minute,
 	}
-	manager, _ := goquota.NewManager(store, cfg)
+	manager, _ := goquota.NewManager(store, &cfg)
 	ctx := context.Background()
 	userID := "test_user_concurrent"
 	resource := "api_calls"

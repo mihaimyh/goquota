@@ -17,11 +17,11 @@ import (
 
 // Storage implements goquota.Storage using Google Cloud Firestore
 type Storage struct {
-	client                  *firestore.Client
-	entitlementsCollection  string
-	usageCollection         string
-	refundsCollection       string
-	consumptionsCollection  string
+	client                 *firestore.Client
+	entitlementsCollection string
+	usageCollection        string
+	refundsCollection      string
+	consumptionsCollection string
 }
 
 // Config holds Firestore storage configuration
@@ -64,11 +64,11 @@ func New(client *firestore.Client, config Config) (*Storage, error) {
 	}
 
 	return &Storage{
-		client:                  client,
-		entitlementsCollection:  config.EntitlementsCollection,
-		usageCollection:         config.UsageCollection,
-		refundsCollection:       config.RefundsCollection,
-		consumptionsCollection:  config.ConsumptionsCollection,
+		client:                 client,
+		entitlementsCollection: config.EntitlementsCollection,
+		usageCollection:        config.UsageCollection,
+		refundsCollection:      config.RefundsCollection,
+		consumptionsCollection: config.ConsumptionsCollection,
 	}, nil
 }
 
@@ -129,7 +129,8 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 }
 
 // GetUsage implements goquota.Storage
-func (s *Storage) GetUsage(ctx context.Context, userID, resource string, period goquota.Period) (*goquota.Usage, error) {
+func (s *Storage) GetUsage(ctx context.Context, userID, resource string,
+	period goquota.Period) (*goquota.Usage, error) {
 	doc := s.usageDoc(userID, resource, period)
 	snap, err := doc.Get(ctx)
 	if err != nil {
@@ -169,7 +170,7 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 	doc := s.usageDoc(req.UserID, req.Resource, req.Period)
 	var newUsed int
 
-	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+	err := s.client.RunTransaction(ctx, func(_ context.Context, tx *firestore.Transaction) error {
 		// 1. Check idempotency if key provided
 		if req.IdempotencyKey != "" {
 			consumptionDocRef := s.client.Collection(s.consumptionsCollection).Doc(req.IdempotencyKey)
@@ -251,7 +252,7 @@ func (s *Storage) ApplyTierChange(ctx context.Context, req *goquota.TierChangeRe
 	// Calculate prorated limit (already done by Manager, just store it)
 	doc := s.usageDoc(req.UserID, "audio_seconds", req.Period) // Assuming audio_seconds resource
 
-	return s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+	return s.client.RunTransaction(ctx, func(_ context.Context, tx *firestore.Transaction) error {
 		snap, err := tx.Get(doc)
 
 		currentUsed := req.CurrentUsed
@@ -276,7 +277,8 @@ func (s *Storage) ApplyTierChange(ctx context.Context, req *goquota.TierChangeRe
 }
 
 // SetUsage implements goquota.Storage
-func (s *Storage) SetUsage(ctx context.Context, userID, resource string, usage *goquota.Usage, period goquota.Period) error {
+func (s *Storage) SetUsage(ctx context.Context, userID, resource string,
+	usage *goquota.Usage, period goquota.Period) error {
 	if usage == nil {
 		return fmt.Errorf("usage is required")
 	}
@@ -310,95 +312,129 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 	}
 
 	// Transaction to ensure atomicity of usage update and audit log creation
-	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+	err := s.client.RunTransaction(ctx, func(_ context.Context, tx *firestore.Transaction) error {
 		// 1. Check idempotency if key provided
-		if req.IdempotencyKey != "" {
-			refundDocRef := s.client.Collection(s.refundsCollection).Doc(req.IdempotencyKey)
-			snap, err := tx.Get(refundDocRef)
-			if err != nil && status.Code(err) != codes.NotFound {
-				return err
-			}
-			if snap.Exists() {
-				// Idempotency hit - treat as success
-				return nil
-			}
+		if err := s.checkRefundIdempotency(tx, req.IdempotencyKey); err != nil {
+			return err
 		}
 
 		// 2. Calculate period
-		var period goquota.Period
-		now := time.Now().UTC()
-		if !req.Period.Start.IsZero() {
-			period = req.Period
-		} else {
-			switch req.PeriodType {
-			case goquota.PeriodTypeMonthly:
-				start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-				end := start.AddDate(0, 1, 0)
-				period = goquota.Period{Start: start, End: end, Type: goquota.PeriodTypeMonthly}
-			case goquota.PeriodTypeDaily:
-				start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-				end := start.Add(24 * time.Hour)
-				period = goquota.Period{Start: start, End: end, Type: goquota.PeriodTypeDaily}
-			default:
-				return goquota.ErrInvalidPeriod
-			}
+		period := s.calculateRefundPeriod(req)
+		if period.Type == "" {
+			return goquota.ErrInvalidPeriod
 		}
 
-		// 3. Get current usage
-		usageDoc := s.usageDoc(req.UserID, req.Resource, period)
-		snap, err := tx.Get(usageDoc)
-		if err != nil {
-			if status.Code(err) == codes.NotFound {
-				// No usage to refund, just return nil
-				return nil
-			}
+		// 3. Get current usage and update
+		if err := s.updateRefundUsage(tx, req, period); err != nil {
 			return err
 		}
 
-		currentUsed := 0
-		if snap.Exists() {
-			currentUsed = getInt(snap.Data(), "used")
-		}
-
-		// 4. Update usage
-		newUsed := currentUsed - req.Amount
-		if newUsed < 0 {
-			newUsed = 0
-		}
-
-		err = tx.Set(usageDoc, map[string]interface{}{
-			"used":      newUsed,
-			"updatedAt": now,
-		}, firestore.MergeAll)
-		if err != nil {
-			return err
-		}
-
-		// 5. Create refund audit record
-		if req.IdempotencyKey != "" {
-			refundDocRef := s.client.Collection(s.refundsCollection).Doc(req.IdempotencyKey)
-			err = tx.Create(refundDocRef, map[string]interface{}{
-				"refundId":       req.IdempotencyKey,
-				"userId":         req.UserID,
-				"resource":       req.Resource,
-				"amount":         req.Amount,
-				"periodStart":    period.Start,
-				"periodEnd":      period.End,
-				"periodType":     string(req.PeriodType),
-				"timestamp":      now,
-				"idempotencyKey": req.IdempotencyKey,
-				"reason":         req.Reason,
-				"metadata":       req.Metadata,
-			})
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
+		// 4. Create refund audit record
+		return s.createRefundRecord(tx, req, period)
 	})
 
 	return err
+}
+
+// checkRefundIdempotency checks if a refund with the given idempotency key already exists
+func (s *Storage) checkRefundIdempotency(tx *firestore.Transaction, idempotencyKey string) error {
+	if idempotencyKey == "" {
+		return nil
+	}
+
+	refundDocRef := s.client.Collection(s.refundsCollection).Doc(idempotencyKey)
+	snap, err := tx.Get(refundDocRef)
+	if err != nil && status.Code(err) != codes.NotFound {
+		return err
+	}
+	if snap.Exists() {
+		// Idempotency hit - treat as success
+		return nil
+	}
+	return nil
+}
+
+// calculateRefundPeriod calculates the period for the refund request
+func (s *Storage) calculateRefundPeriod(req *goquota.RefundRequest) goquota.Period {
+	if !req.Period.Start.IsZero() {
+		return req.Period
+	}
+
+	now := time.Now().UTC()
+	switch req.PeriodType {
+	case goquota.PeriodTypeMonthly:
+		start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		end := start.AddDate(0, 1, 0)
+		return goquota.Period{Start: start, End: end, Type: goquota.PeriodTypeMonthly}
+	case goquota.PeriodTypeDaily:
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		end := start.Add(24 * time.Hour)
+		return goquota.Period{Start: start, End: end, Type: goquota.PeriodTypeDaily}
+	default:
+		// Return empty period - will be handled by caller
+		return goquota.Period{}
+	}
+}
+
+// updateRefundUsage updates the usage document with the refund amount
+func (s *Storage) updateRefundUsage(
+	tx *firestore.Transaction,
+	req *goquota.RefundRequest,
+	period goquota.Period,
+) error {
+	usageDoc := s.usageDoc(req.UserID, req.Resource, period)
+	snap, err := tx.Get(usageDoc)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			// No usage to refund, just return nil
+			return nil
+		}
+		return err
+	}
+
+	currentUsed := 0
+	if snap.Exists() {
+		currentUsed = getInt(snap.Data(), "used")
+	}
+
+	// Calculate new used amount (clamp to 0)
+	newUsed := currentUsed - req.Amount
+	if newUsed < 0 {
+		newUsed = 0
+	}
+
+	now := time.Now().UTC()
+	return tx.Set(usageDoc, map[string]interface{}{
+		"used":      newUsed,
+		"updatedAt": now,
+	}, firestore.MergeAll)
+}
+
+// createRefundRecord creates an audit record for the refund
+func (s *Storage) createRefundRecord(
+	tx *firestore.Transaction,
+	req *goquota.RefundRequest,
+	period goquota.Period,
+) error {
+	if req.IdempotencyKey == "" {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	refundDocRef := s.client.Collection(s.refundsCollection).Doc(req.IdempotencyKey)
+	return tx.Create(refundDocRef, map[string]interface{}{
+		"refundId":       req.IdempotencyKey,
+		"userId":         req.UserID,
+		"resource":       req.Resource,
+		"amount":         req.Amount,
+		"periodStart":    period.Start,
+		"periodEnd":      period.End,
+		"periodType":     string(req.PeriodType),
+		"timestamp":      now,
+		"idempotencyKey": req.IdempotencyKey,
+		"reason":         req.Reason,
+		"metadata":       req.Metadata,
+	})
 }
 
 // GetRefundRecord implements goquota.Storage
@@ -417,9 +453,10 @@ func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*
 
 	data := snap.Data()
 
+	const dailyPeriodType = "daily"
 	periodTypeStr := getString(data, "periodType")
 	var periodType goquota.PeriodType
-	if periodTypeStr == "daily" {
+	if periodTypeStr == dailyPeriodType {
 		periodType = goquota.PeriodTypeDaily
 	} else {
 		periodType = goquota.PeriodTypeMonthly
@@ -470,9 +507,10 @@ func (s *Storage) GetConsumptionRecord(ctx context.Context, idempotencyKey strin
 
 	data := snap.Data()
 
+	const dailyPeriodType = "daily"
 	periodTypeStr := getString(data, "periodType")
 	var periodType goquota.PeriodType
-	if periodTypeStr == "daily" {
+	if periodTypeStr == dailyPeriodType {
 		periodType = goquota.PeriodTypeDaily
 	} else {
 		periodType = goquota.PeriodTypeMonthly

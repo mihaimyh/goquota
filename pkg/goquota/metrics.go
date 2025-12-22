@@ -26,9 +26,9 @@ type Metrics interface {
 // NoopMetrics is a no-op implementation of the Metrics interface.
 type NoopMetrics struct{}
 
-func (n *NoopMetrics) RecordConsumption(userID, resource, tier string, amount int, success bool)  {}
-func (n *NoopMetrics) RecordQuotaCheck(userID, resource string, duration time.Duration)           {}
-func (n *NoopMetrics) RecordCacheHit(cacheType string)                                            {}
-func (n *NoopMetrics) RecordCacheMiss(cacheType string)                                           {}
-func (n *NoopMetrics) RecordStorageOperation(operation string, duration time.Duration, err error) {}
-func (n *NoopMetrics) RecordCircuitBreakerStateChange(state string)                               {}
+func (n *NoopMetrics) RecordConsumption(_, _, _ string, _ int, _ bool)           {}
+func (n *NoopMetrics) RecordQuotaCheck(_, _ string, _ time.Duration)             {}
+func (n *NoopMetrics) RecordCacheHit(_ string)                                   {}
+func (n *NoopMetrics) RecordCacheMiss(_ string)                                  {}
+func (n *NoopMetrics) RecordStorageOperation(_ string, _ time.Duration, _ error) {}
+func (n *NoopMetrics) RecordCircuitBreakerStateChange(_ string)                  {}

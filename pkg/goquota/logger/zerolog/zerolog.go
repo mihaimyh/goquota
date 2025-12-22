@@ -1,8 +1,9 @@
 package zerolog
 
 import (
-	"github.com/mihaimyh/goquota/pkg/goquota"
 	"github.com/rs/zerolog"
+
+	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
 // Logger implements goquota.Logger using zerolog.
@@ -11,8 +12,12 @@ type Logger struct {
 }
 
 // NewLogger creates a new zerolog logger adapter.
-func NewLogger(logger zerolog.Logger) *Logger {
-	return &Logger{logger: logger}
+func NewLogger(logger *zerolog.Logger) *Logger {
+	if logger == nil {
+		l := zerolog.Nop()
+		logger = &l
+	}
+	return &Logger{logger: *logger}
 }
 
 func (l *Logger) Debug(msg string, fields ...goquota.Field) {

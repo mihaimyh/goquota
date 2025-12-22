@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
+
 	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
@@ -33,7 +34,7 @@ func setupFirestoreClient(t *testing.T) *firestore.Client {
 }
 
 // getTestCollections returns unique collection names for each test run
-func getTestCollections(testName string) (string, string) {
+func getTestCollections(testName string) (entColl, usageColl string) {
 	timestamp := time.Now().UnixNano()
 	return fmt.Sprintf("test_ent_%s_%d", testName, timestamp),
 		fmt.Sprintf("test_usage_%s_%d", testName, timestamp)
@@ -391,7 +392,8 @@ func TestFirestore_ApplyTierChange(t *testing.T) {
 	if usage.Limit != 18000 {
 		t.Errorf("Expected new limit 18000, got %d", usage.Limit)
 	}
-	if usage.Tier != "fluent" {
+	const expectedTier = "fluent"
+	if usage.Tier != expectedTier {
 		t.Errorf("Expected tier fluent, got %s", usage.Tier)
 	}
 	if usage.Used != 1000 {
@@ -529,13 +531,14 @@ func TestFirestore_ConsumeQuota_WithIdempotencyKey(t *testing.T) {
 	defer client.Close()
 
 	entColl, usageColl := getTestCollections("TestFirestore_ConsumeQuota_WithIdempotencyKey")
-	refundsColl, consumptionsColl := getTestCollections("TestFirestore_ConsumeQuota_WithIdempotencyKey_refunds_consumptions")
+	refundsColl, consumptionsColl := getTestCollections(
+		"TestFirestore_ConsumeQuota_WithIdempotencyKey_refunds_consumptions")
 
 	storage, _ := New(client, Config{
-		EntitlementsCollection:  entColl,
-		UsageCollection:          usageColl,
-		RefundsCollection:        refundsColl,
-		ConsumptionsCollection:   consumptionsColl,
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+		RefundsCollection:      refundsColl,
+		ConsumptionsCollection: consumptionsColl,
 	})
 
 	defer cleanupFirestore(t, client, entColl, usageColl, refundsColl, consumptionsColl)
@@ -632,5 +635,554 @@ func TestFirestore_GetConsumptionRecord_NotFound(t *testing.T) {
 	}
 	if record != nil {
 		t.Errorf("Expected nil record, got %+v", record)
+	}
+}
+
+// Phase 1.4: Firestore Storage RefundQuota Tests
+
+func TestFirestore_RefundQuota_Basic(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_RefundQuota_Basic")
+	refundsColl, _ := getTestCollections("TestFirestore_RefundQuota_Basic_refunds")
+
+	storage, _ := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+		RefundsCollection:      refundsColl,
+	})
+
+	defer cleanupFirestore(t, client, entColl, usageColl, refundsColl)
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	// Consume some quota first
+	consumeReq := &goquota.ConsumeRequest{
+		UserID:   "user1",
+		Resource: "api_calls",
+		Amount:   50,
+		Tier:     "pro",
+		Period:   period,
+		Limit:    100,
+	}
+
+	_, err := storage.ConsumeQuota(ctx, consumeReq)
+	if err != nil {
+		t.Fatalf("ConsumeQuota failed: %v", err)
+	}
+
+	// Refund some quota
+	refundReq := &goquota.RefundRequest{
+		UserID:     "user1",
+		Resource:   "api_calls",
+		Amount:     20,
+		PeriodType: goquota.PeriodTypeDaily,
+		Period:     period,
+		Reason:     "service_failure",
+	}
+
+	err = storage.RefundQuota(ctx, refundReq)
+	if err != nil {
+		t.Fatalf("RefundQuota failed: %v", err)
+	}
+
+	// Verify usage decreased
+	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if usage.Used != 30 {
+		t.Errorf("Expected 30 used (50 - 20), got %d", usage.Used)
+	}
+}
+
+func TestFirestore_RefundQuota_OverRefund(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_RefundQuota_OverRefund")
+	refundsColl, _ := getTestCollections("TestFirestore_RefundQuota_OverRefund_refunds")
+
+	storage, _ := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+		RefundsCollection:      refundsColl,
+	})
+
+	defer cleanupFirestore(t, client, entColl, usageColl, refundsColl)
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	// Consume some quota
+	consumeReq := &goquota.ConsumeRequest{
+		UserID:   "user1",
+		Resource: "api_calls",
+		Amount:   50,
+		Tier:     "pro",
+		Period:   period,
+		Limit:    100,
+	}
+
+	_, err := storage.ConsumeQuota(ctx, consumeReq)
+	if err != nil {
+		t.Fatalf("ConsumeQuota failed: %v", err)
+	}
+
+	// Refund more than used (should clamp to 0)
+	refundReq := &goquota.RefundRequest{
+		UserID:     "user1",
+		Resource:   "api_calls",
+		Amount:     100, // More than used (50)
+		PeriodType: goquota.PeriodTypeDaily,
+		Period:     period,
+		Reason:     "correction",
+	}
+
+	err = storage.RefundQuota(ctx, refundReq)
+	if err != nil {
+		t.Fatalf("RefundQuota failed: %v", err)
+	}
+
+	// Verify usage is 0, not negative
+	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if usage.Used != 0 {
+		t.Errorf("Expected 0 used (clamped), got %d", usage.Used)
+	}
+}
+
+func TestFirestore_RefundQuota_NoUsage(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_RefundQuota_NoUsage")
+	refundsColl, _ := getTestCollections("TestFirestore_RefundQuota_NoUsage_refunds")
+
+	storage, _ := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+		RefundsCollection:      refundsColl,
+	})
+
+	defer cleanupFirestore(t, client, entColl, usageColl, refundsColl)
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	// Refund when no usage exists (should succeed)
+	refundReq := &goquota.RefundRequest{
+		UserID:     "user1",
+		Resource:   "api_calls",
+		Amount:     20,
+		PeriodType: goquota.PeriodTypeDaily,
+		Period:     period,
+		Reason:     "no_usage",
+	}
+
+	err := storage.RefundQuota(ctx, refundReq)
+	if err != nil {
+		t.Fatalf("RefundQuota with no usage should succeed, got %v", err)
+	}
+}
+
+func TestFirestore_RefundQuota_Idempotency(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_RefundQuota_Idempotency")
+	refundsColl, _ := getTestCollections("TestFirestore_RefundQuota_Idempotency_refunds")
+
+	storage, _ := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+		RefundsCollection:      refundsColl,
+	})
+
+	defer cleanupFirestore(t, client, entColl, usageColl, refundsColl)
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	// Consume some quota
+	consumeReq := &goquota.ConsumeRequest{
+		UserID:   "user1",
+		Resource: "api_calls",
+		Amount:   50,
+		Tier:     "pro",
+		Period:   period,
+		Limit:    100,
+	}
+
+	_, err := storage.ConsumeQuota(ctx, consumeReq)
+	if err != nil {
+		t.Fatalf("ConsumeQuota failed: %v", err)
+	}
+
+	idempotencyKey := "refund-key-123"
+
+	// First refund
+	refundReq1 := &goquota.RefundRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         20,
+		PeriodType:     goquota.PeriodTypeDaily,
+		Period:         period,
+		IdempotencyKey: idempotencyKey,
+		Reason:         "test",
+	}
+
+	err = storage.RefundQuota(ctx, refundReq1)
+	if err != nil {
+		t.Fatalf("First RefundQuota failed: %v", err)
+	}
+
+	// Second refund with same idempotency key (should be idempotent)
+	refundReq2 := &goquota.RefundRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         20,
+		PeriodType:     goquota.PeriodTypeDaily,
+		Period:         period,
+		IdempotencyKey: idempotencyKey,
+		Reason:         "test",
+	}
+
+	err = storage.RefundQuota(ctx, refundReq2)
+	if err != nil {
+		t.Fatalf("Second RefundQuota (idempotent) failed: %v", err)
+	}
+
+	// Verify usage only decreased once (50 - 20 = 30)
+	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if usage.Used != 30 {
+		t.Errorf("Expected 30 used (refunded once), got %d", usage.Used)
+	}
+}
+
+// Phase 1.5: Firestore Storage GetRefundRecord Tests
+
+func TestFirestore_GetRefundRecord_Found(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_GetRefundRecord_Found")
+	refundsColl, _ := getTestCollections("TestFirestore_GetRefundRecord_Found_refunds")
+
+	storage, _ := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+		RefundsCollection:      refundsColl,
+	})
+
+	defer cleanupFirestore(t, client, entColl, usageColl, refundsColl)
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	// Consume and refund with idempotency key
+	consumeReq := &goquota.ConsumeRequest{
+		UserID:   "user1",
+		Resource: "api_calls",
+		Amount:   50,
+		Tier:     "pro",
+		Period:   period,
+		Limit:    100,
+	}
+
+	_, err := storage.ConsumeQuota(ctx, consumeReq)
+	if err != nil {
+		t.Fatalf("ConsumeQuota failed: %v", err)
+	}
+
+	idempotencyKey := "refund-record-key"
+	refundReq := &goquota.RefundRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         20,
+		PeriodType:     goquota.PeriodTypeDaily,
+		Period:         period,
+		IdempotencyKey: idempotencyKey,
+		Reason:         "test_reason",
+		Metadata:       map[string]string{"key": "value"},
+	}
+
+	err = storage.RefundQuota(ctx, refundReq)
+	if err != nil {
+		t.Fatalf("RefundQuota failed: %v", err)
+	}
+
+	// Retrieve refund record
+	record, err := storage.GetRefundRecord(ctx, idempotencyKey)
+	if err != nil {
+		t.Fatalf("GetRefundRecord failed: %v", err)
+	}
+	if record == nil {
+		t.Fatal("Expected refund record, got nil")
+	}
+	if record.RefundID != idempotencyKey {
+		t.Errorf("Expected RefundID %s, got %s", idempotencyKey, record.RefundID)
+	}
+	if record.UserID != "user1" {
+		t.Errorf("Expected UserID user1, got %s", record.UserID)
+	}
+	if record.Resource != "api_calls" {
+		t.Errorf("Expected Resource api_calls, got %s", record.Resource)
+	}
+	if record.Amount != 20 {
+		t.Errorf("Expected Amount 20, got %d", record.Amount)
+	}
+	if record.Reason != "test_reason" {
+		t.Errorf("Expected Reason test_reason, got %s", record.Reason)
+	}
+}
+
+func TestFirestore_GetRefundRecord_NotFound(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_GetRefundRecord_NotFound")
+	refundsColl, _ := getTestCollections("TestFirestore_GetRefundRecord_NotFound_refunds")
+
+	storage, _ := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+		RefundsCollection:      refundsColl,
+	})
+
+	defer cleanupFirestore(t, client, entColl, usageColl, refundsColl)
+
+	ctx := context.Background()
+
+	record, err := storage.GetRefundRecord(ctx, "non-existent-key")
+	if err != nil {
+		t.Fatalf("GetRefundRecord failed: %v", err)
+	}
+	if record != nil {
+		t.Errorf("Expected nil record, got %+v", record)
+	}
+}
+
+func TestFirestore_GetRefundRecord_EmptyKey(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_GetRefundRecord_EmptyKey")
+	refundsColl, _ := getTestCollections("TestFirestore_GetRefundRecord_EmptyKey_refunds")
+
+	storage, _ := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+		RefundsCollection:      refundsColl,
+	})
+
+	defer cleanupFirestore(t, client, entColl, usageColl, refundsColl)
+
+	ctx := context.Background()
+
+	record, err := storage.GetRefundRecord(ctx, "")
+	if err != nil {
+		t.Fatalf("GetRefundRecord with empty key failed: %v", err)
+	}
+	if record != nil {
+		t.Errorf("Expected nil record for empty key, got %+v", record)
+	}
+}
+
+// Phase 1.6: Firestore Storage SetUsage Tests
+
+func TestFirestore_SetUsage_Basic(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_SetUsage_Basic")
+
+	storage, _ := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+	})
+
+	defer cleanupFirestore(t, client, entColl, usageColl)
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	usage := &goquota.Usage{
+		UserID:    "user1",
+		Resource:  "api_calls",
+		Used:      75,
+		Limit:     100,
+		Period:    period,
+		Tier:      "pro",
+		UpdatedAt: time.Now().UTC(),
+	}
+
+	err := storage.SetUsage(ctx, "user1", "api_calls", usage, period)
+	if err != nil {
+		t.Fatalf("SetUsage failed: %v", err)
+	}
+
+	// Verify usage was set
+	retrieved, err := storage.GetUsage(ctx, "user1", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if retrieved == nil {
+		t.Fatal("Expected usage, got nil")
+	}
+	if retrieved.Used != 75 {
+		t.Errorf("Expected Used 75, got %d", retrieved.Used)
+	}
+	if retrieved.Limit != 100 {
+		t.Errorf("Expected Limit 100, got %d", retrieved.Limit)
+	}
+	if retrieved.Tier != "pro" {
+		t.Errorf("Expected Tier pro, got %s", retrieved.Tier)
+	}
+}
+
+func TestFirestore_SetUsage_Overwrite(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_SetUsage_Overwrite")
+
+	storage, _ := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+	})
+
+	defer cleanupFirestore(t, client, entColl, usageColl)
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	// Set initial usage
+	usage1 := &goquota.Usage{
+		UserID:    "user1",
+		Resource:  "api_calls",
+		Used:      50,
+		Limit:     100,
+		Period:    period,
+		Tier:      "pro",
+		UpdatedAt: time.Now().UTC(),
+	}
+
+	err := storage.SetUsage(ctx, "user1", "api_calls", usage1, period)
+	if err != nil {
+		t.Fatalf("First SetUsage failed: %v", err)
+	}
+
+	// Overwrite with new usage
+	usage2 := &goquota.Usage{
+		UserID:    "user1",
+		Resource:  "api_calls",
+		Used:      80,
+		Limit:     150,
+		Period:    period,
+		Tier:      "fluent",
+		UpdatedAt: time.Now().UTC(),
+	}
+
+	err = storage.SetUsage(ctx, "user1", "api_calls", usage2, period)
+	if err != nil {
+		t.Fatalf("Second SetUsage failed: %v", err)
+	}
+
+	// Verify overwritten usage
+	retrieved, err := storage.GetUsage(ctx, "user1", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if retrieved.Used != 80 {
+		t.Errorf("Expected Used 80 (overwritten), got %d", retrieved.Used)
+	}
+	if retrieved.Limit != 150 {
+		t.Errorf("Expected Limit 150 (overwritten), got %d", retrieved.Limit)
+	}
+	if retrieved.Tier != "fluent" {
+		t.Errorf("Expected Tier fluent (overwritten), got %s", retrieved.Tier)
+	}
+}
+
+func TestFirestore_SetUsage_ErrorHandling(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_SetUsage_ErrorHandling")
+
+	storage, _ := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+	})
+
+	defer cleanupFirestore(t, client, entColl, usageColl)
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	// Test nil usage error
+	err := storage.SetUsage(ctx, "user1", "api_calls", nil, period)
+	if err == nil {
+		t.Error("Expected error for nil usage, got nil")
+	}
+
+	// Test with invalid context (canceled)
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	usage := &goquota.Usage{
+		UserID:    "user1",
+		Resource:  "api_calls",
+		Used:      50,
+		Limit:     100,
+		Period:    period,
+		Tier:      "pro",
+		UpdatedAt: time.Now().UTC(),
+	}
+
+	// This should fail due to canceled context
+	err = storage.SetUsage(canceledCtx, "user1", "api_calls", usage, period)
+	if err == nil {
+		t.Error("Expected error for canceled context, got nil")
 	}
 }

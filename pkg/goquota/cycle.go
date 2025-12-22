@@ -40,7 +40,8 @@ func CurrentCycleForStart(start, now time.Time) (cycleStart, cycleEnd time.Time)
 // If the target day doesn't exist in the result month (e.g., Feb 31), it uses the last day of that month.
 func addMonthsSafeWithDay(base time.Time, months, targetDay int) time.Time {
 	year, month, _ := base.Date()
-	targetDate := time.Date(year, month+time.Month(months), 1, base.Hour(), base.Minute(), base.Second(), base.Nanosecond(), base.Location())
+	targetDate := time.Date(year, month+time.Month(months), 1,
+		base.Hour(), base.Minute(), base.Second(), base.Nanosecond(), base.Location())
 
 	// Find the last day of the target month
 	lastDay := time.Date(targetDate.Year(), targetDate.Month()+1, 0, 0, 0, 0, 0, targetDate.Location()).Day()
@@ -50,14 +51,16 @@ func addMonthsSafeWithDay(base time.Time, months, targetDay int) time.Time {
 		actualDay = lastDay
 	}
 
-	return time.Date(targetDate.Year(), targetDate.Month(), actualDay, base.Hour(), base.Minute(), base.Second(), base.Nanosecond(), base.Location())
+	return time.Date(targetDate.Year(), targetDate.Month(), actualDay,
+		base.Hour(), base.Minute(), base.Second(), base.Nanosecond(), base.Location())
 }
 
 // addMonthsSafe adds months to a time, handling month-end edge cases.
 // Standard Go pattern: Use time.Date with day=1 to avoid overflow, then clip to max day.
 func addMonthsSafe(t time.Time, months int) time.Time {
 	year, month, day := t.Date()
-	targetDate := time.Date(year, month+time.Month(months), 1, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
+	targetDate := time.Date(year, month+time.Month(months), 1,
+		t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
 
 	// Find the last day of the target month.
 	// day=0 of month+1 is the last day of month.
@@ -68,7 +71,8 @@ func addMonthsSafe(t time.Time, months int) time.Time {
 		actualDay = lastDay
 	}
 
-	return time.Date(targetDate.Year(), targetDate.Month(), actualDay, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
+	return time.Date(targetDate.Year(), targetDate.Month(), actualDay,
+		t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
 }
 
 // startOfDayUTC returns the start of day (00:00:00) in UTC for the given time.

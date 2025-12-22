@@ -24,12 +24,31 @@ type Manager struct {
 }
 
 // NewManager creates a new quota manager with the given storage and configuration
-func NewManager(storage Storage, config Config) (*Manager, error) {
+func NewManager(storage Storage, config *Config) (*Manager, error) {
 	if storage == nil {
 		return nil, ErrStorageUnavailable
 	}
+	if config == nil {
+		config = &Config{}
+	}
 
-	// Set defaults
+	applyConfigDefaults(config)
+	cache := initializeCache(config)
+	metrics := initializeMetrics(config.Metrics)
+	logger := initializeLogger(config.Logger)
+	currentStorage := initializeCircuitBreaker(storage, config.CircuitBreakerConfig, metrics)
+
+	return &Manager{
+		storage: currentStorage,
+		config:  *config,
+		cache:   cache,
+		metrics: metrics,
+		logger:  logger,
+	}, nil
+}
+
+// applyConfigDefaults sets default values for config fields
+func applyConfigDefaults(config *Config) {
 	if config.CacheTTL == 0 {
 		config.CacheTTL = time.Minute
 	}
@@ -39,66 +58,71 @@ func NewManager(storage Storage, config Config) (*Manager, error) {
 	if config.IdempotencyKeyTTL == 0 {
 		config.IdempotencyKeyTTL = 24 * time.Hour
 	}
+}
 
-	// Initialize cache
-	var cache Cache
-	if config.CacheConfig != nil && config.CacheConfig.Enabled {
-		// Set cache defaults
-		if config.CacheConfig.EntitlementTTL == 0 {
-			config.CacheConfig.EntitlementTTL = time.Minute
-		}
-		if config.CacheConfig.UsageTTL == 0 {
-			config.CacheConfig.UsageTTL = 10 * time.Second
-		}
-		if config.CacheConfig.MaxEntitlements == 0 {
-			config.CacheConfig.MaxEntitlements = 1000
-		}
-		if config.CacheConfig.MaxUsage == 0 {
-			config.CacheConfig.MaxUsage = 10000
-		}
-		cache = NewLRUCache(config.CacheConfig.MaxEntitlements, config.CacheConfig.MaxUsage)
-	} else {
-		cache = NewNoopCache()
+// initializeCache creates and configures the cache based on config
+func initializeCache(config *Config) Cache {
+	if config.CacheConfig == nil || !config.CacheConfig.Enabled {
+		return NewNoopCache()
 	}
 
-	// Initialize metrics
-	metrics := config.Metrics
+	// Set cache defaults
+	cacheConfig := config.CacheConfig
+	if cacheConfig.EntitlementTTL == 0 {
+		cacheConfig.EntitlementTTL = time.Minute
+	}
+	if cacheConfig.UsageTTL == 0 {
+		cacheConfig.UsageTTL = 10 * time.Second
+	}
+	if cacheConfig.MaxEntitlements == 0 {
+		cacheConfig.MaxEntitlements = 1000
+	}
+	if cacheConfig.MaxUsage == 0 {
+		cacheConfig.MaxUsage = 10000
+	}
+
+	return NewLRUCache(cacheConfig.MaxEntitlements, cacheConfig.MaxUsage)
+}
+
+// initializeMetrics returns the configured metrics or a no-op implementation
+func initializeMetrics(metrics Metrics) Metrics {
 	if metrics == nil {
-		metrics = &NoopMetrics{}
+		return &NoopMetrics{}
 	}
+	return metrics
+}
 
-	// Initialize logger
-	logger := config.Logger
+// initializeLogger returns the configured logger or a no-op implementation
+func initializeLogger(logger Logger) Logger {
 	if logger == nil {
-		logger = &NoopLogger{}
+		return &NoopLogger{}
+	}
+	return logger
+}
+
+// initializeCircuitBreaker wraps storage with circuit breaker if enabled
+func initializeCircuitBreaker(storage Storage, cbConfig *CircuitBreakerConfig, metrics Metrics) Storage {
+	if cbConfig == nil || !cbConfig.Enabled {
+		return storage
 	}
 
-	// Initialize circuit breaker
-	currentStorage := storage
-	if config.CircuitBreakerConfig != nil && config.CircuitBreakerConfig.Enabled {
-		if config.CircuitBreakerConfig.FailureThreshold == 0 {
-			config.CircuitBreakerConfig.FailureThreshold = 5
-		}
-		if config.CircuitBreakerConfig.ResetTimeout == 0 {
-			config.CircuitBreakerConfig.ResetTimeout = 30 * time.Second
-		}
-		cb := NewDefaultCircuitBreaker(
-			config.CircuitBreakerConfig.FailureThreshold,
-			config.CircuitBreakerConfig.ResetTimeout,
-			func(state CircuitBreakerState) {
-				metrics.RecordCircuitBreakerStateChange(string(state))
-			},
-		)
-		currentStorage = NewCircuitBreakerStorage(storage, cb)
+	// Set circuit breaker defaults
+	if cbConfig.FailureThreshold == 0 {
+		cbConfig.FailureThreshold = 5
+	}
+	if cbConfig.ResetTimeout == 0 {
+		cbConfig.ResetTimeout = 30 * time.Second
 	}
 
-	return &Manager{
-		storage: currentStorage,
-		config:  config,
-		cache:   cache,
-		metrics: metrics,
-		logger:  logger,
-	}, nil
+	cb := NewDefaultCircuitBreaker(
+		cbConfig.FailureThreshold,
+		cbConfig.ResetTimeout,
+		func(state CircuitBreakerState) {
+			metrics.RecordCircuitBreakerStateChange(string(state))
+		},
+	)
+
+	return NewCircuitBreakerStorage(storage, cb)
 }
 
 // GetCurrentCycle returns the current billing cycle for a user based on their subscription start date
@@ -201,7 +225,8 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 
 // Consume consumes quota for a resource
 // Returns the new total used amount and any error
-func (m *Manager) Consume(ctx context.Context, userID, resource string, amount int, periodType PeriodType, opts ...ConsumeOption) (int, error) {
+func (m *Manager) Consume(ctx context.Context, userID, resource string, amount int,
+	periodType PeriodType, opts ...ConsumeOption) (int, error) {
 	if amount < 0 {
 		return 0, ErrInvalidAmount
 	}
@@ -293,7 +318,6 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		m.cache.InvalidateUsage(usageKey)
 		m.metrics.RecordConsumption(userID, resource, tier, amount, true)
 
-
 		// Check for warnings
 		m.checkWarnings(ctx, userID, resource, tier, limit, newUsed, amount, period)
 	} else {
@@ -317,7 +341,7 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 }
 
 // ApplyTierChange applies a tier change with prorated quota adjustment
-func (m *Manager) ApplyTierChange(ctx context.Context, userID, oldTier, newTier string, resource string) error {
+func (m *Manager) ApplyTierChange(ctx context.Context, userID, oldTier, newTier, resource string) error {
 	// Get current cycle
 	period, err := m.GetCurrentCycle(ctx, userID)
 	if err != nil {
@@ -562,7 +586,8 @@ func (m *Manager) getLimitForResource(resource, tier string, periodType PeriodTy
 	return 0
 }
 
-func (m *Manager) checkWarnings(ctx context.Context, userID, resource, tier string, limit, currentUsed, amount int, period Period) {
+func (m *Manager) checkWarnings(ctx context.Context, userID, resource, tier string,
+	limit, currentUsed, amount int, period Period) {
 	thresholds := m.getWarningThresholds(resource, tier)
 	if len(thresholds) == 0 {
 		return

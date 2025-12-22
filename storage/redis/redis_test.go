@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mihaimyh/goquota/pkg/goquota"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
 // setupTestRedis creates a Redis client for testing
@@ -612,9 +613,10 @@ func TestStorage_RefundQuota(t *testing.T) {
 		Type:  goquota.PeriodTypeMonthly,
 	}
 
+	const testResourceAPICalls = "api_calls"
 	t.Run("refund quota successfully", func(t *testing.T) {
 		userID := "refund_user_1"
-		resource := "api_calls"
+		resource := testResourceAPICalls
 
 		// 1. Consume 100
 		_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
@@ -668,7 +670,7 @@ func TestStorage_RefundQuota(t *testing.T) {
 
 	t.Run("idempotency check", func(t *testing.T) {
 		userID := "refund_user_2"
-		resource := "api_calls"
+		resource := testResourceAPICalls
 
 		// 1. Consume 100
 		_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
@@ -710,7 +712,7 @@ func TestStorage_RefundQuota(t *testing.T) {
 
 	t.Run("refund exceeds usage (full refund to 0)", func(t *testing.T) {
 		userID := "refund_user_3"
-		resource := "api_calls"
+		resource := testResourceAPICalls
 
 		// Consume partial amount (50)
 		if _, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{

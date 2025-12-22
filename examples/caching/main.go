@@ -35,7 +35,7 @@ func main() {
 		},
 	}
 
-	manager, err := goquota.NewManager(storage, config)
+	manager, err := goquota.NewManager(storage, &config)
 	if err != nil {
 		panic(err)
 	}

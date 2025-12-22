@@ -47,7 +47,8 @@ type DefaultCircuitBreaker struct {
 }
 
 // NewDefaultCircuitBreaker creates a new default circuit breaker.
-func NewDefaultCircuitBreaker(failureThreshold int, resetTimeout time.Duration, onStateChange func(state CircuitBreakerState)) *DefaultCircuitBreaker {
+func NewDefaultCircuitBreaker(failureThreshold int, resetTimeout time.Duration,
+	onStateChange func(state CircuitBreakerState)) *DefaultCircuitBreaker {
 	return &DefaultCircuitBreaker{
 		state:            StateClosed,
 		failureThreshold: failureThreshold,
@@ -69,7 +70,7 @@ func (cb *DefaultCircuitBreaker) currentState() CircuitBreakerState {
 	return cb.state
 }
 
-func (cb *DefaultCircuitBreaker) Execute(ctx context.Context, fn func() error) error {
+func (cb *DefaultCircuitBreaker) Execute(_ context.Context, fn func() error) error {
 	state := cb.State()
 	if state == StateOpen {
 		return ErrCircuitOpen
@@ -95,7 +96,7 @@ func (cb *DefaultCircuitBreaker) Success() {
 	cb.consecutiveFailures = 0
 }
 
-func (cb *DefaultCircuitBreaker) Failure(err error) {
+func (cb *DefaultCircuitBreaker) Failure(_ error) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 

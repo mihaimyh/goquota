@@ -16,7 +16,7 @@ type mockWarningHandler struct {
 	}
 }
 
-func (h *mockWarningHandler) OnWarning(ctx context.Context, usage *goquota.Usage, threshold float64) {
+func (h *mockWarningHandler) OnWarning(_ context.Context, usage *goquota.Usage, threshold float64) {
 	h.warnings = append(h.warnings, struct {
 		usage     *goquota.Usage
 		threshold float64
@@ -43,9 +43,9 @@ func TestManager_Warnings(t *testing.T) {
 		WarningHandler: handler,
 	}
 
-	manager, _ := goquota.NewManager(storage, config)
+	manager, _ := goquota.NewManager(storage, &config)
 	ctx := context.Background()
-	userID := "user1"
+	userID := testUserID1
 
 	// Set up entitlement
 	_ = manager.SetEntitlement(ctx, &goquota.Entitlement{
@@ -104,9 +104,9 @@ func TestManager_Warnings_LargeJump(t *testing.T) {
 		WarningHandler: handler,
 	}
 
-	manager, _ := goquota.NewManager(storage, config)
+	manager, _ := goquota.NewManager(storage, &config)
 	ctx := context.Background()
-	userID := "user1"
+	userID := testUserID1
 
 	_ = manager.SetEntitlement(ctx, &goquota.Entitlement{
 		UserID:                userID,
@@ -145,7 +145,7 @@ func TestManager_ContextWarningHandler(t *testing.T) {
 		WarningHandler: globalHandler,
 	}
 
-	manager, _ := goquota.NewManager(storage, config)
+	manager, _ := goquota.NewManager(storage, &config)
 	ctx := context.Background()
 	userID := "user1"
 

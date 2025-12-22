@@ -1,0 +1,107 @@
+# golangci-lint configuration for goquota project
+# See https://golangci-lint.run/usage/configuration/ for more details
+
+run:
+  timeout: 5m
+  tests: true
+
+output:
+  formats:
+    - format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  goconst:
+    min-len: 3
+    min-occurrences: 2
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - experimental
+      - opinionated
+      - performance
+      - style
+    disabled-checks:
+      - dupImport
+      - ifElseChain
+      - octalLiteral
+      - whyNoLint
+      - wrapperFunc
+  gocyclo:
+    min-complexity: 15
+  goimports:
+    local-prefixes: github.com/mihaimyh/goquota
+  golint:
+    min-confidence: 0
+  lll:
+    line-length: 120
+  maligned:
+    suggest-new: true
+  misspell:
+    locale: US
+  nolintlint:
+    allow-leading-space: true
+    allow-unused: false
+    require-explanation: false
+    require-specific: false
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - goconst
+    - gocritic
+    - gocyclo
+    - gofmt
+    - goimports
+    - gosec
+    - gosimple
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - noctx
+    - nolintlint
+    - revive
+    - rowserrcheck
+    - staticcheck
+    - stylecheck
+    - typecheck
+    - unconvert
+    - unparam
+    - unused
+    - whitespace
+
+issues:
+  exclude-dirs:
+    - vendor
+    - examples
+  exclude-files:
+    - ".*\\.pb\\.go$"
+    - ".*\\.gen\\.go$"
+  exclude-rules:
+    # Exclude some linters from test files
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+        - noctx
+        - unparam
+        - gocyclo
+    # Exclude known false positives
+    - text: "Error return value of .((os\\.)?std(out|err)\\..*|.*Close|.*Flush|os\\.Remove(All)?|.*printf?|os\\.(Un)?Setenv). is not checked"
+      linters:
+        - errcheck
+    # Exclude gosec warnings for test files
+    - path: _test\.go
+      text: "G104"
+      linters:
+        - gosec
+  max-issues-per-linter: 0
+  max-same-issues: 0
+

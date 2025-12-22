@@ -38,7 +38,7 @@ func main() {
 	}
 
 	// 3. Create quota manager
-	manager, err := goquota.NewManager(storage, config)
+	manager, err := goquota.NewManager(storage, &config)
 	if err != nil {
 		log.Fatalf("Failed to create manager: %v", err)
 	}

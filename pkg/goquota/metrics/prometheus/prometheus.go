@@ -77,14 +77,14 @@ func NewMetrics(reg prometheus.Registerer, namespace string) *Metrics {
 	}
 }
 
-func (m *Metrics) RecordConsumption(userID, resource, tier string, amount int, success bool) {
+func (m *Metrics) RecordConsumption(_, resource, tier string, amount int, success bool) {
 	m.consumptionTotal.WithLabelValues(resource, tier, strconv.FormatBool(success)).Inc()
 	if success {
 		m.consumptionAmount.WithLabelValues(resource, tier).Observe(float64(amount))
 	}
 }
 
-func (m *Metrics) RecordQuotaCheck(userID, resource string, duration time.Duration) {
+func (m *Metrics) RecordQuotaCheck(_, resource string, duration time.Duration) {
 	m.quotaCheckDuration.WithLabelValues(resource).Observe(duration.Seconds())
 }
 

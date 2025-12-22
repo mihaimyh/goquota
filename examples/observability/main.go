@@ -19,7 +19,7 @@ func main() {
 	// 1. Setup structured logging with Zerolog
 	output := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339}
 	zlog := zerolog.New(output).With().Timestamp().Logger()
-	logger := zerolog_adapter.NewLogger(zlog)
+	logger := zerolog_adapter.NewLogger(&zlog)
 
 	logger.Info("Starting observability example")
 
@@ -43,7 +43,7 @@ func main() {
 	}
 
 	storage := memory.New()
-	manager, err := goquota.NewManager(storage, config)
+	manager, err := goquota.NewManager(storage, &config)
 	if err != nil {
 		logger.Error("Failed to create manager", goquota.Field{"error", err})
 		os.Exit(1)

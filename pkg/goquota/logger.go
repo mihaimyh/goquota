@@ -24,7 +24,7 @@ type Logger interface {
 // NoopLogger is a no-op implementation of the Logger interface.
 type NoopLogger struct{}
 
-func (n *NoopLogger) Debug(msg string, fields ...Field) {}
-func (n *NoopLogger) Info(msg string, fields ...Field)  {}
-func (n *NoopLogger) Warn(msg string, fields ...Field)  {}
-func (n *NoopLogger) Error(msg string, fields ...Field) {}
+func (n *NoopLogger) Debug(_ string, _ ...Field) {}
+func (n *NoopLogger) Info(_ string, _ ...Field)  {}
+func (n *NoopLogger) Warn(_ string, _ ...Field)  {}
+func (n *NoopLogger) Error(_ string, _ ...Field) {}

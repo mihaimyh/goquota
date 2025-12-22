@@ -32,7 +32,7 @@ func setupTestManager(t *testing.T) *goquota.Manager {
 		},
 	}
 
-	manager, err := goquota.NewManager(storage, config)
+	manager, err := goquota.NewManager(storage, &config)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestMiddleware_Success(t *testing.T) {
 	setupEntitlement(t, manager, "user1", "pro")
 
 	// Create middleware
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
@@ -70,7 +70,7 @@ func TestMiddleware_Success(t *testing.T) {
 	})
 
 	// Create test handler
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("success")); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -78,7 +78,7 @@ func TestMiddleware_Success(t *testing.T) {
 	}))
 
 	// Create request
-	req := httptest.NewRequest("GET", "/api/test", nil)
+	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
@@ -105,7 +105,7 @@ func TestMiddleware_QuotaExceeded(t *testing.T) {
 	}
 
 	// Create middleware
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
@@ -113,11 +113,11 @@ func TestMiddleware_QuotaExceeded(t *testing.T) {
 		PeriodType:  goquota.PeriodTypeMonthly,
 	})
 
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest("GET", "/api/test", nil)
+	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
@@ -132,7 +132,7 @@ func TestMiddleware_QuotaExceeded(t *testing.T) {
 func TestMiddleware_MissingAuth(t *testing.T) {
 	manager := setupTestManager(t)
 
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
@@ -140,11 +140,11 @@ func TestMiddleware_MissingAuth(t *testing.T) {
 		PeriodType:  goquota.PeriodTypeMonthly,
 	})
 
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest("GET", "/api/test", nil)
+	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	// No X-User-ID header
 	rec := httptest.NewRecorder()
 
@@ -161,7 +161,7 @@ func TestMiddleware_NoEntitlement(t *testing.T) {
 	// Don't set up entitlement for user2
 	// User should be allowed to use default tier quota
 
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
@@ -169,11 +169,11 @@ func TestMiddleware_NoEntitlement(t *testing.T) {
 		PeriodType:  goquota.PeriodTypeMonthly,
 	})
 
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest("GET", "/api/test", nil)
+	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user2")
 	rec := httptest.NewRecorder()
 
@@ -205,7 +205,7 @@ func TestMiddleware_FromContext(t *testing.T) {
 
 	key := ContextKey("user_id")
 
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromContext(key),
 		GetResource: FixedResource("api_calls"),
@@ -213,12 +213,12 @@ func TestMiddleware_FromContext(t *testing.T) {
 		PeriodType:  goquota.PeriodTypeMonthly,
 	})
 
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
 	// Create request with context value already set
-	req := httptest.NewRequest("GET", "/api/test", nil)
+	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	ctx := context.WithValue(req.Context(), key, "user_from_ctx")
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
@@ -244,7 +244,7 @@ func TestMiddleware_BodyLength(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user1", "pro")
 
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
@@ -291,24 +291,24 @@ func TestMiddleware_CustomErrorHandler(t *testing.T) {
 	}
 
 	customErrorCalled := false
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
-		OnQuotaExceeded: func(w http.ResponseWriter, r *http.Request, usage *goquota.Usage) {
+		OnQuotaExceeded: func(w http.ResponseWriter, _ *http.Request, _ *goquota.Usage) {
 			customErrorCalled = true
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte("custom quota exceeded"))
 		},
 	})
 
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest("GET", "/api/test", nil)
+	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
@@ -329,7 +329,7 @@ func TestMiddleware_DailyPeriod(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user1", "free")
 
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
@@ -337,13 +337,13 @@ func TestMiddleware_DailyPeriod(t *testing.T) {
 		PeriodType:  goquota.PeriodTypeDaily,
 	})
 
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
 	// Make 10 requests (daily limit for free tier)
 	for i := 0; i < 10; i++ {
-		req := httptest.NewRequest("GET", "/api/test", nil)
+		req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 		req.Header.Set("X-User-ID", "user1")
 		rec := httptest.NewRecorder()
 
@@ -355,7 +355,7 @@ func TestMiddleware_DailyPeriod(t *testing.T) {
 	}
 
 	// 11th request should fail
-	req := httptest.NewRequest("GET", "/api/test", nil)
+	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
@@ -370,7 +370,7 @@ func TestMiddleware_ConcurrentRequests(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user1", "pro")
 
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
@@ -378,7 +378,7 @@ func TestMiddleware_ConcurrentRequests(t *testing.T) {
 		PeriodType:  goquota.PeriodTypeMonthly,
 	})
 
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -386,7 +386,7 @@ func TestMiddleware_ConcurrentRequests(t *testing.T) {
 	done := make(chan bool, 100)
 	for i := 0; i < 100; i++ {
 		go func() {
-			req := httptest.NewRequest("GET", "/api/test", nil)
+			req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 			req.Header.Set("X-User-ID", "user1")
 			rec := httptest.NewRecorder()
 
@@ -416,7 +416,7 @@ func TestMiddleware_ZeroAmount(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user1", "pro")
 
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
@@ -424,11 +424,11 @@ func TestMiddleware_ZeroAmount(t *testing.T) {
 		PeriodType:  goquota.PeriodTypeMonthly,
 	})
 
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest("GET", "/api/test", nil)
+	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
@@ -444,7 +444,7 @@ func TestMiddleware_NegativeAmount(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user1", "pro")
 
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
@@ -452,11 +452,11 @@ func TestMiddleware_NegativeAmount(t *testing.T) {
 		PeriodType:  goquota.PeriodTypeMonthly,
 	})
 
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest("GET", "/api/test", nil)
+	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
@@ -472,7 +472,7 @@ func TestMiddleware_EmptyBody(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user1", "pro")
 
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
@@ -480,11 +480,11 @@ func TestMiddleware_EmptyBody(t *testing.T) {
 		PeriodType:  goquota.PeriodTypeMonthly,
 	})
 
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest("POST", "/api/test", nil)
+	req := httptest.NewRequest("POST", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
@@ -509,7 +509,7 @@ func TestMiddleware_Warnings(t *testing.T) {
 			},
 		},
 	}
-	manager, _ := goquota.NewManager(storage, config)
+	manager, _ := goquota.NewManager(storage, &config)
 	setupEntitlement(t, manager, "user1", "free")
 
 	// Consume up to 79%
@@ -518,7 +518,7 @@ func TestMiddleware_Warnings(t *testing.T) {
 		_, _ = manager.Consume(ctx, "user1", "requests", 1, goquota.PeriodTypeMonthly)
 	}
 
-	mw := Middleware(Config{
+	mw := Middleware(&Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("requests"),
@@ -526,12 +526,12 @@ func TestMiddleware_Warnings(t *testing.T) {
 		PeriodType:  goquota.PeriodTypeMonthly,
 	})
 
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
 	// 80th request - should trigger warning header
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequest("GET", "/", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 

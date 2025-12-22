@@ -64,21 +64,21 @@ func NewNoopCache() *NoopCache {
 	return &NoopCache{}
 }
 
-func (c *NoopCache) GetEntitlement(userID string) (*Entitlement, bool) {
+func (c *NoopCache) GetEntitlement(_ string) (*Entitlement, bool) {
 	return nil, false
 }
 
-func (c *NoopCache) SetEntitlement(userID string, ent *Entitlement, ttl time.Duration) {}
+func (c *NoopCache) SetEntitlement(_ string, _ *Entitlement, _ time.Duration) {}
 
-func (c *NoopCache) InvalidateEntitlement(userID string) {}
+func (c *NoopCache) InvalidateEntitlement(_ string) {}
 
-func (c *NoopCache) GetUsage(key string) (*Usage, bool) {
+func (c *NoopCache) GetUsage(_ string) (*Usage, bool) {
 	return nil, false
 }
 
-func (c *NoopCache) SetUsage(key string, usage *Usage, ttl time.Duration) {}
+func (c *NoopCache) SetUsage(_ string, _ *Usage, _ time.Duration) {}
 
-func (c *NoopCache) InvalidateUsage(key string) {}
+func (c *NoopCache) InvalidateUsage(_ string) {}
 
 func (c *NoopCache) Clear() {}
 
@@ -129,7 +129,10 @@ func (c *LRUCache) GetEntitlement(userID string) (*Entitlement, bool) {
 
 	c.entitlementHits++
 	// Return a copy to prevent external modifications
-	ent := entry.value.(*Entitlement)
+	ent, ok := entry.value.(*Entitlement)
+	if !ok {
+		return nil, false
+	}
 	return &Entitlement{
 		UserID:                ent.UserID,
 		Tier:                  ent.Tier,
@@ -179,7 +182,10 @@ func (c *LRUCache) GetUsage(key string) (*Usage, bool) {
 
 	c.usageHits++
 	// Return a copy to prevent external modifications
-	usage := entry.value.(*Usage)
+	usage, ok := entry.value.(*Usage)
+	if !ok {
+		return nil, false
+	}
 	return &Usage{
 		UserID:    usage.UserID,
 		Resource:  usage.Resource,

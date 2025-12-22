@@ -14,7 +14,7 @@ type mockFlakeyStorage struct {
 	fail bool
 }
 
-func (m *mockFlakeyStorage) GetEntitlement(ctx context.Context, userID string) (*Entitlement, error) {
+func (m *mockFlakeyStorage) GetEntitlement(_ context.Context, userID string) (*Entitlement, error) {
 	if m.fail {
 		return nil, errors.New("db error")
 	}
@@ -39,7 +39,7 @@ func TestManagerWithCircuitBreaker(t *testing.T) {
 		},
 	}
 
-	mgr, err := NewManager(storage, config)
+	mgr, err := NewManager(storage, &config)
 	assert.NoError(t, err)
 
 	ctx := context.Background()
@@ -111,51 +111,213 @@ func TestManagerWithCircuitBreaker(t *testing.T) {
 	assert.ErrorIs(t, err, ErrCircuitOpen)
 }
 
-func (m *mockFlakeyStorage) SetEntitlement(ctx context.Context, ent *Entitlement) error {
+func (m *mockFlakeyStorage) SetEntitlement(_ context.Context, _ *Entitlement) error {
 	if m.fail {
 		return errors.New("db error")
 	}
 	return nil
 }
 
-func (m *mockFlakeyStorage) GetUsage(ctx context.Context, userID, resource string, period Period) (*Usage, error) {
+func (m *mockFlakeyStorage) GetUsage(_ context.Context, _, _ string, _ Period) (*Usage, error) {
 	if m.fail {
 		return nil, errors.New("db error")
 	}
 	return &Usage{}, nil
 }
 
-func (m *mockFlakeyStorage) ConsumeQuota(ctx context.Context, req *ConsumeRequest) (int, error) {
+func (m *mockFlakeyStorage) ConsumeQuota(_ context.Context, _ *ConsumeRequest) (int, error) {
 	if m.fail {
 		return 0, errors.New("db error")
 	}
 	return 1, nil
 }
 
-func (m *mockFlakeyStorage) ApplyTierChange(ctx context.Context, req *TierChangeRequest) error {
+func (m *mockFlakeyStorage) ApplyTierChange(_ context.Context, _ *TierChangeRequest) error {
 	if m.fail {
 		return errors.New("db error")
 	}
 	return nil
 }
 
-func (m *mockFlakeyStorage) SetUsage(ctx context.Context, userID, resource string, usage *Usage, period Period) error {
+func (m *mockFlakeyStorage) SetUsage(_ context.Context, _, _ string, _ *Usage, _ Period) error {
 	if m.fail {
 		return errors.New("db error")
 	}
 	return nil
 }
 
-func (m *mockFlakeyStorage) RefundQuota(ctx context.Context, req *RefundRequest) error {
+func (m *mockFlakeyStorage) RefundQuota(_ context.Context, _ *RefundRequest) error {
 	if m.fail {
 		return errors.New("db error")
 	}
 	return nil
 }
 
-func (m *mockFlakeyStorage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*RefundRecord, error) {
+func (m *mockFlakeyStorage) GetRefundRecord(_ context.Context, _ string) (*RefundRecord, error) {
 	if m.fail {
 		return nil, errors.New("db error")
 	}
 	return nil, nil
+}
+
+func (m *mockFlakeyStorage) GetConsumptionRecord(_ context.Context, _ string) (*ConsumptionRecord, error) {
+	if m.fail {
+		return nil, errors.New("db error")
+	}
+	return nil, nil
+}
+
+// Phase 7.3: Storage Failure Handling
+
+func TestManager_StorageFailure_PartialWrite(t *testing.T) {
+	storage := &mockFlakeyStorage{fail: false}
+	config := Config{
+		Tiers: map[string]TierConfig{
+			"scholar": {
+				Name:          "scholar",
+				MonthlyQuotas: map[string]int{"api_calls": 1000},
+			},
+		},
+		CircuitBreakerConfig: &CircuitBreakerConfig{
+			Enabled:          true,
+			FailureThreshold: 5,
+			ResetTimeout:     100 * time.Millisecond,
+		},
+	}
+
+	mgr, err := NewManager(storage, &config)
+	assert.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Set entitlement
+	ent := &Entitlement{
+		UserID:                "user_partial",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	}
+	err = mgr.SetEntitlement(ctx, ent)
+	assert.NoError(t, err)
+
+	// Consume some quota
+	_, err = mgr.Consume(ctx, "user_partial", "api_calls", 100, PeriodTypeMonthly)
+	assert.NoError(t, err)
+
+	// Simulate storage failure
+	storage.fail = true
+
+	// Try to consume - should fail and trigger circuit breaker
+	_, err = mgr.Consume(ctx, "user_partial", "api_calls", 50, PeriodTypeMonthly)
+	assert.Error(t, err)
+
+	// After enough failures, circuit should open
+	for i := 0; i < 4; i++ {
+		_, _ = mgr.Consume(ctx, "user_partial", "api_calls", 50, PeriodTypeMonthly)
+	}
+
+	// Next call should fast-fail
+	_, err = mgr.Consume(ctx, "user_partial", "api_calls", 50, PeriodTypeMonthly)
+	assert.ErrorIs(t, err, ErrCircuitOpen)
+}
+
+func TestManager_StorageFailure_NetworkTimeout(t *testing.T) {
+	storage := &mockFlakeyStorage{fail: false}
+	config := Config{
+		Tiers: map[string]TierConfig{
+			"scholar": {
+				Name:          "scholar",
+				MonthlyQuotas: map[string]int{"api_calls": 1000},
+			},
+		},
+		CircuitBreakerConfig: &CircuitBreakerConfig{
+			Enabled:          true,
+			FailureThreshold: 2,
+			ResetTimeout:     50 * time.Millisecond,
+		},
+	}
+
+	mgr, err := NewManager(storage, &config)
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	// Set entitlement
+	ent := &Entitlement{
+		UserID:                "user_timeout",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	}
+	err = mgr.SetEntitlement(ctx, ent)
+	assert.NoError(t, err)
+
+	// Simulate timeout by using canceled context
+	canceledCtx, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+
+	// Operations with canceled context should handle gracefully
+	_, err = mgr.Consume(canceledCtx, "user_timeout", "api_calls", 10, PeriodTypeMonthly)
+	// Error is expected for canceled context
+	assert.Error(t, err)
+}
+
+func TestManager_StorageFailure_CircuitBreaker(t *testing.T) {
+	storage := &mockFlakeyStorage{fail: false}
+	config := Config{
+		Tiers: map[string]TierConfig{
+			"scholar": {
+				Name:          "scholar",
+				MonthlyQuotas: map[string]int{"api_calls": 1000},
+			},
+		},
+		CircuitBreakerConfig: &CircuitBreakerConfig{
+			Enabled:          true,
+			FailureThreshold: 3,
+			ResetTimeout:     100 * time.Millisecond,
+		},
+	}
+
+	mgr, err := NewManager(storage, &config)
+	assert.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Set entitlement
+	ent := &Entitlement{
+		UserID:                "user_cb",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	}
+	err = mgr.SetEntitlement(ctx, ent)
+	assert.NoError(t, err)
+
+	// Normal operation
+	_, err = mgr.Consume(ctx, "user_cb", "api_calls", 100, PeriodTypeMonthly)
+	assert.NoError(t, err)
+
+	// Start failing
+	storage.fail = true
+
+	// Failures should accumulate
+	for i := 0; i < 3; i++ {
+		_, err = mgr.Consume(ctx, "user_cb", "api_calls", 50, PeriodTypeMonthly)
+		assert.Error(t, err)
+	}
+
+	// Circuit should be open now
+	_, err = mgr.Consume(ctx, "user_cb", "api_calls", 50, PeriodTypeMonthly)
+	assert.ErrorIs(t, err, ErrCircuitOpen)
+
+	// Wait for reset
+	time.Sleep(150 * time.Millisecond)
+
+	// Recover
+	storage.fail = false
+
+	// Should work again (half-open -> closed on success)
+	_, err = mgr.Consume(ctx, "user_cb", "api_calls", 50, PeriodTypeMonthly)
+	assert.NoError(t, err)
 }

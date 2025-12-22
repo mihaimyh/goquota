@@ -8,8 +8,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mihaimyh/goquota/pkg/goquota"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
 // Storage implements goquota.Storage using Redis
@@ -245,7 +246,8 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 }
 
 // GetUsage implements goquota.Storage
-func (s *Storage) GetUsage(ctx context.Context, userID, resource string, period goquota.Period) (*goquota.Usage, error) {
+func (s *Storage) GetUsage(ctx context.Context, userID, resource string,
+	period goquota.Period) (*goquota.Usage, error) {
 	key := s.usageKey(userID, resource, period)
 
 	// Get both data and current used amount
@@ -280,6 +282,86 @@ func (s *Storage) GetUsage(ctx context.Context, userID, resource string, period 
 	}
 
 	return &usage, nil
+}
+
+// prepareConsumptionRecord prepares the consumption record data for idempotency
+func (s *Storage) prepareConsumptionRecord(req *goquota.ConsumeRequest) (string, error) {
+	if req.IdempotencyKey == "" {
+		return "", nil
+	}
+	record := &goquota.ConsumptionRecord{
+		ConsumptionID:  req.IdempotencyKey,
+		UserID:         req.UserID,
+		Resource:       req.Resource,
+		Amount:         req.Amount,
+		Period:         req.Period,
+		Timestamp:      time.Now().UTC(),
+		IdempotencyKey: req.IdempotencyKey,
+		NewUsed:        0, // Will be updated by script
+	}
+	recordData, err := json.Marshal(record)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal consumption record: %w", err)
+	}
+	return string(recordData), nil
+}
+
+// parseConsumeResult parses the result from the consume Lua script
+func parseConsumeResult(result interface{}) (newUsed int, status string, err error) {
+	resultSlice, ok := result.([]interface{})
+	if !ok || len(resultSlice) != 2 {
+		err = fmt.Errorf("unexpected script result format")
+		return
+	}
+
+	newUsedInt64, ok := resultSlice[0].(int64)
+	if !ok {
+		err = fmt.Errorf("failed to parse used amount")
+		return
+	}
+	newUsed = int(newUsedInt64)
+
+	status, ok = resultSlice[1].(string)
+	if !ok {
+		err = fmt.Errorf("failed to parse status")
+		return
+	}
+
+	return
+}
+
+// updateConsumptionRecord updates the consumption record with the actual newUsed value
+func (s *Storage) updateConsumptionRecord(
+	ctx context.Context,
+	req *goquota.ConsumeRequest,
+	consumptionKey string,
+	newUsed int,
+) {
+	if req.IdempotencyKey == "" || consumptionKey == "" {
+		return
+	}
+
+	record := &goquota.ConsumptionRecord{
+		ConsumptionID:  req.IdempotencyKey,
+		UserID:         req.UserID,
+		Resource:       req.Resource,
+		Amount:         req.Amount,
+		Period:         req.Period,
+		Timestamp:      time.Now().UTC(),
+		IdempotencyKey: req.IdempotencyKey,
+		NewUsed:        newUsed,
+	}
+	recordData, err := json.Marshal(record)
+	if err != nil {
+		return
+	}
+
+	consumptionTTL := int64(24 * 60 * 60) // Default 24 hours
+	ttl := time.Duration(consumptionTTL) * time.Second
+	if err := s.client.Set(ctx, consumptionKey, string(recordData), ttl).Err(); err != nil {
+		// Log but don't fail - consumption already succeeded
+		_ = err
+	}
 }
 
 // ConsumeQuota implements goquota.Storage with atomic consumption via Lua script
@@ -318,27 +400,12 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 		ttl = int64(s.config.UsageTTL.Seconds())
 	}
 
-	// Prepare consumption record data (if idempotency key provided)
-	var consumptionData string
-	consumptionTTL := int64(24 * 60 * 60) // Default 24 hours
-	if req.IdempotencyKey != "" {
-		// We'll update newUsed after consumption, but create placeholder for now
-		record := &goquota.ConsumptionRecord{
-			ConsumptionID:  req.IdempotencyKey,
-			UserID:         req.UserID,
-			Resource:       req.Resource,
-			Amount:         req.Amount,
-			Period:         req.Period,
-			Timestamp:      time.Now().UTC(),
-			IdempotencyKey: req.IdempotencyKey,
-			NewUsed:        0, // Will be updated by script
-		}
-		recordData, err := json.Marshal(record)
-		if err != nil {
-			return 0, fmt.Errorf("failed to marshal consumption record: %w", err)
-		}
-		consumptionData = string(recordData)
+	consumptionData, err := s.prepareConsumptionRecord(req)
+	if err != nil {
+		return 0, err
 	}
+
+	consumptionTTL := int64(24 * 60 * 60) // Default 24 hours
 
 	// Execute Lua script for atomic consumption
 	result, err := s.scripts["consume"].Run(
@@ -357,48 +424,16 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 		return 0, fmt.Errorf("failed to execute consume script: %w", err)
 	}
 
-	resultSlice, ok := result.([]interface{})
-	if !ok || len(resultSlice) != 2 {
-		return 0, fmt.Errorf("unexpected script result format")
-	}
-
-	// Convert to int64 first, then to int
-	newUsedInt64, ok := resultSlice[0].(int64)
-	if !ok {
-		return 0, fmt.Errorf("failed to parse used amount")
-	}
-	newUsed := int(newUsedInt64)
-
-	status, ok := resultSlice[1].(string)
-	if !ok {
-		return 0, fmt.Errorf("failed to parse status")
+	newUsed, status, err := parseConsumeResult(result)
+	if err != nil {
+		return 0, err
 	}
 
 	if status == "quota_exceeded" {
 		return newUsed, goquota.ErrQuotaExceeded
 	}
 
-	// Update consumption record with actual newUsed value (if idempotency key provided)
-	if req.IdempotencyKey != "" && consumptionKey != "" {
-		record := &goquota.ConsumptionRecord{
-			ConsumptionID:  req.IdempotencyKey,
-			UserID:         req.UserID,
-			Resource:       req.Resource,
-			Amount:         req.Amount,
-			Period:         req.Period,
-			Timestamp:      time.Now().UTC(),
-			IdempotencyKey: req.IdempotencyKey,
-			NewUsed:        newUsed,
-		}
-		recordData, err := json.Marshal(record)
-		if err == nil {
-			// Update the record with correct newUsed
-			if err := s.client.Set(ctx, consumptionKey, string(recordData), time.Duration(consumptionTTL)*time.Second).Err(); err != nil {
-				// Log but don't fail - consumption already succeeded
-				_ = err
-			}
-		}
-	}
+	s.updateConsumptionRecord(ctx, req, consumptionKey, newUsed)
 
 	return newUsed, nil
 }
@@ -446,7 +481,8 @@ func (s *Storage) ApplyTierChange(ctx context.Context, req *goquota.TierChangeRe
 }
 
 // SetUsage implements goquota.Storage
-func (s *Storage) SetUsage(ctx context.Context, userID, resource string, usage *goquota.Usage, period goquota.Period) error {
+func (s *Storage) SetUsage(ctx context.Context, userID, resource string,
+	usage *goquota.Usage, period goquota.Period) error {
 	if usage == nil {
 		return fmt.Errorf("usage is required")
 	}
@@ -508,10 +544,12 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 	// }
 	// It relies on Storage implementation to know how to locate usage based on PeriodType?
 	// But `usageKey` in Redis usually contains specific dates (e.g. `monthly:2023-10-01`).
-	// If `RefundRequest` lacks the specific period dates, Storage can't easily reconstruction the key unless it calculates current cycle.
+	// If `RefundRequest` lacks the specific period dates, Storage can't easily
+	// reconstruction the key unless it calculates current cycle.
 	// Which Manager did. But Manager didn't pass it in `RefundRequest` struct because struct doesn't have it?
 	// Wait, `types.go` modification (Step 80) isn't fully visible here.
-	// I should check `types.go`. If `RefundRequest` doesn't support Period dates, I need to recalculate them in Storage like Memory did.
+	// I should check `types.go`. If `RefundRequest` doesn't support Period dates,
+	// I need to recalculate them in Storage like Memory did.
 	// Memory storage did recalculate period. Firestore did too.
 	// So I will duplicate that logic here.
 
