@@ -18,7 +18,6 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Soft Limits & Warnings** - Trigger callbacks when usage approaches limits (e.g. 80%)
 - **Observability** - Built-in Prometheus metrics and structured logging
 - **HTTP Middlewares** - Easy integration with standard `net/http` servers
-- **Production-ready** - >80% test coverage, battle-tested in production
 
 ## Installation
 
@@ -77,7 +76,7 @@ func main() {
 
 ## Storage Adapters
 
-### Redis (Recommended for Production)
+### Redis (Recommended)
 
 High-performance, atomic storage using Lua scripts. Supports clusters and automatic TTL expiration.
 
