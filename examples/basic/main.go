@@ -76,7 +76,7 @@ func main() {
 
 	// 7. Consume some quota
 	fmt.Println("\nConsuming 50 API calls...")
-	err = manager.Consume(ctx, userID, "api_calls", 50, goquota.PeriodTypeMonthly)
+	_, err = manager.Consume(ctx, userID, "api_calls", 50, goquota.PeriodTypeMonthly)
 	if err != nil {
 		log.Fatalf("Failed to consume quota: %v", err)
 	}
@@ -90,7 +90,7 @@ func main() {
 
 	// 9. Try to exceed quota
 	fmt.Println("\nTrying to consume 20,000 API calls (exceeds limit)...")
-	err = manager.Consume(ctx, userID, "api_calls", 20000, goquota.PeriodTypeMonthly)
+	_, err = manager.Consume(ctx, userID, "api_calls", 20000, goquota.PeriodTypeMonthly)
 	if err == goquota.ErrQuotaExceeded {
 		fmt.Println(" Quota exceeded error caught correctly")
 	} else {

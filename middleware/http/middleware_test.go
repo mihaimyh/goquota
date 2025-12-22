@@ -99,7 +99,7 @@ func TestMiddleware_QuotaExceeded(t *testing.T) {
 	// Consume quota up to limit
 	ctx := context.Background()
 	for i := 0; i < 100; i++ {
-		_ = manager.Consume(ctx, "user1", "api_calls", 1, goquota.PeriodTypeMonthly)
+		_, _ = manager.Consume(ctx, "user1", "api_calls", 1, goquota.PeriodTypeMonthly)
 	}
 
 	// Create middleware
@@ -182,13 +182,17 @@ func TestMiddleware_NoEntitlement(t *testing.T) {
 	}
 }
 
+type contextKey string
+
 func TestMiddleware_FromContext(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user_from_ctx", "pro")
 
+	key := contextKey("user_id")
+
 	mw := Middleware(Config{
 		Manager:     manager,
-		GetUserID:   FromContext("user_id"),
+		GetUserID:   FromContext(ContextKey(key)),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
@@ -196,7 +200,7 @@ func TestMiddleware_FromContext(t *testing.T) {
 
 	// Wrap with middleware that sets context
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), "user_id", "user_from_ctx")
+		ctx := context.WithValue(r.Context(), key, "user_from_ctx")
 		r = r.WithContext(ctx)
 
 		mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -261,7 +265,7 @@ func TestMiddleware_CustomErrorHandler(t *testing.T) {
 	// Consume quota
 	ctx := context.Background()
 	for i := 0; i < 100; i++ {
-		_ = manager.Consume(ctx, "user1", "api_calls", 1, goquota.PeriodTypeMonthly)
+		_, _ = manager.Consume(ctx, "user1", "api_calls", 1, goquota.PeriodTypeMonthly)
 	}
 
 	customErrorCalled := false
@@ -273,8 +277,8 @@ func TestMiddleware_CustomErrorHandler(t *testing.T) {
 		PeriodType:  goquota.PeriodTypeMonthly,
 		OnQuotaExceeded: func(w http.ResponseWriter, r *http.Request, usage *goquota.Usage) {
 			customErrorCalled = true
-			w.WriteHeader(http.StatusPaymentRequired)
-			w.Write([]byte("custom quota exceeded"))
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("custom quota exceeded"))
 		},
 	})
 
@@ -291,8 +295,8 @@ func TestMiddleware_CustomErrorHandler(t *testing.T) {
 	if !customErrorCalled {
 		t.Error("Custom error handler was not called")
 	}
-	if rec.Code != http.StatusPaymentRequired {
-		t.Errorf("Expected status 402, got %d", rec.Code)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("Expected status 429, got %d", rec.Code)
 	}
 	if rec.Body.String() != "custom quota exceeded" {
 		t.Errorf("Expected custom message, got %s", rec.Body.String())
@@ -467,5 +471,62 @@ func TestMiddleware_EmptyBody(t *testing.T) {
 	// Empty body should be treated as 0 bytes, which is invalid
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("Expected status 400 for empty body, got %d", rec.Code)
+	}
+}
+
+func TestMiddleware_Warnings(t *testing.T) {
+	storage := memory.New()
+	config := goquota.Config{
+		DefaultTier: "free",
+		Tiers: map[string]goquota.TierConfig{
+			"free": {
+				MonthlyQuotas: map[string]int{"requests": 100},
+				WarningThresholds: map[string][]float64{
+					"requests": {0.8},
+				},
+			},
+		},
+	}
+	manager, _ := goquota.NewManager(storage, config)
+	setupEntitlement(t, manager, "user1", "free")
+
+	// Consume up to 79%
+	ctx := context.Background()
+	for i := 0; i < 79; i++ {
+		_, _ = manager.Consume(ctx, "user1", "requests", 1, goquota.PeriodTypeMonthly)
+	}
+
+	mw := Middleware(Config{
+		Manager:     manager,
+		GetUserID:   FromHeader("X-User-ID"),
+		GetResource: FixedResource("requests"),
+		GetAmount:   FixedAmount(1),
+		PeriodType:  goquota.PeriodTypeMonthly,
+	})
+
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// 80th request - should trigger warning header
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("X-User-ID", "user1")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", rec.Code)
+	}
+
+	// Check headers
+	threshold := rec.Header().Get("X-Quota-Warning-Threshold")
+	if threshold != "0.80" {
+		t.Errorf("Expected X-Quota-Warning-Threshold: 0.80, got %s", threshold)
+	}
+
+	used := rec.Header().Get("X-Quota-Warning-Used")
+	if used != "80" {
+		t.Errorf("Expected X-Quota-Warning-Used: 80, got %s", used)
 	}
 }

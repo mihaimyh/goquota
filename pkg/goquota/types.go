@@ -1,75 +1,118 @@
 package goquota
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // PeriodType defines the type of quota period
 type PeriodType string
 
 const (
-// PeriodTypeDaily represents a daily quota period
-PeriodTypeDaily PeriodType = "daily"
-// PeriodTypeMonthly represents a monthly quota period (anniversary-based)
-PeriodTypeMonthly PeriodType = "monthly"
+	// PeriodTypeDaily represents a daily quota period
+	PeriodTypeDaily PeriodType = "daily"
+	// PeriodTypeMonthly represents a monthly quota period (anniversary-based)
+	PeriodTypeMonthly PeriodType = "monthly"
 )
 
 // Period represents a quota period with start and end times
 type Period struct {
-Start time.Time
-End   time.Time
-Type  PeriodType
+	Start time.Time
+	End   time.Time
+	Type  PeriodType
 }
 
 // Key returns a stable string key for this period
 func (p Period) Key() string {
-switch p.Type {
-case PeriodTypeDaily:
-return p.Start.UTC().Format("2006-01-02")
-case PeriodTypeMonthly:
-return p.Start.UTC().Format("2006-01-02")
-default:
-return p.Start.UTC().Format("2006-01-02")
-}
+	switch p.Type {
+	case PeriodTypeDaily:
+		return p.Start.UTC().Format("2006-01-02")
+	case PeriodTypeMonthly:
+		return p.Start.UTC().Format("2006-01-02")
+	default:
+		return p.Start.UTC().Format("2006-01-02")
+	}
 }
 
 // Entitlement represents a user's subscription entitlement
 type Entitlement struct {
-UserID                string
-Tier                  string
-SubscriptionStartDate time.Time
-ExpiresAt             *time.Time
-UpdatedAt             time.Time
+	UserID                string
+	Tier                  string
+	SubscriptionStartDate time.Time
+	ExpiresAt             *time.Time
+	UpdatedAt             time.Time
 }
 
 // Usage represents quota usage for a specific resource and period
 type Usage struct {
-UserID    string
-Resource  string
-Used      int
-Limit     int
-Period    Period
-Tier      string
-UpdatedAt time.Time
+	UserID    string
+	Resource  string
+	Used      int
+	Limit     int
+	Period    Period
+	Tier      string
+	UpdatedAt time.Time
 }
 
 // TierConfig defines quota limits for a specific tier
 type TierConfig struct {
-Name string
+	Name string
 
-// MonthlyQuotas maps resource names to monthly limits
-MonthlyQuotas map[string]int
+	// MonthlyQuotas maps resource names to monthly limits
+	MonthlyQuotas map[string]int
 
-// DailyQuotas maps resource names to daily limits
-DailyQuotas map[string]int
+	// DailyQuotas maps resource names to daily limits
+	DailyQuotas map[string]int
+
+	// WarningThresholds maps resource names to a list of usage percentages (e.g., [0.8, 0.9])
+	// that should trigger warnings.
+	WarningThresholds map[string][]float64
+}
+
+// CacheConfig holds cache configuration
+type CacheConfig struct {
+	// Enabled determines if caching is active
+	Enabled bool
+
+	// EntitlementTTL is the TTL for cached entitlements (default: 1 minute)
+	EntitlementTTL time.Duration
+
+	// UsageTTL is the TTL for cached usage data (default: 10 seconds)
+	UsageTTL time.Duration
+
+	// MaxEntitlements is the maximum number of entitlements to cache (default: 1000)
+	MaxEntitlements int
+
+	// MaxUsage is the maximum number of usage records to cache (default: 10000)
+	MaxUsage int
 }
 
 // Config holds quota manager configuration
 type Config struct {
-// Tiers maps tier names to their quota limits
-Tiers map[string]TierConfig
+	// Tiers maps tier names to their quota limits
+	Tiers map[string]TierConfig
 
-// DefaultTier is used when user has no entitlement
-DefaultTier string
+	// DefaultTier is used when user has no entitlement
+	DefaultTier string
 
-// CacheTTL is the duration to cache entitlements (default: 1 minute)
-CacheTTL time.Duration
+	// CacheTTL is the duration to cache entitlements (default: 1 minute)
+	// Deprecated: Use CacheConfig.EntitlementTTL instead
+	CacheTTL time.Duration
+
+	// CacheConfig configures the caching layer
+	CacheConfig *CacheConfig
+
+	// Metrics is used for tracking quota operations (default: NoopMetrics)
+	Metrics Metrics
+
+	// Logger is used for structured logging (default: NoopLogger)
+	Logger Logger
+
+	// WarningHandler is called when a warning threshold is crossed (optional)
+	WarningHandler WarningHandler
+}
+
+// WarningHandler is the interface for handling quota warnings
+type WarningHandler interface {
+	OnWarning(ctx context.Context, usage *Usage, threshold float64)
 }

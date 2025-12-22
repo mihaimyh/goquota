@@ -32,7 +32,7 @@ func BenchmarkManager_Consume(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = manager.Consume(ctx, "bench_user", "api_calls", 1, goquota.PeriodTypeMonthly)
+		_, _ = manager.Consume(ctx, "bench_user", "api_calls", 1, goquota.PeriodTypeMonthly)
 	}
 }
 
@@ -109,7 +109,7 @@ func BenchmarkStorage_ConsumeQuota(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = storage.ConsumeQuota(ctx, req)
+		_, _ = storage.ConsumeQuota(ctx, req)
 	}
 }
 

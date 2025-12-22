@@ -6,10 +6,21 @@ import (
 	"time"
 )
 
+type contextWarningKey struct{}
+
+// WithWarningHandler returns a new context with a warning handler.
+// This allows per-request warning handling (e.g. in middleware).
+func WithWarningHandler(ctx context.Context, handler WarningHandler) context.Context {
+	return context.WithValue(ctx, contextWarningKey{}, handler)
+}
+
 // Manager manages quota consumption and tracking across multiple resources and time periods
 type Manager struct {
 	storage Storage
 	config  Config
+	cache   Cache
+	metrics Metrics
+	logger  Logger
 }
 
 // NewManager creates a new quota manager with the given storage and configuration
@@ -26,9 +37,45 @@ func NewManager(storage Storage, config Config) (*Manager, error) {
 		config.DefaultTier = "explorer"
 	}
 
+	// Initialize cache
+	var cache Cache
+	if config.CacheConfig != nil && config.CacheConfig.Enabled {
+		// Set cache defaults
+		if config.CacheConfig.EntitlementTTL == 0 {
+			config.CacheConfig.EntitlementTTL = time.Minute
+		}
+		if config.CacheConfig.UsageTTL == 0 {
+			config.CacheConfig.UsageTTL = 10 * time.Second
+		}
+		if config.CacheConfig.MaxEntitlements == 0 {
+			config.CacheConfig.MaxEntitlements = 1000
+		}
+		if config.CacheConfig.MaxUsage == 0 {
+			config.CacheConfig.MaxUsage = 10000
+		}
+		cache = NewLRUCache(config.CacheConfig.MaxEntitlements, config.CacheConfig.MaxUsage)
+	} else {
+		cache = NewNoopCache()
+	}
+
+	// Initialize metrics
+	metrics := config.Metrics
+	if metrics == nil {
+		metrics = &NoopMetrics{}
+	}
+
+	// Initialize logger
+	logger := config.Logger
+	if logger == nil {
+		logger = &NoopLogger{}
+	}
+
 	return &Manager{
 		storage: storage,
 		config:  config,
+		cache:   cache,
+		metrics: metrics,
+		logger:  logger,
 	}, nil
 }
 
@@ -59,8 +106,13 @@ func (m *Manager) GetCurrentCycle(ctx context.Context, userID string) (Period, e
 
 // GetQuota returns current usage and limit for a resource
 func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodType PeriodType) (*Usage, error) {
-	// Get entitlement to determine tier
-	ent, err := m.storage.GetEntitlement(ctx, userID)
+	start := time.Now()
+	defer func() {
+		m.metrics.RecordQuotaCheck(userID, resource, time.Since(start))
+	}()
+
+	// Get entitlement to determine tier (uses cache)
+	ent, err := m.GetEntitlement(ctx, userID)
 	tier := m.config.DefaultTier
 	var period Period
 
@@ -91,8 +143,16 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 	}
 
 	// Get usage from storage
+	uStart := time.Now()
 	usage, err := m.storage.GetUsage(ctx, userID, resource, period)
+	m.metrics.RecordStorageOperation("GetUsage", time.Since(uStart), err)
+
 	if err != nil {
+		m.logger.Error("failed to get usage from storage",
+			Field{"userId", userID},
+			Field{"resource", resource},
+			Field{"error", err},
+		)
 		return nil, err
 	}
 
@@ -118,16 +178,17 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 }
 
 // Consume consumes quota for a resource
-func (m *Manager) Consume(ctx context.Context, userID, resource string, amount int, periodType PeriodType) error {
+// Returns the new total used amount and any error
+func (m *Manager) Consume(ctx context.Context, userID, resource string, amount int, periodType PeriodType) (int, error) {
 	if amount < 0 {
-		return ErrInvalidAmount
+		return 0, ErrInvalidAmount
 	}
 	if amount == 0 {
-		return nil // No-op
+		return 0, nil // No-op
 	}
 
-	// Get entitlement to determine tier
-	ent, err := m.storage.GetEntitlement(ctx, userID)
+	// Get entitlement to determine tier (uses cache)
+	ent, err := m.GetEntitlement(ctx, userID)
 	tier := m.config.DefaultTier
 	var period Period
 
@@ -154,17 +215,18 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
 
 	default:
-		return ErrInvalidPeriod
+		return 0, ErrInvalidPeriod
 	}
 
 	// Get limit for tier
 	limit := m.getLimitForResource(resource, tier, periodType)
 	if limit <= 0 {
-		return ErrQuotaExceeded // No quota available for this tier
+		return 0, ErrQuotaExceeded // No quota available for this tier
 	}
 
 	// Consume via storage (transaction-safe)
-	return m.storage.ConsumeQuota(ctx, &ConsumeRequest{
+	cStart := time.Now()
+	newUsed, err := m.storage.ConsumeQuota(ctx, &ConsumeRequest{
 		UserID:   userID,
 		Resource: resource,
 		Amount:   amount,
@@ -172,6 +234,34 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		Period:   period,
 		Limit:    limit,
 	})
+	m.metrics.RecordStorageOperation("ConsumeQuota", time.Since(cStart), err)
+
+	// Invalidate usage cache on successful consumption
+	if err == nil {
+		usageKey := userID + ":" + resource + ":" + period.Key()
+		m.cache.InvalidateUsage(usageKey)
+		m.metrics.RecordConsumption(userID, resource, tier, amount, true)
+
+		// Check for warnings
+		m.checkWarnings(ctx, userID, resource, tier, limit, newUsed, amount, period)
+	} else {
+		m.metrics.RecordConsumption(userID, resource, tier, amount, false)
+		if err == ErrQuotaExceeded {
+			m.logger.Warn("quota exceeded for user",
+				Field{"userId", userID},
+				Field{"resource", resource},
+				Field{"tier", tier},
+			)
+		} else {
+			m.logger.Error("failed to consume quota",
+				Field{"userId", userID},
+				Field{"resource", resource},
+				Field{"error", err},
+			)
+		}
+	}
+
+	return newUsed, err
 }
 
 // ApplyTierChange applies a tier change with prorated quota adjustment
@@ -220,7 +310,15 @@ func (m *Manager) ApplyTierChange(ctx context.Context, userID, oldTier, newTier 
 		adjustedLimit = currentUsed
 	}
 
-	return m.storage.ApplyTierChange(ctx, &TierChangeRequest{
+	m.logger.Info("applying tier change",
+		Field{"userId", userID},
+		Field{"oldTier", oldTier},
+		Field{"newTier", newTier},
+		Field{"resource", resource},
+	)
+
+	tcStart := time.Now()
+	err = m.storage.ApplyTierChange(ctx, &TierChangeRequest{
 		UserID:      userID,
 		OldTier:     oldTier,
 		NewTier:     newTier,
@@ -229,16 +327,72 @@ func (m *Manager) ApplyTierChange(ctx context.Context, userID, oldTier, newTier 
 		NewLimit:    adjustedLimit,
 		CurrentUsed: currentUsed,
 	})
+	m.metrics.RecordStorageOperation("ApplyTierChange", time.Since(tcStart), err)
+
+	if err != nil {
+		m.logger.Error("failed to apply tier change",
+			Field{"userId", userID},
+			Field{"oldTier", oldTier},
+			Field{"newTier", newTier},
+			Field{"error", err},
+		)
+	}
+
+	return err
 }
 
 // SetEntitlement updates a user's entitlement
 func (m *Manager) SetEntitlement(ctx context.Context, ent *Entitlement) error {
-	return m.storage.SetEntitlement(ctx, ent)
+	start := time.Now()
+	err := m.storage.SetEntitlement(ctx, ent)
+	m.metrics.RecordStorageOperation("SetEntitlement", time.Since(start), err)
+
+	if err == nil {
+		// Invalidate cache on successful update
+		m.cache.InvalidateEntitlement(ent.UserID)
+		m.logger.Info("updated entitlement for user",
+			Field{"userId", ent.UserID},
+			Field{"tier", ent.Tier},
+		)
+	} else {
+		m.logger.Error("failed to set entitlement for user",
+			Field{"userId", ent.UserID},
+			Field{"error", err},
+		)
+	}
+	return err
 }
 
 // GetEntitlement retrieves a user's entitlement
 func (m *Manager) GetEntitlement(ctx context.Context, userID string) (*Entitlement, error) {
-	return m.storage.GetEntitlement(ctx, userID)
+	// Check cache first
+	if cached, found := m.cache.GetEntitlement(userID); found {
+		m.metrics.RecordCacheHit("entitlement")
+		return cached, nil
+	}
+
+	m.metrics.RecordCacheMiss("entitlement")
+
+	// Cache miss - fetch from storage
+	start := time.Now()
+	ent, err := m.storage.GetEntitlement(ctx, userID)
+	m.metrics.RecordStorageOperation("GetEntitlement", time.Since(start), err)
+
+	if err == nil && ent != nil {
+		// Cache the result
+		ttl := m.config.CacheTTL
+		if m.config.CacheConfig != nil && m.config.CacheConfig.EntitlementTTL > 0 {
+			ttl = m.config.CacheConfig.EntitlementTTL
+		}
+		m.cache.SetEntitlement(userID, ent, ttl)
+	} else if err != nil && err != ErrEntitlementNotFound {
+		m.logger.Error("failed to get entitlement from storage",
+			Field{"userId", userID},
+			Field{"error", err},
+		)
+	}
+
+	return ent, err
 }
 
 // getLimitForResource returns the quota limit for a resource based on tier and period type
@@ -264,4 +418,47 @@ func (m *Manager) getLimitForResource(resource, tier string, periodType PeriodTy
 	}
 
 	return 0
+}
+
+func (m *Manager) checkWarnings(ctx context.Context, userID, resource, tier string, limit, currentUsed, amount int, period Period) {
+	thresholds := m.getWarningThresholds(resource, tier)
+	if len(thresholds) == 0 {
+		return
+	}
+
+	previousUsed := currentUsed - amount
+	for _, threshold := range thresholds {
+		boundary := float64(limit) * threshold
+		if float64(previousUsed) < boundary && float64(currentUsed) >= boundary {
+			// Threshold crossed
+			usage := &Usage{
+				UserID:    userID,
+				Resource:  resource,
+				Used:      currentUsed,
+				Limit:     limit,
+				Period:    period,
+				Tier:      tier,
+				UpdatedAt: time.Now().UTC(),
+			}
+
+			// Call global handler
+			if m.config.WarningHandler != nil {
+				m.config.WarningHandler.OnWarning(ctx, usage, threshold)
+			}
+
+			// Call context handler if present
+			if ctxHandler, ok := ctx.Value(contextWarningKey{}).(WarningHandler); ok {
+				ctxHandler.OnWarning(ctx, usage, threshold)
+			}
+		}
+	}
+}
+
+func (m *Manager) getWarningThresholds(resource, tier string) []float64 {
+	if t, ok := m.config.Tiers[tier]; ok {
+		if thresholds, ok := t.WarningThresholds[resource]; ok {
+			return thresholds
+		}
+	}
+	return nil
 }

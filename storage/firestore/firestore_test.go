@@ -46,28 +46,16 @@ func cleanupFirestore(t *testing.T, client *firestore.Client, collections ...str
 	for _, coll := range collections {
 		// Delete all documents in collection
 		iter := client.Collection(coll).Documents(ctx)
-		batch := client.Batch()
-		count := 0
+		bw := client.BulkWriter(ctx)
 
 		for {
 			doc, err := iter.Next()
 			if err != nil {
 				break
 			}
-			batch.Delete(doc.Ref)
-			count++
-
-			// Commit in batches of 500
-			if count >= 500 {
-				_, _ = batch.Commit(ctx)
-				batch = client.Batch()
-				count = 0
-			}
+			_, _ = bw.Delete(doc.Ref)
 		}
-
-		if count > 0 {
-			_, _ = batch.Commit(ctx)
-		}
+		bw.Flush()
 
 		// Also delete subcollections
 		docs, _ := client.Collection(coll).Documents(ctx).GetAll()
@@ -165,7 +153,7 @@ func TestFirestore_ConsumeQuota_Success(t *testing.T) {
 		Limit:    1000,
 	}
 
-	err := storage.ConsumeQuota(ctx, req)
+	_, err := storage.ConsumeQuota(ctx, req)
 	if err != nil {
 		t.Fatalf("ConsumeQuota failed: %v", err)
 	}
@@ -211,7 +199,7 @@ func TestFirestore_ConsumeQuota_Exceeds(t *testing.T) {
 		Limit:    1000,
 	}
 
-	err := storage.ConsumeQuota(ctx, req)
+	_, err := storage.ConsumeQuota(ctx, req)
 	if err != goquota.ErrQuotaExceeded {
 		t.Errorf("Expected ErrQuotaExceeded, got %v", err)
 	}
@@ -265,7 +253,7 @@ func TestFirestore_ConsumeQuota_Concurrent(t *testing.T) {
 				Period:   period,
 				Limit:    1000,
 			}
-			if err := storage.ConsumeQuota(ctx, req); err != nil {
+			if _, err := storage.ConsumeQuota(ctx, req); err != nil {
 				errors <- err
 			}
 		}()
@@ -321,21 +309,21 @@ func TestFirestore_ConsumeQuota_NearLimit(t *testing.T) {
 		Limit:    1000,
 	}
 
-	err := storage.ConsumeQuota(ctx, req)
+	_, err := storage.ConsumeQuota(ctx, req)
 	if err != nil {
 		t.Fatalf("ConsumeQuota failed: %v", err)
 	}
 
 	// Try to consume more (should succeed - exactly at limit)
 	req.Amount = 10
-	err = storage.ConsumeQuota(ctx, req)
+	_, err = storage.ConsumeQuota(ctx, req)
 	if err != nil {
 		t.Errorf("Expected success at limit, got %v", err)
 	}
 
 	// Try to consume one more (should fail)
 	req.Amount = 1
-	err = storage.ConsumeQuota(ctx, req)
+	_, err = storage.ConsumeQuota(ctx, req)
 	if err != goquota.ErrQuotaExceeded {
 		t.Errorf("Expected ErrQuotaExceeded, got %v", err)
 	}
@@ -372,7 +360,7 @@ func TestFirestore_ApplyTierChange(t *testing.T) {
 		Limit:    3600,
 	}
 
-	err := storage.ConsumeQuota(ctx, consumeReq)
+	_, err := storage.ConsumeQuota(ctx, consumeReq)
 	if err != nil {
 		t.Fatalf("ConsumeQuota failed: %v", err)
 	}
@@ -444,7 +432,7 @@ func TestFirestore_MultipleResources(t *testing.T) {
 			Limit:    1000,
 		}
 
-		err := storage.ConsumeQuota(ctx, req)
+		_, err := storage.ConsumeQuota(ctx, req)
 		if err != nil {
 			t.Errorf("ConsumeQuota for %s failed: %v", resource, err)
 		}
@@ -503,7 +491,7 @@ func TestFirestore_DifferentPeriods(t *testing.T) {
 		Limit:    100,
 	}
 
-	err := storage.ConsumeQuota(ctx, dailyReq)
+	_, err := storage.ConsumeQuota(ctx, dailyReq)
 	if err != nil {
 		t.Fatalf("Daily ConsumeQuota failed: %v", err)
 	}
@@ -518,7 +506,7 @@ func TestFirestore_DifferentPeriods(t *testing.T) {
 		Limit:    10000,
 	}
 
-	err = storage.ConsumeQuota(ctx, monthlyReq)
+	_, err = storage.ConsumeQuota(ctx, monthlyReq)
 	if err != nil {
 		t.Fatalf("Monthly ConsumeQuota failed: %v", err)
 	}

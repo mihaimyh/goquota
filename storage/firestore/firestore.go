@@ -3,252 +3,280 @@
 package firestore
 
 import (
-"context"
-"fmt"
-"math"
-"time"
+	"context"
+	"fmt"
+	"math"
+	"time"
 
-"cloud.google.com/go/firestore"
-"google.golang.org/grpc/codes"
-"google.golang.org/grpc/status"
+	"cloud.google.com/go/firestore"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
-"github.com/mihaimyh/goquota/pkg/goquota"
+	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
 // Storage implements goquota.Storage using Google Cloud Firestore
 type Storage struct {
-client                *firestore.Client
-entitlementsCollection string
-usageCollection        string
+	client                 *firestore.Client
+	entitlementsCollection string
+	usageCollection        string
 }
 
 // Config holds Firestore storage configuration
 type Config struct {
-// EntitlementsCollection is the Firestore collection for user entitlements
-// Default: "billing_entitlements"
-EntitlementsCollection string
+	// EntitlementsCollection is the Firestore collection for user entitlements
+	// Default: "billing_entitlements"
+	EntitlementsCollection string
 
-// UsageCollection is the Firestore collection for usage tracking
-// Default: "billing_usage"
-UsageCollection string
+	// UsageCollection is the Firestore collection for usage tracking
+	// Default: "billing_usage"
+	UsageCollection string
 }
 
 // New creates a new Firestore storage adapter
 func New(client *firestore.Client, config Config) (*Storage, error) {
-if client == nil {
-return nil, fmt.Errorf("firestore client is required")
-}
+	if client == nil {
+		return nil, fmt.Errorf("firestore client is required")
+	}
 
-// Set defaults
-if config.EntitlementsCollection == "" {
-config.EntitlementsCollection = "billing_entitlements"
-}
-if config.UsageCollection == "" {
-config.UsageCollection = "billing_usage"
-}
+	// Set defaults
+	if config.EntitlementsCollection == "" {
+		config.EntitlementsCollection = "billing_entitlements"
+	}
+	if config.UsageCollection == "" {
+		config.UsageCollection = "billing_usage"
+	}
 
-return &Storage{
-client:                client,
-entitlementsCollection: config.EntitlementsCollection,
-usageCollection:        config.UsageCollection,
-}, nil
+	return &Storage{
+		client:                 client,
+		entitlementsCollection: config.EntitlementsCollection,
+		usageCollection:        config.UsageCollection,
+	}, nil
 }
 
 // GetEntitlement implements goquota.Storage
 func (s *Storage) GetEntitlement(ctx context.Context, userID string) (*goquota.Entitlement, error) {
-doc := s.client.Collection(s.entitlementsCollection).Doc(userID)
-snap, err := doc.Get(ctx)
-if err != nil {
-if status.Code(err) == codes.NotFound {
-return nil, goquota.ErrEntitlementNotFound
-}
-return nil, fmt.Errorf("failed to get entitlement: %w", err)
-}
+	doc := s.client.Collection(s.entitlementsCollection).Doc(userID)
+	snap, err := doc.Get(ctx)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, goquota.ErrEntitlementNotFound
+		}
+		return nil, fmt.Errorf("failed to get entitlement: %w", err)
+	}
 
-if !snap.Exists() {
-return nil, goquota.ErrEntitlementNotFound
-}
+	if !snap.Exists() {
+		return nil, goquota.ErrEntitlementNotFound
+	}
 
-data := snap.Data()
-ent := &goquota.Entitlement{
-UserID: userID,
-Tier:   getString(data, "tier"),
-SubscriptionStartDate: getTime(data, "subscriptionStartDate"),
-UpdatedAt: getTime(data, "updatedAt"),
-}
+	data := snap.Data()
+	ent := &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  getString(data, "tier"),
+		SubscriptionStartDate: getTime(data, "subscriptionStartDate"),
+		UpdatedAt:             getTime(data, "updatedAt"),
+	}
 
-if expiresAt, ok := data["expiresAt"].(time.Time); ok && !expiresAt.IsZero() {
-ent.ExpiresAt = &expiresAt
-}
+	if expiresAt, ok := data["expiresAt"].(time.Time); ok && !expiresAt.IsZero() {
+		ent.ExpiresAt = &expiresAt
+	}
 
-return ent, nil
+	return ent, nil
 }
 
 // SetEntitlement implements goquota.Storage
 func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) error {
-if ent == nil || ent.UserID == "" {
-return fmt.Errorf("invalid entitlement")
-}
+	if ent == nil || ent.UserID == "" {
+		return fmt.Errorf("invalid entitlement")
+	}
 
-doc := s.client.Collection(s.entitlementsCollection).Doc(ent.UserID)
+	doc := s.client.Collection(s.entitlementsCollection).Doc(ent.UserID)
 
-data := map[string]interface{}{
-"tier":                  ent.Tier,
-"subscriptionStartDate": ent.SubscriptionStartDate,
-"updatedAt":             ent.UpdatedAt,
-}
+	data := map[string]interface{}{
+		"tier":                  ent.Tier,
+		"subscriptionStartDate": ent.SubscriptionStartDate,
+		"updatedAt":             ent.UpdatedAt,
+	}
 
-if ent.ExpiresAt != nil {
-data["expiresAt"] = *ent.ExpiresAt
-}
+	if ent.ExpiresAt != nil {
+		data["expiresAt"] = *ent.ExpiresAt
+	}
 
-_, err := doc.Set(ctx, data, firestore.MergeAll)
-if err != nil {
-return fmt.Errorf("failed to set entitlement: %w", err)
-}
+	_, err := doc.Set(ctx, data, firestore.MergeAll)
+	if err != nil {
+		return fmt.Errorf("failed to set entitlement: %w", err)
+	}
 
-return nil
+	return nil
 }
 
 // GetUsage implements goquota.Storage
 func (s *Storage) GetUsage(ctx context.Context, userID, resource string, period goquota.Period) (*goquota.Usage, error) {
-doc := s.usageDoc(userID, resource, period)
-snap, err := doc.Get(ctx)
-if err != nil {
-if status.Code(err) == codes.NotFound {
-return nil, nil // No usage yet is not an error
-}
-return nil, fmt.Errorf("failed to get usage: %w", err)
-}
+	doc := s.usageDoc(userID, resource, period)
+	snap, err := doc.Get(ctx)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, nil // No usage yet is not an error
+		}
+		return nil, fmt.Errorf("failed to get usage: %w", err)
+	}
 
-if !snap.Exists() {
-return nil, nil
-}
+	if !snap.Exists() {
+		return nil, nil
+	}
 
-data := snap.Data()
-usage := &goquota.Usage{
-UserID:    userID,
-Resource:  resource,
-Used:      getInt(data, "used"),
-Limit:     getInt(data, "limit"),
-Period:    period,
-Tier:      getString(data, "tier"),
-UpdatedAt: getTime(data, "updatedAt"),
-}
+	data := snap.Data()
+	usage := &goquota.Usage{
+		UserID:    userID,
+		Resource:  resource,
+		Used:      getInt(data, "used"),
+		Limit:     getInt(data, "limit"),
+		Period:    period,
+		Tier:      getString(data, "tier"),
+		UpdatedAt: getTime(data, "updatedAt"),
+	}
 
-return usage, nil
+	return usage, nil
 }
 
 // ConsumeQuota implements goquota.Storage with transaction-safe consumption
-func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest) error {
-if req.Amount < 0 {
-return goquota.ErrInvalidAmount
-}
-if req.Amount == 0 {
-return nil // No-op
-}
+func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest) (int, error) {
+	if req.Amount < 0 {
+		return 0, goquota.ErrInvalidAmount
+	}
+	if req.Amount == 0 {
+		return 0, nil // No-op
+	}
 
-doc := s.usageDoc(req.UserID, req.Resource, req.Period)
+	doc := s.usageDoc(req.UserID, req.Resource, req.Period)
+	var newUsed int
 
-return s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
-snap, err := tx.Get(doc)
+	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		snap, err := tx.Get(doc)
 
-currentUsed := 0
-currentLimit := req.Limit
+		currentUsed := 0
+		currentLimit := req.Limit
 
-if err == nil && snap.Exists() {
-data := snap.Data()
-currentUsed = getInt(data, "used")
-storedLimit := getInt(data, "limit")
-if storedLimit > 0 {
-currentLimit = storedLimit
-}
-}
+		if err == nil && snap.Exists() {
+			data := snap.Data()
+			currentUsed = getInt(data, "used")
+			storedLimit := getInt(data, "limit")
+			if storedLimit > 0 {
+				currentLimit = storedLimit
+			}
+		}
 
-newUsed := currentUsed + req.Amount
-if newUsed > currentLimit {
-return goquota.ErrQuotaExceeded
-}
+		newUsed = currentUsed + req.Amount
+		if newUsed > currentLimit {
+			return goquota.ErrQuotaExceeded
+		}
 
-now := time.Now().UTC()
-return tx.Set(doc, map[string]interface{}{
-"used":       newUsed,
-"limit":      currentLimit,
-"cycleStart": req.Period.Start,
-"cycleEnd":   req.Period.End,
-"tier":       req.Tier,
-"resource":   req.Resource,
-"updatedAt":  now,
-}, firestore.MergeAll)
-})
+		now := time.Now().UTC()
+		return tx.Set(doc, map[string]interface{}{
+			"used":       newUsed,
+			"limit":      currentLimit,
+			"cycleStart": req.Period.Start,
+			"cycleEnd":   req.Period.End,
+			"tier":       req.Tier,
+			"resource":   req.Resource,
+			"updatedAt":  now,
+		}, firestore.MergeAll)
+	})
+
+	return newUsed, err
 }
 
 // ApplyTierChange implements goquota.Storage with prorated quota adjustment
 func (s *Storage) ApplyTierChange(ctx context.Context, req *goquota.TierChangeRequest) error {
-// Calculate prorated limit (already done by Manager, just store it)
-doc := s.usageDoc(req.UserID, "audio_seconds", req.Period) // Assuming audio_seconds resource
+	// Calculate prorated limit (already done by Manager, just store it)
+	doc := s.usageDoc(req.UserID, "audio_seconds", req.Period) // Assuming audio_seconds resource
 
-return s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
-snap, err := tx.Get(doc)
+	return s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		snap, err := tx.Get(doc)
 
-currentUsed := req.CurrentUsed
-if err == nil && snap.Exists() {
-data := snap.Data()
-currentUsed = getInt(data, "used")
+		currentUsed := req.CurrentUsed
+		if err == nil && snap.Exists() {
+			data := snap.Data()
+			currentUsed = getInt(data, "used")
+		}
+
+		now := time.Now().UTC()
+		return tx.Set(doc, map[string]interface{}{
+			"limit":         req.NewLimit,
+			"used":          currentUsed,
+			"cycleStart":    req.Period.Start,
+			"cycleEnd":      req.Period.End,
+			"tier":          req.NewTier,
+			"previousTier":  req.OldTier,
+			"tierChangedAt": now,
+			"resource":      "audio_seconds",
+			"updatedAt":     now,
+		}, firestore.MergeAll)
+	})
 }
 
-now := time.Now().UTC()
-return tx.Set(doc, map[string]interface{}{
-"limit":         req.NewLimit,
-"used":          currentUsed,
-"cycleStart":    req.Period.Start,
-"cycleEnd":      req.Period.End,
-"tier":          req.NewTier,
-"previousTier":  req.OldTier,
-"tierChangedAt": now,
-"resource":      "audio_seconds",
-"updatedAt":     now,
-}, firestore.MergeAll)
-})
+// SetUsage implements goquota.Storage
+func (s *Storage) SetUsage(ctx context.Context, userID, resource string, usage *goquota.Usage, period goquota.Period) error {
+	if usage == nil {
+		return fmt.Errorf("usage is required")
+	}
+
+	doc := s.usageDoc(userID, resource, period)
+	data := map[string]interface{}{
+		"used":       usage.Used,
+		"limit":      usage.Limit,
+		"cycleStart": period.Start,
+		"cycleEnd":   period.End,
+		"tier":       usage.Tier,
+		"resource":   resource,
+		"updatedAt":  usage.UpdatedAt,
+	}
+
+	_, err := doc.Set(ctx, data, firestore.MergeAll)
+	if err != nil {
+		return fmt.Errorf("failed to set usage: %w", err)
+	}
+
+	return nil
 }
 
 // usageDoc returns the Firestore document reference for usage tracking
 func (s *Storage) usageDoc(userID, resource string, period goquota.Period) *firestore.DocumentRef {
-// Structure: billing_usage/{userID}/periods/{periodKey}_{resource}
-periodKey := period.Key()
-docID := fmt.Sprintf("%s_%s", periodKey, resource)
+	// Structure: billing_usage/{userID}/periods/{periodKey}_{resource}
+	periodKey := period.Key()
+	docID := fmt.Sprintf("%s_%s", periodKey, resource)
 
-return s.client.Collection(s.usageCollection).
-Doc(userID).
-Collection("periods").
-Doc(docID)
+	return s.client.Collection(s.usageCollection).
+		Doc(userID).
+		Collection("periods").
+		Doc(docID)
 }
 
 // Helper functions for type conversion from Firestore data
 
 func getString(data map[string]interface{}, key string) string {
-if v, ok := data[key].(string); ok {
-return v
-}
-return ""
+	if v, ok := data[key].(string); ok {
+		return v
+	}
+	return ""
 }
 
 func getInt(data map[string]interface{}, key string) int {
-switch v := data[key].(type) {
-case int:
-return v
-case int64:
-return int(v)
-case float64:
-return int(math.Round(v))
-default:
-return 0
-}
+	switch v := data[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(math.Round(v))
+	default:
+		return 0
+	}
 }
 
 func getTime(data map[string]interface{}, key string) time.Time {
-if v, ok := data[key].(time.Time); ok {
-return v
-}
-return time.Time{}
+	if v, ok := data[key].(time.Time); ok {
+		return v
+	}
+	return time.Time{}
 }
