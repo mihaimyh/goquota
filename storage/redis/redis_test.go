@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -738,4 +739,168 @@ func BenchmarkStorage_ConsumeQuota(b *testing.B) {
 			b.Fatalf("ConsumeQuota failed: %v", err)
 		}
 	}
+}
+
+func TestStorage_EdgeCases(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.Close()
+
+	storage, err := New(client, DefaultConfig())
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:   time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC),
+		Type:  goquota.PeriodTypeMonthly,
+	}
+
+	t.Run("refund non-existent user", func(t *testing.T) {
+		req := &goquota.RefundRequest{
+			UserID:         "ghost_user",
+			Resource:       "api_calls",
+			Amount:         50,
+			PeriodType:     goquota.PeriodTypeMonthly,
+			Period:         period,
+			IdempotencyKey: "ghost_refund",
+		}
+		// Should not return error, should treated as valid but effective usage is 0
+		if err := storage.RefundQuota(ctx, req); err != nil {
+			t.Errorf("RefundQuota on non-existent user returned error: %v", err)
+		}
+
+		// Verify usage is 0 (or remains non-existent/0)
+		usage, err := storage.GetUsage(ctx, "ghost_user", "api_calls", period)
+		if err != nil {
+			t.Fatalf("GetUsage failed: %v", err)
+		}
+		if usage != nil && usage.Used != 0 {
+			t.Errorf("Expected usage 0 or nil, got %v", usage)
+		}
+	})
+
+	t.Run("concurrent mixed consume and refund", func(t *testing.T) {
+		userID := "mixed_user"
+		resource := "tokens"
+
+		// Initial setup: 1000 tokens
+		storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:   userID,
+			Resource: resource,
+			Amount:   1000,
+			Tier:     "pro",
+			Period:   period,
+			Limit:    10000,
+		})
+
+		const goroutines = 20
+		const operations = 50
+
+		// 10 routines consuming 1, 10 routines refunding 1
+		errChan := make(chan error, goroutines*operations)
+
+		for i := 0; i < goroutines/2; i++ {
+			go func() {
+				for j := 0; j < operations; j++ {
+					_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+						UserID:   userID,
+						Resource: resource,
+						Amount:   1,
+						Tier:     "pro",
+						Period:   period,
+						Limit:    10000,
+					})
+					errChan <- err
+				}
+			}()
+		}
+
+		for i := 0; i < goroutines/2; i++ {
+			go func() {
+				for j := 0; j < operations; j++ {
+					// Use unique key for each refund to ensure they all count
+					err := storage.RefundQuota(ctx, &goquota.RefundRequest{
+						UserID:         userID,
+						Resource:       resource,
+						Amount:         1, // Refund 1
+						PeriodType:     goquota.PeriodTypeMonthly,
+						Period:         period,
+						IdempotencyKey: fmt.Sprintf("refund_%d_%d", i, j),
+					})
+					errChan <- err
+				}
+			}()
+		}
+
+		// Wait for all
+		for i := 0; i < goroutines*operations; i++ {
+			if err := <-errChan; err != nil {
+				// QuotaExceeded is acceptable if we hit limit, but here limit is high
+				t.Errorf("Concurrent operation failed: %v", err)
+			}
+		}
+
+		// Total change should be 0 (Consume concurrent to Refund of same amount/count)
+		// 10 * 50 * (+1) + 10 * 50 * (-1) = 0 change.
+		// Start was 1000. End should be 1000.
+		usage, err := storage.GetUsage(ctx, userID, resource, period)
+		if err != nil {
+			t.Fatalf("GetUsage failed: %v", err)
+		}
+
+		if usage.Used != 1000 {
+			t.Errorf("Race condition detected! Expected 1000 used, got %d", usage.Used)
+		}
+	})
+
+	t.Run("concurrent refunds with SAME idempotency key", func(t *testing.T) {
+		userID := "idempotent_race_user"
+		resource := "api_calls"
+
+		// Consume 100
+		storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:   userID,
+			Resource: resource,
+			Amount:   100,
+			Tier:     "pro",
+			Period:   period,
+			Limit:    1000,
+		})
+
+		const goroutines = 20
+		errChan := make(chan error, goroutines)
+		key := "race_conditions_key"
+
+		for i := 0; i < goroutines; i++ {
+			go func() {
+				err := storage.RefundQuota(ctx, &goquota.RefundRequest{
+					UserID:         userID,
+					Resource:       resource,
+					Amount:         50,
+					PeriodType:     goquota.PeriodTypeMonthly,
+					Period:         period,
+					IdempotencyKey: key, // All share same key
+				})
+				errChan <- err
+			}()
+		}
+
+		for i := 0; i < goroutines; i++ {
+			if err := <-errChan; err != nil {
+				t.Errorf("Concurrent refund failed: %v", err)
+			}
+		}
+
+		// Usage should be 50 (100 - 50 once)
+		usage, err := storage.GetUsage(ctx, userID, resource, period)
+		if err != nil {
+			t.Fatalf("GetUsage failed: %v", err)
+		}
+
+		if usage.Used != 50 {
+			t.Errorf("Idempotency failed under concurrency! Expected 50 used, got %d", usage.Used)
+		}
+	})
 }
