@@ -439,3 +439,182 @@ func TestManager_Consume_WithIdempotencyKey_QuotaExceeded(t *testing.T) {
 		t.Errorf("Expected ErrQuotaExceeded on retry, got %v", err)
 	}
 }
+
+func TestManager_Consume_WithIdempotencyKey_DifferentAmount(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	idempotencyKey := "test-key-diff-amount"
+
+	// First consumption with idempotency key
+	newUsed1, err := manager.Consume(ctx, "user1", "audio_seconds", 100, goquota.PeriodTypeMonthly, goquota.WithIdempotencyKey(idempotencyKey))
+	if err != nil {
+		t.Fatalf("First Consume failed: %v", err)
+	}
+	if newUsed1 != 100 {
+		t.Errorf("Expected newUsed 100, got %d", newUsed1)
+	}
+
+	// Second consumption with same idempotency key but different amount - should return cached result
+	// This is expected behavior: idempotency keys are global, so same key = same result
+	newUsed2, err := manager.Consume(ctx, "user1", "audio_seconds", 200, goquota.PeriodTypeMonthly, goquota.WithIdempotencyKey(idempotencyKey))
+	if err != nil {
+		t.Fatalf("Second Consume failed: %v", err)
+	}
+	// Should return cached result from first request
+	if newUsed2 != 100 {
+		t.Errorf("Expected cached newUsed 100, got %d", newUsed2)
+	}
+
+	// Verify usage was only consumed once (100, not 200)
+	usage, err := manager.GetQuota(ctx, "user1", "audio_seconds", goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota failed: %v", err)
+	}
+	if usage.Used != 100 {
+		t.Errorf("Expected usage 100 (consumed once), got %d", usage.Used)
+	}
+}
+
+func TestManager_Consume_WithIdempotencyKey_DifferentResource(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	idempotencyKey := "test-key-diff-resource"
+
+	// First consumption for resource1
+	_, err = manager.Consume(ctx, "user1", "api_calls", 10, goquota.PeriodTypeDaily, goquota.WithIdempotencyKey(idempotencyKey))
+	if err != nil {
+		t.Fatalf("First Consume failed: %v", err)
+	}
+
+	// Second consumption with same idempotency key but different resource - should return cached result
+	// Idempotency keys are global, so same key = same cached result
+	newUsed2, err := manager.Consume(ctx, "user1", "audio_seconds", 100, goquota.PeriodTypeMonthly, goquota.WithIdempotencyKey(idempotencyKey))
+	if err != nil {
+		t.Fatalf("Second Consume failed: %v", err)
+	}
+	// Should return cached result from first request (which was for api_calls, not audio_seconds)
+	// This returns the NewUsed from the first consumption record
+	if newUsed2 != 10 {
+		t.Errorf("Expected cached newUsed 10 (from first request), got %d", newUsed2)
+	}
+}
+
+func TestManager_Consume_WithIdempotencyKey_EmptyString(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	// Consume with empty string idempotency key - should work normally (treated as no key)
+	_, err = manager.Consume(ctx, "user1", "audio_seconds", 100, goquota.PeriodTypeMonthly, goquota.WithIdempotencyKey(""))
+	if err != nil {
+		t.Fatalf("Consume with empty idempotency key failed: %v", err)
+	}
+
+	// Consume again with empty string - should consume again
+	_, err = manager.Consume(ctx, "user1", "audio_seconds", 100, goquota.PeriodTypeMonthly, goquota.WithIdempotencyKey(""))
+	if err != nil {
+		t.Fatalf("Second Consume failed: %v", err)
+	}
+
+	// Verify usage was consumed twice
+	usage, err := manager.GetQuota(ctx, "user1", "audio_seconds", goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota failed: %v", err)
+	}
+	if usage.Used != 200 {
+		t.Errorf("Expected usage 200 (consumed twice), got %d", usage.Used)
+	}
+}
+
+func TestManager_Consume_WithIdempotencyKey_Concurrent(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	idempotencyKey := "concurrent-key-123"
+	const goroutines = 10
+
+	done := make(chan int, goroutines)
+	errors := make(chan error, goroutines)
+
+	// Launch concurrent requests with same idempotency key
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			newUsed, err := manager.Consume(ctx, "user1", "audio_seconds", 10, goquota.PeriodTypeMonthly, goquota.WithIdempotencyKey(idempotencyKey))
+			done <- newUsed
+			errors <- err
+		}()
+	}
+
+	// Collect results
+	var results []int
+	for i := 0; i < goroutines; i++ {
+		result := <-done
+		err := <-errors
+		if err != nil {
+			t.Errorf("Concurrent Consume failed: %v", err)
+		}
+		results = append(results, result)
+	}
+
+	// All should return the same result (idempotent)
+	expected := results[0]
+	for i, result := range results {
+		if result != expected {
+			t.Errorf("Result %d differs: got %d, expected %d", i, result, expected)
+		}
+	}
+
+	// Verify usage was only consumed once
+	usage, err := manager.GetQuota(ctx, "user1", "audio_seconds", goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota failed: %v", err)
+	}
+	if usage.Used != 10 {
+		t.Errorf("Expected usage 10 (consumed once despite %d concurrent requests), got %d", goroutines, usage.Used)
+	}
+}

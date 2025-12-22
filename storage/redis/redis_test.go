@@ -466,6 +466,75 @@ func TestStorage_GetConsumptionRecord(t *testing.T) {
 	})
 }
 
+func TestStorage_ConsumeQuota_WithIdempotencyKey_Concurrent(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.Close()
+
+	storage, err := New(client, DefaultConfig())
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:   time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC),
+		Type:  goquota.PeriodTypeMonthly,
+	}
+
+	idempotencyKey := "concurrent-idempotency-key"
+	const goroutines = 10
+
+	done := make(chan int, goroutines)
+	errors := make(chan error, goroutines)
+
+	// Launch concurrent requests with same idempotency key
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			req := &goquota.ConsumeRequest{
+				UserID:         "concurrent_user",
+				Resource:       "api_calls",
+				Amount:         5,
+				Tier:           "pro",
+				Period:         period,
+				Limit:          100,
+				IdempotencyKey: idempotencyKey,
+			}
+			newUsed, err := storage.ConsumeQuota(ctx, req)
+			done <- newUsed
+			errors <- err
+		}()
+	}
+
+	// Collect results
+	var results []int
+	for i := 0; i < goroutines; i++ {
+		result := <-done
+		err := <-errors
+		if err != nil {
+			t.Errorf("Concurrent ConsumeQuota failed: %v", err)
+		}
+		results = append(results, result)
+	}
+
+	// All should return the same result (idempotent)
+	expected := results[0]
+	for i, result := range results {
+		if result != expected {
+			t.Errorf("Result %d differs: got %d, expected %d", i, result, expected)
+		}
+	}
+
+	// Verify usage was only consumed once
+	usage, err := storage.GetUsage(ctx, "concurrent_user", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if usage.Used != 5 {
+		t.Errorf("Expected usage 5 (consumed once despite %d concurrent requests), got %d", goroutines, usage.Used)
+	}
+}
+
 func TestStorage_ApplyTierChange(t *testing.T) {
 	client := setupTestRedis(t)
 	defer client.Close()

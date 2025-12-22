@@ -368,6 +368,116 @@ func TestStorage_GetConsumptionRecord_NotFound(t *testing.T) {
 	}
 }
 
+func TestStorage_ConsumeQuota_WithIdempotencyKey_DifferentAmount(t *testing.T) {
+	storage := New()
+	ctx := context.Background()
+
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	idempotencyKey := "test-key-diff-amount"
+
+	// First consumption with idempotency key
+	req1 := &goquota.ConsumeRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         5,
+		Tier:           "scholar",
+		Period:         period,
+		Limit:          100,
+		IdempotencyKey: idempotencyKey,
+	}
+
+	used1, err := storage.ConsumeQuota(ctx, req1)
+	if err != nil {
+		t.Fatalf("First ConsumeQuota failed: %v", err)
+	}
+
+	// Second consumption with same idempotency key but different amount - should return cached result
+	req2 := &goquota.ConsumeRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         10, // Different amount
+		Tier:           "scholar",
+		Period:         period,
+		Limit:          100,
+		IdempotencyKey: idempotencyKey,
+	}
+
+	used2, err := storage.ConsumeQuota(ctx, req2)
+	if err != nil {
+		t.Fatalf("Second ConsumeQuota failed: %v", err)
+	}
+	// Should return cached result
+	if used2 != used1 {
+		t.Errorf("Expected cached result %d, got %d", used1, used2)
+	}
+
+	// Verify usage was only consumed once (5, not 10)
+	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if usage.Used != 5 {
+		t.Errorf("Expected usage 5 (consumed once), got %d", usage.Used)
+	}
+}
+
+func TestStorage_ConsumeQuota_WithIdempotencyKey_EmptyString(t *testing.T) {
+	storage := New()
+	ctx := context.Background()
+
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(24 * time.Hour),
+		Type:  goquota.PeriodTypeDaily,
+	}
+
+	// Consume with empty string idempotency key - should work normally
+	req1 := &goquota.ConsumeRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         5,
+		Tier:           "scholar",
+		Period:         period,
+		Limit:          100,
+		IdempotencyKey: "", // Empty string
+	}
+
+	_, err := storage.ConsumeQuota(ctx, req1)
+	if err != nil {
+		t.Fatalf("ConsumeQuota with empty idempotency key failed: %v", err)
+	}
+
+	// Consume again with empty string - should consume again
+	req2 := &goquota.ConsumeRequest{
+		UserID:         "user1",
+		Resource:       "api_calls",
+		Amount:         5,
+		Tier:           "scholar",
+		Period:         period,
+		Limit:          100,
+		IdempotencyKey: "",
+	}
+
+	_, err = storage.ConsumeQuota(ctx, req2)
+	if err != nil {
+		t.Fatalf("Second ConsumeQuota failed: %v", err)
+	}
+
+	// Verify usage was consumed twice
+	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if usage.Used != 10 {
+		t.Errorf("Expected usage 10 (consumed twice), got %d", usage.Used)
+	}
+}
+
 func TestStorage_ApplyTierChange(t *testing.T) {
 	storage := New()
 	ctx := context.Background()
