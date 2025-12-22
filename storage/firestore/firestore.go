@@ -223,6 +223,13 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 
 		// 4. Create consumption audit record (if idempotency key provided)
 		if req.IdempotencyKey != "" {
+			// Calculate expiration time based on TTL
+			ttl := req.IdempotencyKeyTTL
+			if ttl == 0 {
+				ttl = 24 * time.Hour // Default 24 hours
+			}
+			expiresAt := now.Add(ttl)
+
 			consumptionDocRef := s.client.Collection(s.consumptionsCollection).Doc(req.IdempotencyKey)
 			err = tx.Create(consumptionDocRef, map[string]interface{}{
 				"consumptionId":  req.IdempotencyKey,
@@ -235,6 +242,10 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 				"timestamp":      now,
 				"idempotencyKey": req.IdempotencyKey,
 				"newUsed":        newUsed,
+				// expiresAt: TTL expiration time for automatic cleanup via Firestore TTL policies.
+				// IMPORTANT: You must configure a TTL policy in Google Cloud Console or Terraform
+				// targeting this field, otherwise documents will accumulate indefinitely.
+				"expiresAt": expiresAt,
 			})
 			if err != nil {
 				return err
@@ -432,6 +443,13 @@ func (s *Storage) createRefundRecord(
 	// If two transactions run concurrently, both will try to create, but Set will work
 	// The idempotency check in checkRefundIdempotency prevents duplicate processing
 	now := time.Now().UTC()
+	// Calculate expiration time based on TTL
+	ttl := req.IdempotencyKeyTTL
+	if ttl == 0 {
+		ttl = 24 * time.Hour // Default 24 hours
+	}
+	expiresAt := now.Add(ttl)
+
 	refundDocRef := s.client.Collection(s.refundsCollection).Doc(req.IdempotencyKey)
 	return tx.Set(refundDocRef, map[string]interface{}{
 		"refundId":       req.IdempotencyKey,
@@ -445,6 +463,10 @@ func (s *Storage) createRefundRecord(
 		"idempotencyKey": req.IdempotencyKey,
 		"reason":         req.Reason,
 		"metadata":       req.Metadata,
+		// expiresAt: TTL expiration time for automatic cleanup via Firestore TTL policies.
+		// IMPORTANT: You must configure a TTL policy in Google Cloud Console or Terraform
+		// targeting this field, otherwise documents will accumulate indefinitely.
+		"expiresAt": expiresAt,
 	}, firestore.MergeAll)
 }
 

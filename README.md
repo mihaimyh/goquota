@@ -144,6 +144,31 @@ storage, _ := firestoreStorage.New(client, firestoreStorage.Config{
 })
 ```
 
+**⚠️ Firestore Infrastructure Requirements:**
+
+1. **TTL Policy Configuration (Required)**
+   - The library adds an `expiresAt` field to consumption and refund documents for automatic cleanup
+   - **You must configure a Time-to-Live (TTL) policy** in Google Cloud Console or via Terraform for the `consumptions` and `refunds` collections targeting the `expiresAt` field
+   - Without TTL policies, documents will accumulate indefinitely despite the field presence
+   - Configure TTL policies:
+     - **Google Cloud Console**: Navigate to Firestore → Data → Select collection → Enable TTL → Choose `expiresAt` field
+     - **Terraform**: Use `google_firestore_field` resource with `ttl_config` block
+   - Example Terraform configuration:
+     ```hcl
+     resource "google_firestore_field" "consumptions_ttl" {
+       project     = "your-project-id"
+       database    = "(default)"
+       collection  = "billing_consumptions"
+       field       = "expiresAt"
+       ttl_config  {}
+     }
+     ```
+
+2. **Composite Indexes (If Querying by expiresAt)**
+   - If you plan to query documents by `expiresAt` (e.g., for manual cleanup jobs or debugging), Firestore requires composite indexes when filtering by multiple fields
+   - The library uses direct document lookups by ID (idempotency key), so indexes are not required for normal operation
+   - If you add custom cleanup functions that query `WHERE expiresAt < NOW()`, ensure you create the required composite indexes in Firestore
+
 ### In-Memory (Testing)
 
 ```go
@@ -292,6 +317,16 @@ manager, _ := goquota.NewManager(primaryStorage, &config)
 - **Secondary Storage**: Falls back to a secondary storage backend (works with any Storage implementation)
 
 Fallback strategies are tried in order when storage failures occur, enabling continued operation during outages.
+
+**⚠️ Multi-Instance Deployment Warning:**
+When deploying multiple instances of your application with fallback strategies enabled, be aware that:
+- **Cache Fallback** uses per-instance in-memory caches. Each instance maintains its own cache, which can lead to temporary inconsistencies across instances during storage outages.
+- **Optimistic Allowance** tracks consumption per-instance. In a deployment with N instances, the total optimistic consumption across all instances could theoretically approach N × configured percentage (e.g., 5 instances × 10% = 50% of quota). Monitor `goquota_optimistic_consumption_total` metrics across all instances to track total optimistic usage.
+- **Recommended Practices:**
+  - Use optimistic allowance percentages conservatively (5-10%) in multi-instance deployments
+  - Monitor aggregate optimistic consumption metrics across all instances
+  - Prefer Redis storage (with high availability) over fallback strategies for production workloads
+  - Consider using secondary storage fallback (e.g., Firestore) instead of optimistic allowance for better consistency
 
 ### Metrics
 

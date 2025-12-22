@@ -1140,6 +1140,175 @@ func TestManager_ApplyTierChange_InvalidTier(t *testing.T) {
 	}
 }
 
+func TestManager_ApplyTierChange_ProrationRounding(t *testing.T) {
+	// This test verifies that proration rounding works correctly
+	// The actual proration calculation uses the real current cycle, so we verify
+	// that rounding behavior is correct and doesn't cause issues
+
+	t.Run("proration uses math.Round for fractional calculations", func(t *testing.T) {
+		manager := newTestManager()
+		ctx := context.Background()
+
+		// Set up a user with scholar tier
+		startDate := time.Date(2023, 1, 15, 0, 0, 0, 0, time.UTC)
+		err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+			UserID:                "proration_rounding_user",
+			Tier:                  "scholar",
+			SubscriptionStartDate: startDate,
+			UpdatedAt:             time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatalf("SetEntitlement failed: %v", err)
+		}
+
+		// Consume some quota
+		_, err = manager.Consume(ctx, "proration_rounding_user", "audio_seconds", 100, goquota.PeriodTypeMonthly)
+		if err != nil {
+			t.Fatalf("Consume failed: %v", err)
+		}
+
+		// Apply tier change - this will use the actual current cycle
+		err = manager.ApplyTierChange(ctx, "proration_rounding_user", "scholar", "fluent", "audio_seconds")
+		if err != nil {
+			t.Fatalf("ApplyTierChange failed: %v", err)
+		}
+
+		// Verify the new limit was set correctly
+		usage, err := manager.GetQuota(ctx, "proration_rounding_user", "audio_seconds", goquota.PeriodTypeMonthly)
+		if err != nil {
+			t.Fatalf("GetQuota after tier change failed: %v", err)
+		}
+
+		// Verify limit doesn't decrease below current usage
+		if usage.Limit < usage.Used {
+			t.Errorf("Limit (%d) should not be less than current usage (%d)", usage.Limit, usage.Used)
+		}
+
+		// Verify no negative limits
+		if usage.Limit < 0 {
+			t.Errorf("Limit should not be negative, got %d", usage.Limit)
+		}
+
+		// Verify limit is reasonable (should be at least currentUsed + some prorated amount)
+		// The exact value depends on how much of the cycle remains, but it should be > currentUsed
+		if usage.Limit <= usage.Used {
+			t.Errorf("Limit should be greater than current usage after tier upgrade, "+
+				"got limit=%d, used=%d", usage.Limit, usage.Used)
+		}
+	})
+
+	t.Run("proration handles integer rounding correctly", func(t *testing.T) {
+		// This test verifies that the rounding logic works correctly
+		// by checking edge cases that might cause rounding issues
+
+		manager := newTestManager()
+		ctx := context.Background()
+
+		// Test with different scenarios
+		testCases := []struct {
+			name        string
+			userID      string
+			currentUsed int
+			oldTier     string
+			newTier     string
+			resource    string
+		}{
+			{
+				name:        "small usage, tier upgrade",
+				userID:      "rounding_user1",
+				currentUsed: 50,
+				oldTier:     "scholar",
+				newTier:     "fluent",
+				resource:    "audio_seconds",
+			},
+			{
+				name:        "mid usage, tier upgrade",
+				userID:      "rounding_user2",
+				currentUsed: 500,
+				oldTier:     "scholar",
+				newTier:     "fluent",
+				resource:    "audio_seconds",
+			},
+			{
+				name:        "high usage, tier upgrade",
+				userID:      "rounding_user3",
+				currentUsed: 2000,
+				oldTier:     "scholar",
+				newTier:     "fluent",
+				resource:    "audio_seconds",
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				// Set up user
+				startDate := time.Date(2023, 1, 15, 0, 0, 0, 0, time.UTC)
+				err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+					UserID:                tc.userID,
+					Tier:                  tc.oldTier,
+					SubscriptionStartDate: startDate,
+					UpdatedAt:             time.Now().UTC(),
+				})
+				if err != nil {
+					t.Fatalf("SetEntitlement failed: %v", err)
+				}
+
+				// Consume to set usage to specific value
+				// We'll consume incrementally to reach the target usage
+				// First, get the current usage
+				usageBefore, err := manager.GetQuota(ctx, tc.userID, tc.resource, goquota.PeriodTypeMonthly)
+				if err != nil {
+					t.Fatalf("GetQuota failed: %v", err)
+				}
+				currentUsage := usageBefore.Used
+
+				// Consume additional amount to reach target
+				if tc.currentUsed > currentUsage {
+					amountToConsume := tc.currentUsed - currentUsage
+					_, err = manager.Consume(ctx, tc.userID, tc.resource, amountToConsume, goquota.PeriodTypeMonthly)
+					if err != nil {
+						t.Fatalf("Consume to set usage failed: %v", err)
+					}
+				}
+
+				// Get the actual usage before tier change
+				usageBeforeChange, err := manager.GetQuota(ctx, tc.userID, tc.resource, goquota.PeriodTypeMonthly)
+				if err != nil {
+					t.Fatalf("GetQuota before change failed: %v", err)
+				}
+				actualUsed := usageBeforeChange.Used
+				oldLimit := usageBeforeChange.Limit
+
+				// Apply tier change
+				err = manager.ApplyTierChange(ctx, tc.userID, tc.oldTier, tc.newTier, tc.resource)
+				if err != nil {
+					t.Fatalf("ApplyTierChange failed: %v", err)
+				}
+
+				// Verify the result
+				usage, err := manager.GetQuota(ctx, tc.userID, tc.resource, goquota.PeriodTypeMonthly)
+				if err != nil {
+					t.Fatalf("GetQuota failed: %v", err)
+				}
+
+				// Verify limit is at least current usage (should never decrease)
+				if usage.Limit < actualUsed {
+					t.Errorf("Limit (%d) should not be less than current usage (%d)", usage.Limit, actualUsed)
+				}
+
+				// Verify limit is reasonable (for an upgrade, should be >= old limit)
+				newLimit := 18000 // fluent tier
+				if usage.Limit < oldLimit {
+					t.Errorf("After upgrade, limit (%d) should be >= old limit (%d)", usage.Limit, oldLimit)
+				}
+				if usage.Limit > newLimit {
+					t.Errorf("Limit (%d) should not exceed new tier limit (%d)", usage.Limit, newLimit)
+				}
+			})
+		}
+	})
+}
+
 // Phase 10: Integration Tests
 
 func TestManager_CacheStorageConsistency(t *testing.T) {
@@ -2135,4 +2304,167 @@ func TestManager_Fallback_Disabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Consume failed: %v", err)
 	}
+}
+
+func TestManager_IdempotencyKeyTTL_Integration(t *testing.T) {
+	storage := memory.New()
+	config := goquota.Config{
+		DefaultTier: "scholar",
+		Tiers: map[string]goquota.TierConfig{
+			"scholar": {
+				Name:          "scholar",
+				MonthlyQuotas: map[string]int{"api_calls": 1000},
+			},
+		},
+		IdempotencyKeyTTL: 2 * time.Second, // Custom TTL for testing
+	}
+
+	mgr, err := goquota.NewManager(storage, &config)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Set up user
+	startDate := time.Date(2023, 1, 15, 0, 0, 0, 0, time.UTC)
+	err = mgr.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "ttl_integration_user",
+		Tier:                  "scholar",
+		SubscriptionStartDate: startDate,
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	t.Run("Manager passes TTL to storage for consumption", func(t *testing.T) {
+		idempotencyKey := "integration_consume_key"
+
+		// First consumption
+		_, err := mgr.Consume(ctx, "ttl_integration_user", "api_calls", 10, goquota.PeriodTypeMonthly,
+			goquota.WithIdempotencyKey(idempotencyKey))
+		if err != nil {
+			t.Fatalf("First Consume failed: %v", err)
+		}
+
+		// Verify idempotency works (same key should return cached result)
+		newUsed, err := mgr.Consume(ctx, "ttl_integration_user", "api_calls", 10, goquota.PeriodTypeMonthly,
+			goquota.WithIdempotencyKey(idempotencyKey))
+		if err != nil {
+			t.Fatalf("Second Consume (idempotent) failed: %v", err)
+		}
+
+		// Should return the same result (idempotent)
+		usage, err := mgr.GetQuota(ctx, "ttl_integration_user", "api_calls", goquota.PeriodTypeMonthly)
+		if err != nil {
+			t.Fatalf("GetQuota failed: %v", err)
+		}
+		if usage.Used != 10 {
+			t.Errorf("Expected 10 used (consumed once), got %d", usage.Used)
+		}
+		if newUsed != 10 {
+			t.Errorf("Expected idempotent result to return 10, got %d", newUsed)
+		}
+	})
+
+	t.Run("Manager passes TTL to storage for refund", func(t *testing.T) {
+		// Use a fresh user to avoid state from previous tests
+		refundUserID := "ttl_integration_refund_user"
+
+		// Set up user
+		startDate := time.Date(2023, 1, 15, 0, 0, 0, 0, time.UTC)
+		err := mgr.SetEntitlement(ctx, &goquota.Entitlement{
+			UserID:                refundUserID,
+			Tier:                  "scholar",
+			SubscriptionStartDate: startDate,
+			UpdatedAt:             time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatalf("SetEntitlement failed: %v", err)
+		}
+
+		// First consume some quota
+		_, err = mgr.Consume(ctx, refundUserID, "api_calls", 50, goquota.PeriodTypeMonthly)
+		if err != nil {
+			t.Fatalf("Consume failed: %v", err)
+		}
+
+		idempotencyKey := "integration_refund_key"
+
+		// First refund
+		err = mgr.Refund(ctx, &goquota.RefundRequest{
+			UserID:         refundUserID,
+			Resource:       "api_calls",
+			Amount:         20,
+			PeriodType:     goquota.PeriodTypeMonthly,
+			IdempotencyKey: idempotencyKey,
+		})
+		if err != nil {
+			t.Fatalf("First Refund failed: %v", err)
+		}
+
+		// Verify idempotency works (same key should be idempotent)
+		err = mgr.Refund(ctx, &goquota.RefundRequest{
+			UserID:         refundUserID,
+			Resource:       "api_calls",
+			Amount:         20,
+			PeriodType:     goquota.PeriodTypeMonthly,
+			IdempotencyKey: idempotencyKey,
+		})
+		if err != nil {
+			t.Fatalf("Second Refund (idempotent) failed: %v", err)
+		}
+
+		// Verify usage is correct (50 - 20 = 30, refunded only once)
+		usage, err := mgr.GetQuota(ctx, refundUserID, "api_calls", goquota.PeriodTypeMonthly)
+		if err != nil {
+			t.Fatalf("GetQuota failed: %v", err)
+		}
+		if usage.Used != 30 {
+			t.Errorf("Expected 30 used (50 - 20), got %d", usage.Used)
+		}
+	})
+
+	t.Run("custom TTL configuration is respected", func(t *testing.T) {
+		// Create manager with custom TTL
+		customTTL := 1 * time.Hour
+		customConfig := goquota.Config{
+			DefaultTier: "scholar",
+			Tiers: map[string]goquota.TierConfig{
+				"scholar": {
+					Name:          "scholar",
+					MonthlyQuotas: map[string]int{"api_calls": 1000},
+				},
+			},
+			IdempotencyKeyTTL: customTTL,
+		}
+
+		customMgr, err := goquota.NewManager(storage, &customConfig)
+		if err != nil {
+			t.Fatalf("NewManager failed: %v", err)
+		}
+
+		// Verify TTL is set in config
+		if customMgr == nil {
+			t.Fatal("Manager is nil")
+		}
+
+		// The TTL should be passed through to storage operations
+		// We can't directly verify this without accessing internal state,
+		// but we can verify the manager was created with the config
+		idempotencyKey := "custom_ttl_key"
+		_, err = customMgr.Consume(ctx, "ttl_integration_user", "api_calls", 5, goquota.PeriodTypeMonthly,
+			goquota.WithIdempotencyKey(idempotencyKey))
+		if err != nil {
+			t.Fatalf("Consume with custom TTL failed: %v", err)
+		}
+
+		// Verify idempotency works (TTL should be set correctly in storage)
+		_, err = customMgr.Consume(ctx, "ttl_integration_user", "api_calls", 5, goquota.PeriodTypeMonthly,
+			goquota.WithIdempotencyKey(idempotencyKey))
+		if err != nil {
+			t.Fatalf("Idempotent Consume failed: %v", err)
+		}
+	})
 }

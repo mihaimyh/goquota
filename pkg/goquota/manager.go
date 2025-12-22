@@ -446,13 +446,14 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 	// Consume via storage (transaction-safe)
 	cStart := time.Now()
 	newUsed, err := m.storage.ConsumeQuota(ctx, &ConsumeRequest{
-		UserID:         userID,
-		Resource:       resource,
-		Amount:         amount,
-		Tier:           tier,
-		Period:         period,
-		Limit:          limit,
-		IdempotencyKey: consumeOpts.IdempotencyKey,
+		UserID:            userID,
+		Resource:          resource,
+		Amount:            amount,
+		Tier:              tier,
+		Period:            period,
+		Limit:             limit,
+		IdempotencyKey:    consumeOpts.IdempotencyKey,
+		IdempotencyKeyTTL: m.config.IdempotencyKeyTTL,
 	})
 	m.metrics.RecordStorageOperation("ConsumeQuota", time.Since(cStart), err)
 
@@ -679,6 +680,13 @@ func (m *Manager) ApplyTierChange(ctx context.Context, userID, oldTier, newTier,
 	}
 
 	// Prorated new limit: used + (newLimit * remainingFrac)
+	// Note: math.Round is used to convert fractional results to integers.
+	// This can result in 1-unit discrepancies due to rounding:
+	//   - Example: 1000 * 0.333 = 333.3 -> rounds to 333 (loses 0.3)
+	//   - Example: 1000 * 0.5 = 500.0 -> rounds to 500 (exact)
+	//   - Example: 1000 * 0.501 = 501.0 -> rounds to 501 (gains 0.1)
+	// These small discrepancies are acceptable for proration calculations and ensure
+	// the result is always an integer (as required by the quota limit type).
 	proratedNew := int(math.Round(float64(newLimit) * remainingFrac))
 	adjustedLimit := currentUsed + proratedNew
 	if adjustedLimit < currentUsed {
@@ -870,6 +878,8 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 
 	// Set period in request so storage uses the correct cycle
 	req.Period = period
+	// Set TTL for idempotency key
+	req.IdempotencyKeyTTL = m.config.IdempotencyKeyTTL
 
 	// Execute refund via storage
 	rStart := time.Now()

@@ -6,11 +6,18 @@ import "time"
 // that started at 'start', relative to 'now'. It preserves the day-of-month
 // from the start date across months (anniversary-based billing).
 //
-// For example, if a subscription started on Jan 31, the cycles will be:
-//   - Jan 31 - Feb 28 (or Feb 29 in leap years)
-//   - Feb 28 - Mar 31
-//   - Mar 31 - Apr 30
+// IMPORTANT: This function prevents "date drift" by always snapping back to the
+// original anchor day when possible. For example, if a subscription started on
+// Jan 31, the cycles will be:
+//   - Jan 31 - Feb 28 (or Feb 29 in leap years) - Feb has no 31st, so uses last day
+//   - Feb 28 - Mar 31 - SNAPS BACK to 31st (not drifting to 28th)
+//   - Mar 31 - Apr 30 - Apr has no 31st, so uses last day
+//   - Apr 30 - May 31 - SNAPS BACK to 31st (not drifting to 30th)
 //   - etc.
+//
+// This ensures that users don't lose days over time due to month-end variations.
+// The anchor day (31st in this example) is preserved whenever the target month
+// has that day available.
 func CurrentCycleForStart(start, now time.Time) (cycleStart, cycleEnd time.Time) {
 	s := startOfDayUTC(start.UTC())
 	n := now.UTC()
@@ -21,6 +28,7 @@ func CurrentCycleForStart(start, now time.Time) (cycleStart, cycleEnd time.Time)
 	}
 
 	// Track the original day-of-month to preserve billing anniversary
+	// This anchor day is used to prevent date drift across months with different lengths
 	originalDay := s.Day()
 	monthsElapsed := 0
 
@@ -42,7 +50,12 @@ func CurrentCycleForStart(start, now time.Time) (cycleStart, cycleEnd time.Time)
 }
 
 // addMonthsSafeWithDay adds months while preserving the target day-of-month when possible.
-// If the target day doesn't exist in the result month (e.g., Feb 31), it uses the last day of that month.
+// This function implements the "snap-back" behavior for anniversary billing:
+// - If the target day exists in the result month, it uses that day (preserves anchor day)
+// - If the target day doesn't exist (e.g., Feb 31), it uses the last day of that month
+// - On the next month, it snaps back to the original target day if available
+//
+// This prevents date drift: Jan 31 -> Feb 28 -> Mar 31 (snaps back), not Mar 28 (drift).
 func addMonthsSafeWithDay(base time.Time, months, targetDay int) time.Time {
 	year, month, _ := base.Date()
 	targetDate := time.Date(year, month+time.Month(months), 1,

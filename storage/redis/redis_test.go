@@ -901,6 +901,245 @@ func TestStorage_TTL(t *testing.T) {
 	})
 }
 
+func TestStorage_IdempotencyKeyTTL(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.Close()
+
+	ctx := context.Background()
+	storage, err := New(client, DefaultConfig())
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+
+	period := goquota.Period{
+		Start: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:   time.Date(2023, 2, 1, 0, 0, 0, 0, time.UTC),
+		Type:  goquota.PeriodTypeMonthly,
+	}
+
+	const testResourceAPICalls = "api_calls"
+
+	t.Run("consumption idempotency key expires after TTL", func(t *testing.T) {
+		userID := "ttl_consume_user"
+		resource := testResourceAPICalls
+		idempotencyKey := "test_consume_key_ttl"
+		customTTL := 2 * time.Second
+
+		// Consume with custom TTL
+		_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:            userID,
+			Resource:          resource,
+			Amount:            10,
+			Tier:              "pro",
+			Period:            period,
+			Limit:             1000,
+			IdempotencyKey:    idempotencyKey,
+			IdempotencyKeyTTL: customTTL,
+		})
+		if err != nil {
+			t.Fatalf("ConsumeQuota failed: %v", err)
+		}
+
+		// Verify key exists and has TTL
+		consumptionKey := storage.consumptionKey(idempotencyKey)
+		ttl, err := client.TTL(ctx, consumptionKey).Result()
+		if err != nil {
+			t.Fatalf("TTL check failed: %v", err)
+		}
+		if ttl <= 0 || ttl > time.Duration(customTTL.Seconds()+1)*time.Second {
+			t.Errorf("Expected TTL around %v, got %v", customTTL, ttl)
+		}
+
+		// Verify idempotency works before expiration
+		_, err = storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:            userID,
+			Resource:          resource,
+			Amount:            10,
+			Tier:              "pro",
+			Period:            period,
+			Limit:             1000,
+			IdempotencyKey:    idempotencyKey,
+			IdempotencyKeyTTL: customTTL,
+		})
+		if err != nil {
+			t.Errorf("Idempotency should work before expiration, got error: %v", err)
+		}
+
+		// Wait for expiration
+		time.Sleep(customTTL + 500*time.Millisecond)
+
+		// Verify key is expired
+		exists, err := client.Exists(ctx, consumptionKey).Result()
+		if err != nil {
+			t.Fatalf("Exists check failed: %v", err)
+		}
+		if exists > 0 {
+			t.Error("Idempotency key should be expired and removed")
+		}
+
+		// Verify we can use the same key again after expiration
+		_, err = storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:            userID,
+			Resource:          resource,
+			Amount:            10,
+			Tier:              "pro",
+			Period:            period,
+			Limit:             1000,
+			IdempotencyKey:    idempotencyKey,
+			IdempotencyKeyTTL: customTTL,
+		})
+		if err != nil {
+			t.Errorf("Should be able to consume again after key expiration, got error: %v", err)
+		}
+	})
+
+	t.Run("refund idempotency key expires after TTL", func(t *testing.T) {
+		userID := "ttl_refund_user"
+		resource := testResourceAPICalls
+		idempotencyKey := "test_refund_key_ttl"
+		customTTL := 2 * time.Second
+
+		// First consume some quota
+		_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:   userID,
+			Resource: resource,
+			Amount:   100,
+			Tier:     "pro",
+			Period:   period,
+			Limit:    1000,
+		})
+		if err != nil {
+			t.Fatalf("ConsumeQuota failed: %v", err)
+		}
+
+		// Refund with custom TTL
+		err = storage.RefundQuota(ctx, &goquota.RefundRequest{
+			UserID:            userID,
+			Resource:          resource,
+			Amount:            50,
+			PeriodType:        goquota.PeriodTypeMonthly,
+			Period:            period,
+			IdempotencyKey:    idempotencyKey,
+			IdempotencyKeyTTL: customTTL,
+		})
+		if err != nil {
+			t.Fatalf("RefundQuota failed: %v", err)
+		}
+
+		// Verify key exists and has TTL
+		refundKey := storage.refundKey(idempotencyKey)
+		ttl, err := client.TTL(ctx, refundKey).Result()
+		if err != nil {
+			t.Fatalf("TTL check failed: %v", err)
+		}
+		if ttl <= 0 || ttl > time.Duration(customTTL.Seconds()+1)*time.Second {
+			t.Errorf("Expected TTL around %v, got %v", customTTL, ttl)
+		}
+
+		// Verify idempotency works before expiration
+		err = storage.RefundQuota(ctx, &goquota.RefundRequest{
+			UserID:            userID,
+			Resource:          resource,
+			Amount:            50,
+			PeriodType:        goquota.PeriodTypeMonthly,
+			Period:            period,
+			IdempotencyKey:    idempotencyKey,
+			IdempotencyKeyTTL: customTTL,
+		})
+		if err != nil {
+			t.Errorf("Idempotency should work before expiration, got error: %v", err)
+		}
+
+		// Wait for expiration
+		time.Sleep(customTTL + 500*time.Millisecond)
+
+		// Verify key is expired
+		exists, err := client.Exists(ctx, refundKey).Result()
+		if err != nil {
+			t.Fatalf("Exists check failed: %v", err)
+		}
+		if exists > 0 {
+			t.Error("Idempotency key should be expired and removed")
+		}
+	})
+
+	t.Run("defaults to 24 hours when TTL is zero", func(t *testing.T) {
+		userID := "ttl_default_user"
+		resource := testResourceAPICalls
+		idempotencyKey := "test_default_ttl_key"
+
+		// Consume with zero TTL (should default to 24 hours)
+		_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:            userID,
+			Resource:          resource,
+			Amount:            10,
+			Tier:              "pro",
+			Period:            period,
+			Limit:             1000,
+			IdempotencyKey:    idempotencyKey,
+			IdempotencyKeyTTL: 0, // Zero TTL
+		})
+		if err != nil {
+			t.Fatalf("ConsumeQuota failed: %v", err)
+		}
+
+		// Verify key exists and has default TTL (24 hours = 86400 seconds)
+		consumptionKey := storage.consumptionKey(idempotencyKey)
+		ttl, err := client.TTL(ctx, consumptionKey).Result()
+		if err != nil {
+			t.Fatalf("TTL check failed: %v", err)
+		}
+		expectedTTL := 24 * time.Hour
+		// Allow some tolerance (within 1 second)
+		if ttl < expectedTTL-time.Second || ttl > expectedTTL+time.Second {
+			t.Errorf("Expected TTL around %v, got %v", expectedTTL, ttl)
+		}
+	})
+
+	t.Run("different TTL values work correctly", func(t *testing.T) {
+		userID := "ttl_various_user"
+		resource := testResourceAPICalls
+
+		testCases := []struct {
+			name           string
+			ttl            time.Duration
+			idempotencyKey string
+		}{
+			{"1 hour", 1 * time.Hour, "key_1h"},
+			{"24 hours", 24 * time.Hour, "key_24h"},
+			{"48 hours", 48 * time.Hour, "key_48h"},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+					UserID:            userID,
+					Resource:          resource,
+					Amount:            10,
+					Tier:              "pro",
+					Period:            period,
+					Limit:             1000,
+					IdempotencyKey:    tc.idempotencyKey,
+					IdempotencyKeyTTL: tc.ttl,
+				})
+				if err != nil {
+					t.Fatalf("ConsumeQuota failed: %v", err)
+				}
+
+				consumptionKey := storage.consumptionKey(tc.idempotencyKey)
+				ttl, err := client.TTL(ctx, consumptionKey).Result()
+				if err != nil {
+					t.Fatalf("TTL check failed: %v", err)
+				}
+				// Allow 1 second tolerance
+				if ttl < tc.ttl-time.Second || ttl > tc.ttl+time.Second {
+					t.Errorf("Expected TTL around %v, got %v", tc.ttl, ttl)
+				}
+			})
+		}
+	})
+}
+
 func BenchmarkStorage_ConsumeQuota(b *testing.B) {
 	client := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",

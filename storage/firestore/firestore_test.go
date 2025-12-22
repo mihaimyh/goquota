@@ -929,10 +929,12 @@ func TestFirestore_GetRefundRecord_Found(t *testing.T) {
 		Type:  goquota.PeriodTypeDaily,
 	}
 
+	const testResourceAPICalls = "api_calls"
+
 	// Consume and refund with idempotency key
 	consumeReq := &goquota.ConsumeRequest{
 		UserID:   "user1",
-		Resource: "api_calls",
+		Resource: testResourceAPICalls,
 		Amount:   50,
 		Tier:     "pro",
 		Period:   period,
@@ -947,7 +949,7 @@ func TestFirestore_GetRefundRecord_Found(t *testing.T) {
 	idempotencyKey := "refund-record-key"
 	refundReq := &goquota.RefundRequest{
 		UserID:         "user1",
-		Resource:       "api_calls",
+		Resource:       testResourceAPICalls,
 		Amount:         20,
 		PeriodType:     goquota.PeriodTypeDaily,
 		Period:         period,
@@ -975,8 +977,8 @@ func TestFirestore_GetRefundRecord_Found(t *testing.T) {
 	if record.UserID != "user1" {
 		t.Errorf("Expected UserID user1, got %s", record.UserID)
 	}
-	if record.Resource != "api_calls" {
-		t.Errorf("Expected Resource api_calls, got %s", record.Resource)
+	if record.Resource != testResourceAPICalls {
+		t.Errorf("Expected Resource %s, got %s", testResourceAPICalls, record.Resource)
 	}
 	if record.Amount != 20 {
 		t.Errorf("Expected Amount 20, got %d", record.Amount)
@@ -1207,4 +1209,254 @@ func TestFirestore_SetUsage_ErrorHandling(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for canceled context, got nil")
 	}
+}
+
+func TestFirestore_IdempotencyKeyTTL(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("idempotency_ttl")
+	consumptionsColl, refundsColl := getTestCollections("idempotency_ttl_consumptions")
+
+	storage, err := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+		ConsumptionsCollection: consumptionsColl,
+		RefundsCollection:      refundsColl,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+
+	defer cleanupFirestore(t, client, entColl, usageColl, consumptionsColl, refundsColl)
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:   time.Date(2023, 2, 1, 0, 0, 0, 0, time.UTC),
+		Type:  goquota.PeriodTypeMonthly,
+	}
+
+	const testResourceAPICalls = "api_calls"
+
+	t.Run("consumption idempotency key has expiresAt field", func(t *testing.T) {
+		userID := "ttl_consume_user"
+		resource := testResourceAPICalls
+		idempotencyKey := "test_consume_key_ttl"
+		customTTL := 2 * time.Hour
+
+		// Consume with custom TTL
+		_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:            userID,
+			Resource:          resource,
+			Amount:            10,
+			Tier:              "pro",
+			Period:            period,
+			Limit:             1000,
+			IdempotencyKey:    idempotencyKey,
+			IdempotencyKeyTTL: customTTL,
+		})
+		if err != nil {
+			t.Fatalf("ConsumeQuota failed: %v", err)
+		}
+
+		// Verify document has expiresAt field
+		doc := client.Collection(consumptionsColl).Doc(idempotencyKey)
+		snap, err := doc.Get(ctx)
+		if err != nil {
+			t.Fatalf("Failed to get consumption record: %v", err)
+		}
+
+		data := snap.Data()
+		expiresAt, ok := data["expiresAt"].(time.Time)
+		if !ok {
+			t.Error("expiresAt field is missing or wrong type")
+		}
+
+		// Verify expiresAt is approximately customTTL in the future
+		now := time.Now().UTC()
+		expectedExpiry := now.Add(customTTL)
+		// Allow 1 minute tolerance
+		if expiresAt.Before(expectedExpiry.Add(-1*time.Minute)) || expiresAt.After(expectedExpiry.Add(1*time.Minute)) {
+			t.Errorf("Expected expiresAt around %v, got %v", expectedExpiry, expiresAt)
+		}
+
+		// Verify idempotency works
+		_, err = storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:            userID,
+			Resource:          resource,
+			Amount:            10,
+			Tier:              "pro",
+			Period:            period,
+			Limit:             1000,
+			IdempotencyKey:    idempotencyKey,
+			IdempotencyKeyTTL: customTTL,
+		})
+		if err != nil {
+			t.Errorf("Idempotency should work, got error: %v", err)
+		}
+	})
+
+	t.Run("refund idempotency key has expiresAt field", func(t *testing.T) {
+		userID := "ttl_refund_user"
+		resource := testResourceAPICalls
+		idempotencyKey := "test_refund_key_ttl"
+		customTTL := 3 * time.Hour
+
+		// First consume some quota
+		_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:   userID,
+			Resource: resource,
+			Amount:   100,
+			Tier:     "pro",
+			Period:   period,
+			Limit:    1000,
+		})
+		if err != nil {
+			t.Fatalf("ConsumeQuota failed: %v", err)
+		}
+
+		// Refund with custom TTL
+		err = storage.RefundQuota(ctx, &goquota.RefundRequest{
+			UserID:            userID,
+			Resource:          resource,
+			Amount:            50,
+			PeriodType:        goquota.PeriodTypeMonthly,
+			Period:            period,
+			IdempotencyKey:    idempotencyKey,
+			IdempotencyKeyTTL: customTTL,
+		})
+		if err != nil {
+			t.Fatalf("RefundQuota failed: %v", err)
+		}
+
+		// Verify document has expiresAt field
+		doc := client.Collection(refundsColl).Doc(idempotencyKey)
+		snap, err := doc.Get(ctx)
+		if err != nil {
+			t.Fatalf("Failed to get refund record: %v", err)
+		}
+
+		data := snap.Data()
+		expiresAt, ok := data["expiresAt"].(time.Time)
+		if !ok {
+			t.Error("expiresAt field is missing or wrong type")
+		}
+
+		// Verify expiresAt is approximately customTTL in the future
+		now := time.Now().UTC()
+		expectedExpiry := now.Add(customTTL)
+		// Allow 1 minute tolerance
+		if expiresAt.Before(expectedExpiry.Add(-1*time.Minute)) || expiresAt.After(expectedExpiry.Add(1*time.Minute)) {
+			t.Errorf("Expected expiresAt around %v, got %v", expectedExpiry, expiresAt)
+		}
+
+		// Verify idempotency works
+		err = storage.RefundQuota(ctx, &goquota.RefundRequest{
+			UserID:            userID,
+			Resource:          resource,
+			Amount:            50,
+			PeriodType:        goquota.PeriodTypeMonthly,
+			Period:            period,
+			IdempotencyKey:    idempotencyKey,
+			IdempotencyKeyTTL: customTTL,
+		})
+		if err != nil {
+			t.Errorf("Idempotency should work, got error: %v", err)
+		}
+	})
+
+	t.Run("defaults to 24 hours when TTL is zero", func(t *testing.T) {
+		userID := "ttl_default_user"
+		resource := testResourceAPICalls
+		idempotencyKey := "test_default_ttl_key"
+
+		// Consume with zero TTL (should default to 24 hours)
+		_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+			UserID:            userID,
+			Resource:          resource,
+			Amount:            10,
+			Tier:              "pro",
+			Period:            period,
+			Limit:             1000,
+			IdempotencyKey:    idempotencyKey,
+			IdempotencyKeyTTL: 0, // Zero TTL
+		})
+		if err != nil {
+			t.Fatalf("ConsumeQuota failed: %v", err)
+		}
+
+		// Verify document has expiresAt field with default 24 hours
+		doc := client.Collection(consumptionsColl).Doc(idempotencyKey)
+		snap, err := doc.Get(ctx)
+		if err != nil {
+			t.Fatalf("Failed to get consumption record: %v", err)
+		}
+
+		data := snap.Data()
+		expiresAt, ok := data["expiresAt"].(time.Time)
+		if !ok {
+			t.Error("expiresAt field is missing or wrong type")
+		}
+
+		// Verify expiresAt is approximately 24 hours in the future
+		now := time.Now().UTC()
+		expectedExpiry := now.Add(24 * time.Hour)
+		// Allow 1 minute tolerance
+		if expiresAt.Before(expectedExpiry.Add(-1*time.Minute)) || expiresAt.After(expectedExpiry.Add(1*time.Minute)) {
+			t.Errorf("Expected expiresAt around %v (24 hours), got %v", expectedExpiry, expiresAt)
+		}
+	})
+
+	t.Run("different TTL values work correctly", func(t *testing.T) {
+		userID := "ttl_various_user"
+		resource := testResourceAPICalls
+
+		testCases := []struct {
+			name           string
+			ttl            time.Duration
+			idempotencyKey string
+		}{
+			{"1 hour", 1 * time.Hour, "key_1h"},
+			{"24 hours", 24 * time.Hour, "key_24h"},
+			{"48 hours", 48 * time.Hour, "key_48h"},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+					UserID:            userID,
+					Resource:          resource,
+					Amount:            10,
+					Tier:              "pro",
+					Period:            period,
+					Limit:             1000,
+					IdempotencyKey:    tc.idempotencyKey,
+					IdempotencyKeyTTL: tc.ttl,
+				})
+				if err != nil {
+					t.Fatalf("ConsumeQuota failed: %v", err)
+				}
+
+				doc := client.Collection(consumptionsColl).Doc(tc.idempotencyKey)
+				snap, err := doc.Get(ctx)
+				if err != nil {
+					t.Fatalf("Failed to get consumption record: %v", err)
+				}
+
+				data := snap.Data()
+				expiresAt, ok := data["expiresAt"].(time.Time)
+				if !ok {
+					t.Error("expiresAt field is missing or wrong type")
+				}
+
+				now := time.Now().UTC()
+				expectedExpiry := now.Add(tc.ttl)
+				// Allow 1 minute tolerance
+				if expiresAt.Before(expectedExpiry.Add(-1*time.Minute)) || expiresAt.After(expectedExpiry.Add(1*time.Minute)) {
+					t.Errorf("Expected expiresAt around %v, got %v", expectedExpiry, expiresAt)
+				}
+			})
+		}
+	})
 }

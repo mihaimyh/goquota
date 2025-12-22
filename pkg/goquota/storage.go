@@ -55,13 +55,14 @@ type Storage interface {
 
 // ConsumeRequest represents a quota consumption request
 type ConsumeRequest struct {
-	UserID         string
-	Resource       string
-	Amount         int
-	Tier           string
-	Period         Period
-	Limit          int
-	IdempotencyKey string
+	UserID            string
+	Resource          string
+	Amount            int
+	Tier              string
+	Period            Period
+	Limit             int
+	IdempotencyKey    string
+	IdempotencyKeyTTL time.Duration // TTL for idempotency key expiration
 }
 
 // TierChangeRequest represents a tier change with proration

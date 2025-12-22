@@ -161,7 +161,8 @@ func (s *Storage) loadScripts() {
 		local refundKey = KEYS[2]
 		local amount = tonumber(ARGV[1])
 		local refundData = ARGV[2]
-		local ttl = tonumber(ARGV[3])
+		local usageTTL = tonumber(ARGV[3])
+		local refundTTL = tonumber(ARGV[4])
 		
 		-- Check idempotency
 		if refundKey ~= "" then
@@ -177,7 +178,9 @@ func (s *Storage) loadScripts() {
 			-- No usage to refund, but we should record the refund if key provided
 			if refundKey ~= "" then
 				redis.call('SET', refundKey, refundData)
-				-- Audit logs usually don't expire, or have long TTL
+				if refundTTL > 0 then
+					redis.call('EXPIRE', refundKey, refundTTL)
+				end
 			end
 			return 'ok'
 		end
@@ -189,10 +192,16 @@ func (s *Storage) loadScripts() {
 		end
 		
 		redis.call('HSET', usageKey, 'used', newUsed)
+		if usageTTL > 0 then
+			redis.call('EXPIRE', usageKey, usageTTL)
+		end
 		
 		-- Record refund
 		if refundKey ~= "" then
 			redis.call('SET', refundKey, refundData)
+			if refundTTL > 0 then
+				redis.call('EXPIRE', refundKey, refundTTL)
+			end
 		end
 		
 		return 'ok'
@@ -468,7 +477,11 @@ func (s *Storage) updateConsumptionRecord(
 		return
 	}
 
+	// Use TTL from request, default to 24 hours if not set
 	consumptionTTL := int64(24 * 60 * 60) // Default 24 hours
+	if req.IdempotencyKeyTTL > 0 {
+		consumptionTTL = int64(req.IdempotencyKeyTTL.Seconds())
+	}
 	ttl := time.Duration(consumptionTTL) * time.Second
 	if err := s.client.Set(ctx, consumptionKey, string(recordData), ttl).Err(); err != nil {
 		// Log but don't fail - consumption already succeeded
@@ -517,7 +530,11 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 		return 0, err
 	}
 
+	// Use TTL from request, default to 24 hours if not set
 	consumptionTTL := int64(24 * 60 * 60) // Default 24 hours
+	if req.IdempotencyKeyTTL > 0 {
+		consumptionTTL = int64(req.IdempotencyKeyTTL.Seconds())
+	}
 
 	// Execute Lua script for atomic consumption
 	result, err := s.scripts["consume"].Run(
@@ -710,9 +727,15 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 		return fmt.Errorf("failed to marshal refund record: %w", err)
 	}
 
-	ttl := int64(0)
+	usageTTL := int64(0)
 	if s.config.UsageTTL > 0 {
-		ttl = int64(s.config.UsageTTL.Seconds())
+		usageTTL = int64(s.config.UsageTTL.Seconds())
+	}
+
+	// Use TTL from request, default to 24 hours if not set
+	refundTTL := int64(24 * 60 * 60) // Default 24 hours
+	if req.IdempotencyKeyTTL > 0 {
+		refundTTL = int64(req.IdempotencyKeyTTL.Seconds())
 	}
 
 	// Execute Lua script
@@ -722,7 +745,8 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 		[]string{usageKey, refundKey},
 		req.Amount,
 		string(refundData),
-		ttl,
+		usageTTL,
+		refundTTL,
 	).Result()
 
 	if err != nil {

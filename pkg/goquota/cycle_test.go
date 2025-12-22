@@ -365,3 +365,71 @@ func TestCurrentCycleForStart_TimezoneIndependence(t *testing.T) {
 		})
 	}
 }
+
+// TestCurrentCycleForStart_Jan31DriftPrevention explicitly tests the audit scenario:
+// Subscription starts Jan 31 -> Feb cycle ends Feb 28 -> March cycle should snap back to March 31
+// (NOT drift to March 28). This verifies that anniversary-based billing preserves the anchor day
+// and prevents date drift.
+func TestCurrentCycleForStart_Jan31DriftPrevention(t *testing.T) {
+	// Subscription starts on Jan 31, 2023
+	start := time.Date(2023, 1, 31, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name        string
+		now         time.Time
+		wantStart   time.Time
+		wantEnd     time.Time
+		description string
+	}{
+		{
+			name:        "First cycle: Jan 31 - Feb 28",
+			now:         time.Date(2023, 2, 15, 0, 0, 0, 0, time.UTC),
+			wantStart:   time.Date(2023, 1, 31, 0, 0, 0, 0, time.UTC),
+			wantEnd:     time.Date(2023, 2, 28, 0, 0, 0, 0, time.UTC),
+			description: "First cycle should end on Feb 28 (last day of February)",
+		},
+		{
+			name:        "Second cycle: Feb 28 - March 31 (SNAP-BACK, not drift)",
+			now:         time.Date(2023, 3, 15, 0, 0, 0, 0, time.UTC),
+			wantStart:   time.Date(2023, 2, 28, 0, 0, 0, 0, time.UTC),
+			wantEnd:     time.Date(2023, 3, 31, 0, 0, 0, 0, time.UTC),
+			description: "CRITICAL: March cycle must end on March 31 (snap-back to anchor day), NOT March 28 (drift)",
+		},
+		{
+			name:        "Third cycle: March 31 - April 30 (continues anchor day preservation)",
+			now:         time.Date(2023, 4, 15, 0, 0, 0, 0, time.UTC),
+			wantStart:   time.Date(2023, 3, 31, 0, 0, 0, 0, time.UTC),
+			wantEnd:     time.Date(2023, 4, 30, 0, 0, 0, 0, time.UTC),
+			description: "April cycle should end on April 30 (last day of April), preserving the anchor day pattern",
+		},
+		{
+			name:        "Multiple months: Verify no cumulative drift",
+			now:         time.Date(2023, 6, 15, 0, 0, 0, 0, time.UTC),
+			wantStart:   time.Date(2023, 5, 31, 0, 0, 0, 0, time.UTC),
+			wantEnd:     time.Date(2023, 6, 30, 0, 0, 0, 0, time.UTC),
+			description: "After multiple months, should still preserve anchor day (31st) pattern, not drift",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotStart, gotEnd := CurrentCycleForStart(start, tt.now)
+			if !gotStart.Equal(tt.wantStart) {
+				t.Errorf("start: got %v, want %v. %s", gotStart, tt.wantStart, tt.description)
+			}
+			if !gotEnd.Equal(tt.wantEnd) {
+				t.Errorf("end: got %v, want %v. %s", gotEnd, tt.wantEnd, tt.description)
+			}
+
+			// Explicit assertion for the critical audit scenario
+			if tt.name == "Second cycle: Feb 28 - March 31 (SNAP-BACK, not drift)" {
+				if gotEnd.Day() != 31 {
+					t.Errorf("CRITICAL DRIFT BUG: March cycle ends on day %d, expected 31. This indicates date drift!", gotEnd.Day())
+				}
+				if gotEnd.Month() != time.March {
+					t.Errorf("CRITICAL: Expected March, got %v", gotEnd.Month())
+				}
+			}
+		})
+	}
+}
