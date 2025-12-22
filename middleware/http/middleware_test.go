@@ -72,7 +72,9 @@ func TestMiddleware_Success(t *testing.T) {
 	// Create test handler
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("success"))
+		if _, err := w.Write([]byte("success")); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
 	}))
 
 	// Create request

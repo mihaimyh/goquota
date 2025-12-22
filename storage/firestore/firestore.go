@@ -20,6 +20,7 @@ type Storage struct {
 	client                 *firestore.Client
 	entitlementsCollection string
 	usageCollection        string
+	refundsCollection      string
 }
 
 // Config holds Firestore storage configuration
@@ -31,6 +32,10 @@ type Config struct {
 	// UsageCollection is the Firestore collection for usage tracking
 	// Default: "billing_usage"
 	UsageCollection string
+
+	// RefundsCollection is the Firestore collection for audit logs
+	// Default: "billing_refunds"
+	RefundsCollection string
 }
 
 // New creates a new Firestore storage adapter
@@ -46,11 +51,15 @@ func New(client *firestore.Client, config Config) (*Storage, error) {
 	if config.UsageCollection == "" {
 		config.UsageCollection = "billing_usage"
 	}
+	if config.RefundsCollection == "" {
+		config.RefundsCollection = "billing_refunds"
+	}
 
 	return &Storage{
 		client:                 client,
 		entitlementsCollection: config.EntitlementsCollection,
 		usageCollection:        config.UsageCollection,
+		refundsCollection:      config.RefundsCollection,
 	}, nil
 }
 
@@ -238,6 +247,160 @@ func (s *Storage) SetUsage(ctx context.Context, userID, resource string, usage *
 	}
 
 	return nil
+}
+
+// RefundQuota implements goquota.Storage
+func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) error {
+	if req.Amount < 0 {
+		return goquota.ErrInvalidAmount
+	}
+	if req.Amount == 0 {
+		return nil // No-op
+	}
+
+	// Transaction to ensure atomicity of usage update and audit log creation
+	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		// 1. Check idempotency if key provided
+		if req.IdempotencyKey != "" {
+			refundDocRef := s.client.Collection(s.refundsCollection).Doc(req.IdempotencyKey)
+			snap, err := tx.Get(refundDocRef)
+			if err != nil && status.Code(err) != codes.NotFound {
+				return err
+			}
+			if snap.Exists() {
+				// Idempotency hit - treat as success
+				return nil
+			}
+		}
+
+		// 2. Calculate period
+		var period goquota.Period
+		now := time.Now().UTC()
+		if !req.Period.Start.IsZero() {
+			period = req.Period
+		} else {
+			switch req.PeriodType {
+			case goquota.PeriodTypeMonthly:
+				start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+				end := start.AddDate(0, 1, 0)
+				period = goquota.Period{Start: start, End: end, Type: goquota.PeriodTypeMonthly}
+			case goquota.PeriodTypeDaily:
+				start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+				end := start.Add(24 * time.Hour)
+				period = goquota.Period{Start: start, End: end, Type: goquota.PeriodTypeDaily}
+			default:
+				return goquota.ErrInvalidPeriod
+			}
+		}
+
+		// 3. Get current usage
+		usageDoc := s.usageDoc(req.UserID, req.Resource, period)
+		snap, err := tx.Get(usageDoc)
+		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				// No usage to refund, just return nil
+				return nil
+			}
+			return err
+		}
+
+		currentUsed := 0
+		if snap.Exists() {
+			currentUsed = getInt(snap.Data(), "used")
+		}
+
+		// 4. Update usage
+		newUsed := currentUsed - req.Amount
+		if newUsed < 0 {
+			newUsed = 0
+		}
+
+		err = tx.Set(usageDoc, map[string]interface{}{
+			"used":      newUsed,
+			"updatedAt": now,
+		}, firestore.MergeAll)
+		if err != nil {
+			return err
+		}
+
+		// 5. Create refund audit record
+		if req.IdempotencyKey != "" {
+			refundDocRef := s.client.Collection(s.refundsCollection).Doc(req.IdempotencyKey)
+			err = tx.Create(refundDocRef, map[string]interface{}{
+				"refundId":       req.IdempotencyKey,
+				"userId":         req.UserID,
+				"resource":       req.Resource,
+				"amount":         req.Amount,
+				"periodStart":    period.Start,
+				"periodEnd":      period.End,
+				"periodType":     string(req.PeriodType),
+				"timestamp":      now,
+				"idempotencyKey": req.IdempotencyKey,
+				"reason":         req.Reason,
+				"metadata":       req.Metadata,
+			})
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	return err
+}
+
+// GetRefundRecord implements goquota.Storage
+func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*goquota.RefundRecord, error) {
+	if idempotencyKey == "" {
+		return nil, nil
+	}
+	doc := s.client.Collection(s.refundsCollection).Doc(idempotencyKey)
+	snap, err := doc.Get(ctx)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, nil // Not found is not an error
+		}
+		return nil, fmt.Errorf("failed to get refund record: %w", err)
+	}
+
+	data := snap.Data()
+
+	periodTypeStr := getString(data, "periodType")
+	var periodType goquota.PeriodType
+	if periodTypeStr == "daily" {
+		periodType = goquota.PeriodTypeDaily
+	} else {
+		periodType = goquota.PeriodTypeMonthly
+	}
+
+	record := &goquota.RefundRecord{
+		RefundID: getString(data, "refundId"),
+		UserID:   getString(data, "userId"),
+		Resource: getString(data, "resource"),
+		Amount:   getInt(data, "amount"),
+		Period: goquota.Period{
+			Start: getTime(data, "periodStart"),
+			End:   getTime(data, "periodEnd"),
+			Type:  periodType,
+		},
+		Timestamp:      getTime(data, "timestamp"),
+		IdempotencyKey: getString(data, "idempotencyKey"),
+		Reason:         getString(data, "reason"),
+	}
+
+	// Manual metadata extraction
+	if m, ok := data["metadata"].(map[string]interface{}); ok {
+		metadata := make(map[string]string)
+		for k, v := range m {
+			if sVal, ok := v.(string); ok {
+				metadata[k] = sVal
+			}
+		}
+		record.Metadata = metadata
+	}
+
+	return record, nil
 }
 
 // usageDoc returns the Firestore document reference for usage tracking

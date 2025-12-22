@@ -320,6 +320,7 @@ func (m *Manager) ApplyTierChange(ctx context.Context, userID, oldTier, newTier 
 	tcStart := time.Now()
 	err = m.storage.ApplyTierChange(ctx, &TierChangeRequest{
 		UserID:      userID,
+		Resource:    resource,
 		OldTier:     oldTier,
 		NewTier:     newTier,
 		Period:      period,
@@ -393,6 +394,95 @@ func (m *Manager) GetEntitlement(ctx context.Context, userID string) (*Entitleme
 	}
 
 	return ent, err
+}
+
+// Refund returns consumed quota back to the user
+// This is useful for handling failed operations or cancellations
+func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
+	if req.Amount < 0 {
+		return ErrInvalidAmount
+	}
+	if req.Amount == 0 {
+		return nil // No-op
+	}
+
+	// Check for duplicate refund using idempotency key
+	if req.IdempotencyKey != "" {
+		existing, err := m.storage.GetRefundRecord(ctx, req.IdempotencyKey)
+		if err != nil {
+			m.logger.Error("failed to check refund idempotency",
+				Field{"userId", req.UserID},
+				Field{"idempotencyKey", req.IdempotencyKey},
+				Field{"error", err},
+			)
+			return err
+		}
+		if existing != nil {
+			// Duplicate refund request - return success (idempotent)
+			m.logger.Info("duplicate refund request ignored",
+				Field{"userId", req.UserID},
+				Field{"resource", req.Resource},
+				Field{"idempotencyKey", req.IdempotencyKey},
+			)
+			return nil
+		}
+	}
+
+	// Get entitlement to determine period
+	ent, err := m.GetEntitlement(ctx, req.UserID)
+	var period Period
+
+	// Calculate period
+	switch req.PeriodType {
+	case PeriodTypeMonthly:
+		var start, end time.Time
+		if err == nil {
+			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, time.Now().UTC())
+		} else {
+			now := time.Now().UTC()
+			start, end = CurrentCycleForStart(startOfDayUTC(now), now)
+		}
+		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
+
+	case PeriodTypeDaily:
+		now := time.Now().UTC()
+		start := startOfDayUTC(now)
+		end := start.Add(24 * time.Hour)
+		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
+
+	default:
+		return ErrInvalidPeriod
+	}
+
+	// Set period in request so storage uses the correct cycle
+	req.Period = period
+
+	// Execute refund via storage
+	rStart := time.Now()
+	err = m.storage.RefundQuota(ctx, req)
+	m.metrics.RecordStorageOperation("RefundQuota", time.Since(rStart), err)
+
+	if err == nil {
+		// Invalidate usage cache on successful refund
+		usageKey := req.UserID + ":" + req.Resource + ":" + period.Key()
+		m.cache.InvalidateUsage(usageKey)
+
+		m.logger.Info("quota refunded successfully",
+			Field{"userId", req.UserID},
+			Field{"resource", req.Resource},
+			Field{"amount", req.Amount},
+			Field{"reason", req.Reason},
+		)
+	} else {
+		m.logger.Error("failed to refund quota",
+			Field{"userId", req.UserID},
+			Field{"resource", req.Resource},
+			Field{"amount", req.Amount},
+			Field{"error", err},
+		)
+	}
+
+	return err
 }
 
 // getLimitForResource returns the quota limit for a resource based on tier and period type

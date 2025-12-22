@@ -368,6 +368,7 @@ func TestFirestore_ApplyTierChange(t *testing.T) {
 	// Apply tier change (upgrade)
 	tierChangeReq := &goquota.TierChangeRequest{
 		UserID:      "user_tier",
+		Resource:    "audio_seconds",
 		OldTier:     "scholar",
 		NewTier:     "fluent",
 		Period:      period,

@@ -25,6 +25,14 @@ type Storage interface {
 
 	// SetUsage manually sets usage for a specific period
 	SetUsage(ctx context.Context, userID, resource string, usage *Usage, period Period) error
+
+	// RefundQuota returns consumed quota back to the user
+	// Returns error if refund would exceed original limit or if idempotency key is duplicate
+	RefundQuota(ctx context.Context, req *RefundRequest) error
+
+	// GetRefundRecord retrieves a refund record by idempotency key
+	// Returns nil if no record found (not an error)
+	GetRefundRecord(ctx context.Context, idempotencyKey string) (*RefundRecord, error)
 }
 
 // ConsumeRequest represents a quota consumption request
@@ -38,8 +46,10 @@ type ConsumeRequest struct {
 }
 
 // TierChangeRequest represents a tier change with proration
+// TierChangeRequest represents a tier change with proration
 type TierChangeRequest struct {
 	UserID      string
+	Resource    string
 	OldTier     string
 	NewTier     string
 	Period      Period
