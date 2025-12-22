@@ -1499,3 +1499,537 @@ func TestManager_Consume_KeyCollisionAcrossResources(t *testing.T) {
 		t.Errorf("Expected 0 used for audio_seconds (key collision), got %d", usage.Used)
 	}
 }
+
+// ============================================================================
+// TryConsume Tests
+// ============================================================================
+
+func TestManager_TryConsume_Success(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier (3600 seconds limit)
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	// Try to consume 100 seconds
+	result, err := manager.TryConsume(ctx, "user1", "audio_seconds", 100, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("TryConsume failed: %v", err)
+	}
+
+	if !result.Success {
+		t.Error("Expected Success=true")
+	}
+	if result.Consumed != 100 {
+		t.Errorf("Expected Consumed=100, got %d", result.Consumed)
+	}
+	if result.NewUsed != 100 {
+		t.Errorf("Expected NewUsed=100, got %d", result.NewUsed)
+	}
+	if result.Remaining != 3500 {
+		t.Errorf("Expected Remaining=3500, got %d", result.Remaining)
+	}
+
+	// Verify usage was actually consumed
+	usage, err := manager.GetQuota(ctx, "user1", "audio_seconds", goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota failed: %v", err)
+	}
+	if usage.Used != 100 {
+		t.Errorf("Expected usage 100, got %d", usage.Used)
+	}
+}
+
+func TestManager_TryConsume_QuotaExceeded(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier (3600 seconds limit)
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	// Try to consume more than limit
+	result, err := manager.TryConsume(ctx, "user1", "audio_seconds", 5000, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("TryConsume should not return error for quota exceeded, got %v", err)
+	}
+
+	if result.Success {
+		t.Error("Expected Success=false")
+	}
+	if result.Consumed != 0 {
+		t.Errorf("Expected Consumed=0, got %d", result.Consumed)
+	}
+	if result.NewUsed != 0 {
+		t.Errorf("Expected NewUsed=0, got %d", result.NewUsed)
+	}
+	if result.Remaining != 3600 {
+		t.Errorf("Expected Remaining=3600, got %d", result.Remaining)
+	}
+
+	// Verify usage was NOT consumed
+	usage, err := manager.GetQuota(ctx, "user1", "audio_seconds", goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota failed: %v", err)
+	}
+	if usage.Used != 0 {
+		t.Errorf("Expected usage 0, got %d", usage.Used)
+	}
+}
+
+func TestManager_TryConsume_QuotaExceeded_AfterPartialConsumption(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier (3600 seconds limit)
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	// Consume some quota first
+	_, err = manager.Consume(ctx, "user1", "audio_seconds", 2000, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("Consume failed: %v", err)
+	}
+
+	// Try to consume more than remaining
+	result, err := manager.TryConsume(ctx, "user1", "audio_seconds", 2000, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("TryConsume should not return error for quota exceeded, got %v", err)
+	}
+
+	if result.Success {
+		t.Error("Expected Success=false")
+	}
+	if result.Consumed != 0 {
+		t.Errorf("Expected Consumed=0, got %d", result.Consumed)
+	}
+	if result.NewUsed != 2000 {
+		t.Errorf("Expected NewUsed=2000, got %d", result.NewUsed)
+	}
+	if result.Remaining != 1600 {
+		t.Errorf("Expected Remaining=1600, got %d", result.Remaining)
+	}
+}
+
+func TestManager_TryConsume_ZeroAmount(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	// Try to consume 0 - should be no-op
+	result, err := manager.TryConsume(ctx, "user1", "audio_seconds", 0, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("TryConsume(0) should succeed, got %v", err)
+	}
+
+	if !result.Success {
+		t.Error("Expected Success=true for zero amount")
+	}
+	if result.Consumed != 0 {
+		t.Errorf("Expected Consumed=0, got %d", result.Consumed)
+	}
+	if result.Remaining != 3600 {
+		t.Errorf("Expected Remaining=3600, got %d", result.Remaining)
+	}
+}
+
+func TestManager_TryConsume_NegativeAmount(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Try to consume negative - should return error
+	result, err := manager.TryConsume(ctx, "user1", "audio_seconds", -100, goquota.PeriodTypeMonthly)
+	if err != goquota.ErrInvalidAmount {
+		t.Errorf("Expected ErrInvalidAmount, got %v", err)
+	}
+	if result != nil {
+		t.Error("Expected nil result for invalid amount")
+	}
+}
+
+func TestManager_TryConsume_InvalidPeriod(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Try with invalid period type
+	result, err := manager.TryConsume(ctx, "user1", "audio_seconds", 100, goquota.PeriodType("invalid"))
+	if err != goquota.ErrInvalidPeriod {
+		t.Errorf("Expected ErrInvalidPeriod, got %v", err)
+	}
+	if result != nil {
+		t.Error("Expected nil result for invalid period")
+	}
+}
+
+func TestManager_TryConsume_ExplorerTier_NoQuota(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up explorer tier (0 audio quota)
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "explorer",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	// Try to consume - should return failure (no quota for free tier)
+	result, err := manager.TryConsume(ctx, "user1", "audio_seconds", 1, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("TryConsume should not return error for quota exceeded, got %v", err)
+	}
+
+	if result.Success {
+		t.Error("Expected Success=false for explorer tier")
+	}
+	if result.Remaining != 0 {
+		t.Errorf("Expected Remaining=0, got %d", result.Remaining)
+	}
+}
+
+func TestManager_TryConsume_WithIdempotencyKey_Success(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	idempotencyKey := "test-key-tryconsume"
+
+	// First TryConsume with idempotency key
+	result1, err := manager.TryConsume(ctx, "user1", "audio_seconds", 100,
+		goquota.PeriodTypeMonthly, goquota.WithIdempotencyKey(idempotencyKey))
+	if err != nil {
+		t.Fatalf("First TryConsume failed: %v", err)
+	}
+	if !result1.Success {
+		t.Error("Expected Success=true")
+	}
+	if result1.Consumed != 100 {
+		t.Errorf("Expected Consumed=100, got %d", result1.Consumed)
+	}
+
+	// Second TryConsume with same idempotency key - should return cached result
+	result2, err := manager.TryConsume(ctx, "user1", "audio_seconds", 100,
+		goquota.PeriodTypeMonthly, goquota.WithIdempotencyKey(idempotencyKey))
+	if err != nil {
+		t.Fatalf("Second TryConsume failed: %v", err)
+	}
+	if !result2.Success {
+		t.Error("Expected Success=true for idempotent request")
+	}
+	if result2.Consumed != 100 {
+		t.Errorf("Expected Consumed=100 (cached), got %d", result2.Consumed)
+	}
+	if result2.NewUsed != 100 {
+		t.Errorf("Expected NewUsed=100 (cached), got %d", result2.NewUsed)
+	}
+
+	// Verify usage was only consumed once
+	usage, err := manager.GetQuota(ctx, "user1", "audio_seconds", goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota failed: %v", err)
+	}
+	if usage.Used != 100 {
+		t.Errorf("Expected usage 100 (consumed once), got %d", usage.Used)
+	}
+}
+
+func TestManager_TryConsume_WithIdempotencyKey_QuotaExceeded(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier (3600 limit)
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	idempotencyKey := "test-key-tryconsume-exceeded"
+
+	// Try to consume more than limit with idempotency key
+	result1, err := manager.TryConsume(ctx, "user1", "audio_seconds", 5000,
+		goquota.PeriodTypeMonthly, goquota.WithIdempotencyKey(idempotencyKey))
+	if err != nil {
+		t.Fatalf("TryConsume should not return error, got %v", err)
+	}
+	if result1.Success {
+		t.Error("Expected Success=false")
+	}
+
+	// Retry with same idempotency key - should still fail (not cached for quota exceeded)
+	result2, err := manager.TryConsume(ctx, "user1", "audio_seconds", 5000,
+		goquota.PeriodTypeMonthly, goquota.WithIdempotencyKey(idempotencyKey))
+	if err != nil {
+		t.Fatalf("TryConsume should not return error, got %v", err)
+	}
+	if result2.Success {
+		t.Error("Expected Success=false on retry")
+	}
+}
+
+func TestManager_TryConsume_DailyPeriod(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	// Try to consume daily quota
+	result, err := manager.TryConsume(ctx, "user1", "api_calls", 100, goquota.PeriodTypeDaily)
+	if err != nil {
+		t.Fatalf("TryConsume failed: %v", err)
+	}
+
+	if !result.Success {
+		t.Error("Expected Success=true")
+	}
+	if result.Consumed != 100 {
+		t.Errorf("Expected Consumed=100, got %d", result.Consumed)
+	}
+	if result.Remaining != 400 {
+		t.Errorf("Expected Remaining=400, got %d", result.Remaining)
+	}
+}
+
+func TestManager_TryConsume_ExactLimit(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier (3600 limit)
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	// Try to consume exactly the limit
+	result, err := manager.TryConsume(ctx, "user1", "audio_seconds", 3600, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("TryConsume failed: %v", err)
+	}
+
+	if !result.Success {
+		t.Error("Expected Success=true for exact limit")
+	}
+	if result.Consumed != 3600 {
+		t.Errorf("Expected Consumed=3600, got %d", result.Consumed)
+	}
+	if result.Remaining != 0 {
+		t.Errorf("Expected Remaining=0, got %d", result.Remaining)
+	}
+}
+
+func TestManager_TryConsume_OverLimit(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier (3600 limit)
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	// Try to consume over the limit
+	result, err := manager.TryConsume(ctx, "user1", "audio_seconds", 3601, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("TryConsume should not return error, got %v", err)
+	}
+
+	if result.Success {
+		t.Error("Expected Success=false for over limit")
+	}
+	if result.Consumed != 0 {
+		t.Errorf("Expected Consumed=0, got %d", result.Consumed)
+	}
+	if result.Remaining != 3600 {
+		t.Errorf("Expected Remaining=3600, got %d", result.Remaining)
+	}
+}
+
+func TestManager_TryConsume_ZeroLimit(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up explorer tier (0 audio quota)
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "explorer",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	// Try to consume with zero limit
+	result, err := manager.TryConsume(ctx, "user1", "audio_seconds", 1, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("TryConsume should not return error, got %v", err)
+	}
+
+	if result.Success {
+		t.Error("Expected Success=false for zero limit")
+	}
+	if result.Remaining != 0 {
+		t.Errorf("Expected Remaining=0, got %d", result.Remaining)
+	}
+}
+
+func TestManager_TryConsume_Concurrent(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Set up scholar tier (3600 limit)
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	// Concurrent TryConsume operations
+	const numGoroutines = 10
+	const amountPerGoroutine = 100
+	results := make(chan *goquota.TryConsumeResult, numGoroutines)
+	errors := make(chan error, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			result, err := manager.TryConsume(ctx, "user1", "audio_seconds", amountPerGoroutine, goquota.PeriodTypeMonthly)
+			if err != nil {
+				errors <- err
+				return
+			}
+			results <- result
+		}()
+	}
+
+	// Collect results
+	successCount := 0
+	totalConsumed := 0
+	for i := 0; i < numGoroutines; i++ {
+		select {
+		case result := <-results:
+			if result.Success {
+				successCount++
+				totalConsumed += result.Consumed
+			}
+		case err := <-errors:
+			t.Fatalf("TryConsume failed: %v", err)
+		}
+	}
+
+	// Should have consumed exactly 3600 (some may have failed due to quota exceeded)
+	if totalConsumed > 3600 {
+		t.Errorf("Total consumed %d exceeds limit 3600", totalConsumed)
+	}
+
+	// Verify final usage
+	usage, err := manager.GetQuota(ctx, "user1", "audio_seconds", goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota failed: %v", err)
+	}
+	if usage.Used != totalConsumed {
+		t.Errorf("Expected usage %d, got %d", totalConsumed, usage.Used)
+	}
+	if usage.Used > 3600 {
+		t.Errorf("Usage %d exceeds limit 3600", usage.Used)
+	}
+}
+
+func TestManager_TryConsume_DifferentTiers(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+
+	// Test with fluent tier (18000 limit)
+	err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "user1",
+		Tier:                  "fluent",
+		SubscriptionStartDate: time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	result, err := manager.TryConsume(ctx, "user1", "audio_seconds", 1000, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("TryConsume failed: %v", err)
+	}
+
+	if !result.Success {
+		t.Error("Expected Success=true")
+	}
+	if result.Remaining != 17000 {
+		t.Errorf("Expected Remaining=17000, got %d", result.Remaining)
+	}
+}

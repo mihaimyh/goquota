@@ -340,6 +340,123 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 	return newUsed, err
 }
 
+// tryConsumeZeroAmount handles the zero amount case for TryConsume
+func (m *Manager) tryConsumeZeroAmount(ctx context.Context, userID, resource string,
+	periodType PeriodType) (*TryConsumeResult, error) {
+	usage, err := m.GetQuota(ctx, userID, resource, periodType)
+	if err != nil {
+		return nil, err
+	}
+	remaining := calculateRemaining(usage.Limit, usage.Used)
+	return &TryConsumeResult{
+		Success:   true,
+		Remaining: remaining,
+		Consumed:  0,
+		NewUsed:   usage.Used,
+	}, nil
+}
+
+// tryConsumeFailureResult creates a failure result for quota exceeded scenarios
+func (m *Manager) tryConsumeFailureResult(ctx context.Context, userID, resource string,
+	periodType PeriodType, limit int) (*TryConsumeResult, error) {
+	usage, err := m.GetQuota(ctx, userID, resource, periodType)
+	if err != nil {
+		return nil, err
+	}
+	currentUsed := usage.Used
+	remaining := calculateRemaining(limit, currentUsed)
+	return &TryConsumeResult{
+		Success:   false,
+		Remaining: remaining,
+		Consumed:  0,
+		NewUsed:   currentUsed,
+	}, nil
+}
+
+// calculateRemaining calculates remaining quota, ensuring it's non-negative
+func calculateRemaining(limit, used int) int {
+	remaining := limit - used
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+// TryConsume attempts to consume quota without throwing errors for quota exceeded scenarios.
+// It returns a TryConsumeResult indicating success/failure and remaining quota information.
+//
+// Unlike Consume(), TryConsume() does not return ErrQuotaExceeded. Instead, it returns
+// Success: false with the current remaining quota when quota is exceeded. This makes it
+// ideal for performance-critical paths where error handling overhead should be minimized.
+//
+// Error handling:
+//   - Quota exceeded: Returns (*TryConsumeResult{Success: false, ...}, nil)
+//   - Invalid parameters: Returns (nil, ErrInvalidAmount) or (nil, ErrInvalidPeriod)
+//   - Storage failures: Returns (nil, error) - these errors are still propagated
+//
+// Example usage:
+//
+//	result, err := manager.TryConsume(ctx, "user1", "api_calls", 10, goquota.PeriodTypeDaily)
+//	if err != nil {
+//	    // Handle storage/configuration errors
+//	    return err
+//	}
+//	if !result.Success {
+//	    // Quota exceeded - use result.Remaining to inform user
+//	    return fmt.Errorf("quota exceeded, %d remaining", result.Remaining)
+//	}
+//	// Success - result.Consumed shows amount consumed, result.Remaining shows remaining
+func (m *Manager) TryConsume(ctx context.Context, userID, resource string, amount int,
+	periodType PeriodType, opts ...ConsumeOption) (*TryConsumeResult, error) {
+	// Validate amount
+	if amount < 0 {
+		return nil, ErrInvalidAmount
+	}
+	if amount == 0 {
+		return m.tryConsumeZeroAmount(ctx, userID, resource, periodType)
+	}
+
+	// Validate period type
+	if periodType != PeriodTypeMonthly && periodType != PeriodTypeDaily {
+		return nil, ErrInvalidPeriod
+	}
+
+	// Get entitlement to determine tier
+	ent, err := m.GetEntitlement(ctx, userID)
+	tier := m.config.DefaultTier
+	if err == nil {
+		tier = ent.Tier
+	}
+
+	// Get limit for tier
+	limit := m.getLimitForResource(resource, tier, periodType)
+	if limit <= 0 {
+		return m.tryConsumeFailureResult(ctx, userID, resource, periodType, limit)
+	}
+
+	// Try to consume via Consume()
+	newUsed, err := m.Consume(ctx, userID, resource, amount, periodType, opts...)
+
+	// Handle quota exceeded - convert to TryConsumeResult with Success: false
+	if err == ErrQuotaExceeded {
+		return m.tryConsumeFailureResult(ctx, userID, resource, periodType, limit)
+	}
+
+	// Handle other errors - propagate them
+	if err != nil {
+		return nil, err
+	}
+
+	// Success - calculate remaining quota
+	remaining := calculateRemaining(limit, newUsed)
+	return &TryConsumeResult{
+		Success:   true,
+		Remaining: remaining,
+		Consumed:  amount,
+		NewUsed:   newUsed,
+	}, nil
+}
+
 // ApplyTierChange applies a tier change with prorated quota adjustment
 func (m *Manager) ApplyTierChange(ctx context.Context, userID, oldTier, newTier, resource string) error {
 	// Get current cycle

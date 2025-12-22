@@ -187,3 +187,18 @@ type ConsumptionRecord struct {
 	NewUsed        int
 	Metadata       map[string]string
 }
+
+// TryConsumeResult represents the result of a TryConsume operation
+type TryConsumeResult struct {
+	// Success indicates whether the consumption succeeded
+	Success bool
+
+	// Remaining is the remaining quota after consumption (or current remaining if failed)
+	Remaining int
+
+	// Consumed is the amount actually consumed (0 if failed)
+	Consumed int
+
+	// NewUsed is the new total used amount (same as current if failed)
+	NewUsed int
+}

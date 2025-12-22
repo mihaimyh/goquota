@@ -681,7 +681,7 @@ Check multiple resources in one call.
 
 ### 9.2 Conditional Consumption
 
-**Status**: 🔴 Not Started  
+**Status**: ✅ Implemented  
 **Priority**: Medium  
 **Effort**: Low
 
@@ -689,10 +689,25 @@ Try to consume without throwing errors.
 
 **Features**:
 
-- `TryConsume()` method
-- Boolean success return
-- Remaining quota info
-- No exception overhead
+- ✅ `TryConsume()` method
+- ✅ Boolean success return
+- ✅ Remaining quota info
+- ✅ No exception overhead
+- ✅ Support for idempotency keys
+- ✅ Integration with warnings, metrics, and caching
+
+**Implementation**:
+
+- `pkg/goquota/types.go` - TryConsumeResult type
+- `pkg/goquota/manager.go` - TryConsume() method implementation
+- `pkg/goquota/manager_test.go` - Comprehensive test coverage (15 test cases)
+
+**Benefits**:
+
+- Non-throwing API for performance-critical paths
+- Clear boolean success indicator
+- Remaining quota information without additional calls
+- Maintains all existing features (idempotency, warnings, metrics)
 
 ### 9.3 Partial Consumption
 
@@ -803,6 +818,7 @@ Complete API documentation.
 
 **Focus**: Advanced features
 
+- ✅ Conditional Consumption (TryConsume) (completed)
 - Rate limiting
 - Quota reservations
 - Webhooks & events
