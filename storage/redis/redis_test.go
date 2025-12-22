@@ -516,15 +516,18 @@ func TestStorage_RefundQuota(t *testing.T) {
 		userID := "refund_user_3"
 		resource := "api_calls"
 
-		// 1. Consume 50
-		storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+		// Consume partial amount (50)
+		if _, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
 			UserID:   userID,
-			Resource: resource,
+			Resource: "api_calls",
 			Amount:   50,
-			Tier:     "pro",
-			Period:   period,
-			Limit:    1000,
-		})
+
+			Period: period,
+			Tier:   "free",
+			Limit:  100,
+		}); err != nil {
+			t.Fatalf("ConsumeQuota failed: %v", err)
+		}
 
 		// 2. Refund 100 (more than used)
 		req := &goquota.RefundRequest{
@@ -786,14 +789,16 @@ func TestStorage_EdgeCases(t *testing.T) {
 		resource := "tokens"
 
 		// Initial setup: 1000 tokens
-		storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+		if _, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
 			UserID:   userID,
 			Resource: resource,
 			Amount:   1000,
 			Tier:     "pro",
 			Period:   period,
 			Limit:    10000,
-		})
+		}); err != nil {
+			t.Fatalf("Initial ConsumeQuota failed: %v", err)
+		}
 
 		const goroutines = 20
 		const operations = 50
@@ -860,14 +865,16 @@ func TestStorage_EdgeCases(t *testing.T) {
 		resource := "api_calls"
 
 		// Consume 100
-		storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+		if _, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
 			UserID:   userID,
 			Resource: resource,
 			Amount:   100,
 			Tier:     "pro",
 			Period:   period,
 			Limit:    1000,
-		})
+		}); err != nil {
+			t.Fatalf("ConsumeQuota failed: %v", err)
+		}
 
 		const goroutines = 20
 		errChan := make(chan error, goroutines)

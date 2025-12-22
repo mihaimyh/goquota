@@ -131,8 +131,10 @@ func TestManager_Refund_Concurrency(t *testing.T) {
 	userID := "test_user_concurrent"
 	resource := "api_calls"
 
-	// Initial usage
-	manager.Consume(ctx, userID, resource, 1000, goquota.PeriodTypeMonthly)
+	// User has used some quota
+	if _, err := manager.Consume(ctx, userID, resource, 1000, goquota.PeriodTypeMonthly); err != nil {
+		t.Fatalf("Consume failed: %v", err)
+	}
 
 	// Run concurrent refunds with same idempotency key
 	concurrency := 10

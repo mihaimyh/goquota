@@ -235,7 +235,9 @@ func (s *Storage) GetUsage(ctx context.Context, userID, resource string, period 
 	if results[1] != nil {
 		if usedStr, ok := results[1].(string); ok {
 			var used int
-			fmt.Sscanf(usedStr, "%d", &used)
+			if _, err := fmt.Sscanf(usedStr, "%d", &used); err != nil {
+				return nil, fmt.Errorf("failed to parse usage: %w", err)
+			}
 			usage.Used = used
 		}
 	}
@@ -394,7 +396,8 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 		return nil // No-op
 	}
 
-	usageKey := s.usageKey(req.UserID, req.Resource, goquota.Period{Type: req.PeriodType}) // Note: Period start/end needed for key?
+	// UsageKey calculation logic below handles the period, so we don't need to assign it here early
+	// usageKey := s.usageKey(req.UserID, req.Resource, goquota.Period{Type: req.PeriodType})
 	// The UsageKey method assumes specific period start/end.
 	// We need to reconstruct the period to match what ConsumeQuota used.
 	// But Period is not fully in Request for RefundQuota from interface (it passed PeriodType).
@@ -445,7 +448,7 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 		}
 	}
 
-	usageKey = s.usageKey(req.UserID, req.Resource, period)
+	usageKey := s.usageKey(req.UserID, req.Resource, period)
 
 	refundKey := ""
 	if req.IdempotencyKey != "" {
