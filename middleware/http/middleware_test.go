@@ -552,3 +552,87 @@ func TestMiddleware_Warnings(t *testing.T) {
 		t.Errorf("Expected X-Quota-Warning-Used: 80, got %s", used)
 	}
 }
+
+func TestJSONHelpers(t *testing.T) {
+	manager := setupTestManager(t)
+	setupEntitlement(t, manager, "user1", "pro")
+
+	tests := []struct {
+		name           string
+		extractor      AmountExtractor
+		payload        string
+		expectedAmount int
+		expectError    bool
+	}{
+		{
+			name:           "JSONIntField - Success",
+			extractor:      JSONIntField("count"),
+			payload:        `{"count": 5}`,
+			expectedAmount: 5,
+		},
+		{
+			name:           "JSONIntField - Float",
+			extractor:      JSONIntField("count"),
+			payload:        `{"count": 5.5}`,
+			expectedAmount: 5,
+		},
+		{
+			name:        "JSONIntField - Missing",
+			extractor:   JSONIntField("missing"),
+			payload:     `{"count": 5}`,
+			expectError: true,
+		},
+		{
+			name:           "JSONDurationMillisToSeconds - Round Up",
+			extractor:      JSONDurationMillisToSeconds("duration"),
+			payload:        `{"duration": 1500}`,
+			expectedAmount: 2,
+		},
+		{
+			name:           "JSONDurationMillisToSeconds - Exact",
+			extractor:      JSONDurationMillisToSeconds("duration"),
+			payload:        `{"duration": 2000}`,
+			expectedAmount: 2,
+		},
+		{
+			name:           "JSONStringByteLength - ASCII",
+			extractor:      JSONStringByteLength("text"),
+			payload:        `{"text": "hello"}`,
+			expectedAmount: 5,
+		},
+		{
+			name:           "JSONStringByteLength - UTF-8",
+			extractor:      JSONStringByteLength("text"),
+			payload:        `{"text": "世界"}`, // 6 bytes in UTF-8
+			expectedAmount: 6,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/", bytes.NewBufferString(tt.payload))
+			amount, err := tt.extractor(req)
+
+			if tt.expectError {
+				if err == nil {
+					t.Error("Expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+
+			if amount != tt.expectedAmount {
+				t.Errorf("Expected amount %d, got %d", tt.expectedAmount, amount)
+			}
+
+			// Verify body is preserved
+			body, _ := io.ReadAll(req.Body)
+			if string(body) != tt.payload {
+				t.Errorf("Body not preserved: expected %q, got %q", tt.payload, string(body))
+			}
+		})
+	}
+}
