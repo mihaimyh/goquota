@@ -313,9 +313,14 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 
 	// Transaction to ensure atomicity of usage update and audit log creation
 	err := s.client.RunTransaction(ctx, func(_ context.Context, tx *firestore.Transaction) error {
-		// 1. Check idempotency if key provided
-		if err := s.checkRefundIdempotency(tx, req.IdempotencyKey); err != nil {
+		// 1. Check idempotency if key provided, and get whether it already exists
+		alreadyExists, err := s.checkRefundIdempotency(tx, req.IdempotencyKey)
+		if err != nil {
 			return err
+		}
+		if alreadyExists {
+			// Idempotent - refund already processed, return success
+			return nil
 		}
 
 		// 2. Calculate period
@@ -329,29 +334,31 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 			return err
 		}
 
-		// 4. Create refund audit record
+		// 4. Create refund audit record (we know it doesn't exist from step 1)
 		return s.createRefundRecord(tx, req, period)
 	})
 
 	return err
 }
 
-// checkRefundIdempotency checks if a refund with the given idempotency key already exists
-func (s *Storage) checkRefundIdempotency(tx *firestore.Transaction, idempotencyKey string) error {
+// checkRefundIdempotency checks if a refund with the given idempotency key already exists.
+// Returns (true, nil) if the refund already exists (idempotent),
+// (false, nil) if it doesn't exist, or (false, error) on error.
+func (s *Storage) checkRefundIdempotency(tx *firestore.Transaction, idempotencyKey string) (bool, error) {
 	if idempotencyKey == "" {
-		return nil
+		return false, nil
 	}
 
 	refundDocRef := s.client.Collection(s.refundsCollection).Doc(idempotencyKey)
 	snap, err := tx.Get(refundDocRef)
 	if err != nil && status.Code(err) != codes.NotFound {
-		return err
+		return false, err
 	}
 	if snap.Exists() {
-		// Idempotency hit - treat as success
-		return nil
+		// Idempotency hit - refund already exists
+		return true, nil
 	}
-	return nil
+	return false, nil
 }
 
 // calculateRefundPeriod calculates the period for the refund request
@@ -411,6 +418,7 @@ func (s *Storage) updateRefundUsage(
 }
 
 // createRefundRecord creates an audit record for the refund
+// Note: This should only be called after checkRefundIdempotency confirms the record doesn't exist
 func (s *Storage) createRefundRecord(
 	tx *firestore.Transaction,
 	req *goquota.RefundRequest,
@@ -420,9 +428,12 @@ func (s *Storage) createRefundRecord(
 		return nil
 	}
 
+	// Create the refund record using Set with merge to handle race conditions
+	// If two transactions run concurrently, both will try to create, but Set will work
+	// The idempotency check in checkRefundIdempotency prevents duplicate processing
 	now := time.Now().UTC()
 	refundDocRef := s.client.Collection(s.refundsCollection).Doc(req.IdempotencyKey)
-	return tx.Create(refundDocRef, map[string]interface{}{
+	return tx.Set(refundDocRef, map[string]interface{}{
 		"refundId":       req.IdempotencyKey,
 		"userId":         req.UserID,
 		"resource":       req.Resource,
@@ -434,7 +445,7 @@ func (s *Storage) createRefundRecord(
 		"idempotencyKey": req.IdempotencyKey,
 		"reason":         req.Reason,
 		"metadata":       req.Metadata,
-	})
+	}, firestore.MergeAll)
 }
 
 // GetRefundRecord implements goquota.Storage

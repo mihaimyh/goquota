@@ -349,8 +349,9 @@ func TestCurrentCycleForStart_TimezoneIndependence(t *testing.T) {
 	}
 
 	// All should produce the same UTC cycle
-	wantStart := time.Date(2023, 1, 15, 0, 0, 0, 0, time.UTC)
-	wantEnd := time.Date(2023, 2, 15, 0, 0, 0, 0, time.UTC)
+	// Feb 15 12:00:00 UTC is after Feb 15 00:00:00, so it's in the cycle [Feb 15, Mar 15)
+	wantStart := time.Date(2023, 2, 15, 0, 0, 0, 0, time.UTC)
+	wantEnd := time.Date(2023, 3, 15, 0, 0, 0, 0, time.UTC)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

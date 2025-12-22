@@ -2,8 +2,11 @@ package goquota
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 type contextWarningKey struct{}
@@ -21,6 +24,9 @@ type Manager struct {
 	cache   Cache
 	metrics Metrics
 	logger  Logger
+	// singleflight groups to prevent cache stampede
+	entitlementGroup singleflight.Group
+	usageGroup       singleflight.Group
 }
 
 // NewManager creates a new quota manager with the given storage and configuration
@@ -151,6 +157,8 @@ func (m *Manager) GetCurrentCycle(ctx context.Context, userID string) (Period, e
 }
 
 // GetQuota returns current usage and limit for a resource
+//
+//nolint:gocyclo // Complex function handles multiple period types and error cases
 func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodType PeriodType) (*Usage, error) {
 	start := time.Now()
 	defer func() {
@@ -188,18 +196,62 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 		return nil, ErrInvalidPeriod
 	}
 
-	// Get usage from storage
-	uStart := time.Now()
-	usage, err := m.storage.GetUsage(ctx, userID, resource, period)
-	m.metrics.RecordStorageOperation("GetUsage", time.Since(uStart), err)
+	// Build cache key for usage
+	usageKey := userID + ":" + resource + ":" + period.Key()
+
+	// Check cache first
+	if cached, found := m.cache.GetUsage(usageKey); found {
+		m.metrics.RecordCacheHit("usage")
+		// Ensure limit is set (may be missing in old data)
+		if cached.Limit <= 0 {
+			cached.Limit = m.getLimitForResource(resource, tier, periodType)
+		}
+		return cached, nil
+	}
+
+	m.metrics.RecordCacheMiss("usage")
+
+	// Use singleflight to prevent cache stampede - deduplicate concurrent requests for same usage key
+	result, err, _ := m.usageGroup.Do(usageKey, func() (interface{}, error) {
+		// Double-check cache after acquiring the lock (another goroutine might have populated it)
+		if cached, found := m.cache.GetUsage(usageKey); found {
+			m.metrics.RecordCacheHit("usage")
+			return cached, nil
+		}
+
+		// Get usage from storage
+		uStart := time.Now()
+		usage, err := m.storage.GetUsage(ctx, userID, resource, period)
+		m.metrics.RecordStorageOperation("GetUsage", time.Since(uStart), err)
+
+		if err != nil {
+			m.logger.Error("failed to get usage from storage",
+				Field{"userId", userID},
+				Field{"resource", resource},
+				Field{"error", err},
+			)
+			return nil, err
+		}
+
+		// Cache the result if available
+		if usage != nil {
+			ttl := m.config.CacheTTL
+			if m.config.CacheConfig != nil && m.config.CacheConfig.UsageTTL > 0 {
+				ttl = m.config.CacheConfig.UsageTTL
+			}
+			m.cache.SetUsage(usageKey, usage, ttl)
+		}
+
+		return usage, nil
+	})
 
 	if err != nil {
-		m.logger.Error("failed to get usage from storage",
-			Field{"userId", userID},
-			Field{"resource", resource},
-			Field{"error", err},
-		)
 		return nil, err
+	}
+
+	usage, ok := result.(*Usage)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type from usage fetch: %T", result)
 	}
 
 	// If no usage yet, return zero usage with calculated limit
@@ -225,6 +277,8 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 
 // Consume consumes quota for a resource
 // Returns the new total used amount and any error
+//
+//nolint:gocyclo // Complex function handles idempotency, period calculation, and error cases
 func (m *Manager) Consume(ctx context.Context, userID, resource string, amount int,
 	periodType PeriodType, opts ...ConsumeOption) (int, error) {
 	if amount < 0 {
@@ -266,6 +320,12 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 	ent, err := m.GetEntitlement(ctx, userID)
 	tier := m.config.DefaultTier
 	var period Period
+
+	// If GetEntitlement fails with a storage/circuit breaker error, return it immediately
+	// Only use default tier if entitlement is not found (ErrEntitlementNotFound)
+	if err != nil && err != ErrEntitlementNotFound {
+		return 0, err
+	}
 
 	if err == nil {
 		tier = ent.Tier
@@ -567,26 +627,47 @@ func (m *Manager) GetEntitlement(ctx context.Context, userID string) (*Entitleme
 
 	m.metrics.RecordCacheMiss("entitlement")
 
-	// Cache miss - fetch from storage
-	start := time.Now()
-	ent, err := m.storage.GetEntitlement(ctx, userID)
-	m.metrics.RecordStorageOperation("GetEntitlement", time.Since(start), err)
-
-	if err == nil && ent != nil {
-		// Cache the result
-		ttl := m.config.CacheTTL
-		if m.config.CacheConfig != nil && m.config.CacheConfig.EntitlementTTL > 0 {
-			ttl = m.config.CacheConfig.EntitlementTTL
+	// Use singleflight to prevent cache stampede - deduplicate concurrent requests for same userID
+	result, err, _ := m.entitlementGroup.Do(userID, func() (interface{}, error) {
+		// Double-check cache after acquiring the lock (another goroutine might have populated it)
+		if cached, found := m.cache.GetEntitlement(userID); found {
+			m.metrics.RecordCacheHit("entitlement")
+			return cached, nil
 		}
-		m.cache.SetEntitlement(userID, ent, ttl)
-	} else if err != nil && err != ErrEntitlementNotFound {
-		m.logger.Error("failed to get entitlement from storage",
-			Field{"userId", userID},
-			Field{"error", err},
-		)
-	}
 
-	return ent, err
+		// Cache miss - fetch from storage
+		start := time.Now()
+		ent, err := m.storage.GetEntitlement(ctx, userID)
+		m.metrics.RecordStorageOperation("GetEntitlement", time.Since(start), err)
+
+		if err == nil && ent != nil {
+			// Cache the result
+			ttl := m.config.CacheTTL
+			if m.config.CacheConfig != nil && m.config.CacheConfig.EntitlementTTL > 0 {
+				ttl = m.config.CacheConfig.EntitlementTTL
+			}
+			m.cache.SetEntitlement(userID, ent, ttl)
+		} else if err != nil && err != ErrEntitlementNotFound {
+			m.logger.Error("failed to get entitlement from storage",
+				Field{"userId", userID},
+				Field{"error", err},
+			)
+		}
+
+		return ent, err
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, nil
+	}
+	ent, ok := result.(*Entitlement)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type from entitlement fetch: %T", result)
+	}
+	return ent, nil
 }
 
 // Refund returns consumed quota back to the user

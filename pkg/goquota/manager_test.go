@@ -28,7 +28,8 @@ func newTestManager() *goquota.Manager {
 			"scholar": {
 				Name: "scholar",
 				MonthlyQuotas: map[string]int{
-					"audio_seconds": 3600, // 1 hour
+					"audio_seconds": 3600,  // 1 hour
+					"api_calls":     10000, // For monthly quota tests
 				},
 				DailyQuotas: map[string]int{
 					"api_calls": 500,
@@ -37,7 +38,8 @@ func newTestManager() *goquota.Manager {
 			"fluent": {
 				Name: "fluent",
 				MonthlyQuotas: map[string]int{
-					"audio_seconds": 18000, // 5 hours
+					"audio_seconds": 18000,   // 5 hours
+					"api_calls":     1000000, // For MaxInt test
 				},
 				DailyQuotas: map[string]int{
 					"api_calls": 500,

@@ -29,6 +29,11 @@ func CurrentCycleForStart(start, now time.Time) (cycleStart, cycleEnd time.Time)
 		cycleStart = addMonthsSafeWithDay(s, monthsElapsed, originalDay)
 		cycleEnd = addMonthsSafeWithDay(s, monthsElapsed+1, originalDay)
 
+		// Cycle is [cycleStart, cycleEnd) where cycleEnd is exclusive
+		// For a cycle Jan 15 - Feb 15, it means [Jan 15 00:00:00, Feb 15 00:00:00)
+		// Times on Feb 15 (like Feb 15 12:00:00) are NOT in this cycle
+		// They should be in the next cycle [Feb 15, Mar 15)
+		// So we return the cycle if now < cycleEnd
 		if cycleEnd.After(n) {
 			return cycleStart, cycleEnd
 		}

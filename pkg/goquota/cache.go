@@ -45,10 +45,12 @@ type CacheStats struct {
 	Size              int
 }
 
-// cacheEntry wraps a cached value with expiration time
+// cacheEntry wraps a cached value with expiration time and access time for LRU
 type cacheEntry struct {
 	value      interface{}
 	expiration time.Time
+	accessTime time.Time // For LRU eviction
+	sequence   int64     // For tiebreaking when access times are equal
 }
 
 func (e *cacheEntry) isExpired() bool {
@@ -98,6 +100,7 @@ type LRUCache struct {
 	usageHits       int64
 	usageMisses     int64
 	evictions       int64
+	sequence        int64 // For tiebreaking when access times are equal
 }
 
 // NewLRUCache creates a new LRU cache with specified maximum sizes
@@ -118,14 +121,17 @@ func NewLRUCache(maxEntitlements, maxUsage int) *LRUCache {
 }
 
 func (c *LRUCache) GetEntitlement(userID string) (*Entitlement, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	entry, exists := c.entitlements[userID]
 	if !exists || entry.isExpired() {
 		c.entitlementMiss++
 		return nil, false
 	}
+
+	// Update access time for LRU
+	entry.accessTime = time.Now()
 
 	c.entitlementHits++
 	// Return a copy to prevent external modifications
@@ -146,21 +152,38 @@ func (c *LRUCache) SetEntitlement(userID string, ent *Entitlement, ttl time.Dura
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Evict if at capacity
-	if len(c.entitlements) >= c.maxEntitlements {
-		if _, exists := c.entitlements[userID]; !exists {
-			// Evict oldest (simple strategy: evict first found)
-			for key := range c.entitlements {
-				delete(c.entitlements, key)
-				c.evictions++
-				break
+	now := time.Now()
+	_, exists := c.entitlements[userID]
+
+	// Evict if at capacity and entry doesn't exist
+	if len(c.entitlements) >= c.maxEntitlements && !exists {
+		// Evict least recently used (oldest accessTime, then oldest sequence)
+		var oldestKey string
+		var oldestTime time.Time
+		var oldestSeq int64
+		first := true
+		for key, entry := range c.entitlements {
+			if first || entry.accessTime.Before(oldestTime) ||
+				(entry.accessTime.Equal(oldestTime) && entry.sequence < oldestSeq) {
+				oldestKey = key
+				oldestTime = entry.accessTime
+				oldestSeq = entry.sequence
+				first = false
 			}
+		}
+		if oldestKey != "" {
+			delete(c.entitlements, oldestKey)
+			c.evictions++
 		}
 	}
 
+	seq := c.sequence
+	c.sequence++
 	c.entitlements[userID] = &cacheEntry{
 		value:      ent,
-		expiration: time.Now().Add(ttl),
+		expiration: now.Add(ttl),
+		accessTime: now,
+		sequence:   seq,
 	}
 }
 
@@ -171,14 +194,17 @@ func (c *LRUCache) InvalidateEntitlement(userID string) {
 }
 
 func (c *LRUCache) GetUsage(key string) (*Usage, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	entry, exists := c.usage[key]
 	if !exists || entry.isExpired() {
 		c.usageMisses++
 		return nil, false
 	}
+
+	// Update access time for LRU
+	entry.accessTime = time.Now()
 
 	c.usageHits++
 	// Return a copy to prevent external modifications
@@ -201,21 +227,38 @@ func (c *LRUCache) SetUsage(key string, usage *Usage, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Evict if at capacity
-	if len(c.usage) >= c.maxUsage {
-		if _, exists := c.usage[key]; !exists {
-			// Evict oldest (simple strategy: evict first found)
-			for k := range c.usage {
-				delete(c.usage, k)
-				c.evictions++
-				break
+	now := time.Now()
+	_, exists := c.usage[key]
+
+	// Evict if at capacity and entry doesn't exist
+	if len(c.usage) >= c.maxUsage && !exists {
+		// Evict least recently used (oldest accessTime, then oldest sequence)
+		var oldestKey string
+		var oldestTime time.Time
+		var oldestSeq int64
+		first := true
+		for k, entry := range c.usage {
+			if first || entry.accessTime.Before(oldestTime) ||
+				(entry.accessTime.Equal(oldestTime) && entry.sequence < oldestSeq) {
+				oldestKey = k
+				oldestTime = entry.accessTime
+				oldestSeq = entry.sequence
+				first = false
 			}
+		}
+		if oldestKey != "" {
+			delete(c.usage, oldestKey)
+			c.evictions++
 		}
 	}
 
+	seq := c.sequence
+	c.sequence++
 	c.usage[key] = &cacheEntry{
 		value:      usage,
-		expiration: time.Now().Add(ttl),
+		expiration: now.Add(ttl),
+		accessTime: now,
+		sequence:   seq,
 	}
 }
 

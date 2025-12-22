@@ -172,6 +172,7 @@ func (m *mockFlakeyStorage) GetConsumptionRecord(_ context.Context, _ string) (*
 func TestManager_StorageFailure_PartialWrite(t *testing.T) {
 	storage := &mockFlakeyStorage{fail: false}
 	config := Config{
+		DefaultTier: "scholar", // Set default tier to avoid fallback issues
 		Tiers: map[string]TierConfig{
 			"scholar": {
 				Name:          "scholar",
@@ -266,6 +267,7 @@ func TestManager_StorageFailure_NetworkTimeout(t *testing.T) {
 func TestManager_StorageFailure_CircuitBreaker(t *testing.T) {
 	storage := &mockFlakeyStorage{fail: false}
 	config := Config{
+		DefaultTier: "scholar", // Set default tier to avoid fallback issues
 		Tiers: map[string]TierConfig{
 			"scholar": {
 				Name:          "scholar",
