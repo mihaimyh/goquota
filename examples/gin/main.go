@@ -8,27 +8,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	httpMiddleware "github.com/mihaimyh/goquota/middleware/http"
+	ginMiddleware "github.com/mihaimyh/goquota/middleware/gin"
 	"github.com/mihaimyh/goquota/pkg/goquota"
 	"github.com/mihaimyh/goquota/storage/memory"
 )
-
-// ginQuotaMiddleware adapts goquota middleware for Gin
-func ginQuotaMiddleware(config httpMiddleware.Config) gin.HandlerFunc {
-	middleware := httpMiddleware.Middleware(&config)
-
-	return func(c *gin.Context) {
-		// Wrap Gin context in standard http.Handler
-		middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			c.Next()
-		})).ServeHTTP(c.Writer, c.Request)
-
-		// If middleware aborted (quota exceeded), stop Gin chain
-		if c.Writer.Status() >= 400 {
-			c.Abort()
-		}
-	}
-}
 
 func main() {
 	// Create quota manager
@@ -62,7 +45,18 @@ func main() {
 	// Create Gin router
 	r := gin.Default()
 
-	// Public routes
+	// Mock authentication middleware (sets UserID in context)
+	// In production, this would validate JWT tokens, sessions, etc.
+	r.Use(func(c *gin.Context) {
+		// Extract user ID from header (in production, extract from JWT/session)
+		userID := c.GetHeader("X-User-ID")
+		if userID != "" {
+			c.Set("UserID", userID) // Set in context for quota middleware
+		}
+		c.Next()
+	})
+
+	// Public routes (no quota enforcement)
 	r.GET("/health", func(c *gin.Context) {
 		c.String(http.StatusOK, "OK")
 	})
@@ -87,13 +81,14 @@ func main() {
 		})
 	})
 
-	// Protected routes with quota
+	// Protected routes with quota enforcement
 	api := r.Group("/api")
-	api.Use(ginQuotaMiddleware(httpMiddleware.Config{
+	// Use native Gin middleware - extracts UserID from context set by auth middleware
+	api.Use(ginMiddleware.Middleware(ginMiddleware.Config{
 		Manager:     manager,
-		GetUserID:   httpMiddleware.FromHeader("X-User-ID"),
-		GetResource: httpMiddleware.FixedResource("api_calls"),
-		GetAmount:   httpMiddleware.FixedAmount(1),
+		GetUserID:   ginMiddleware.FromContext("UserID"), // Recommended: Extract from context (set by auth middleware)
+		GetResource: ginMiddleware.FixedResource("api_calls"),
+		GetAmount:   ginMiddleware.FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeDaily,
 	}))
 	{
@@ -106,9 +101,78 @@ func main() {
 		})
 	}
 
+	// Alternative example: Header-based extraction (for simple cases)
+	apiAlt := r.Group("/api-alt")
+	apiAlt.Use(ginMiddleware.Middleware(ginMiddleware.Config{
+		Manager:     manager,
+		GetUserID:   ginMiddleware.FromHeader("X-User-ID"), // Alternative: Extract directly from header
+		GetResource: ginMiddleware.FixedResource("api_calls"),
+		GetAmount:   ginMiddleware.FixedAmount(1),
+		PeriodType:  goquota.PeriodTypeDaily,
+	}))
+	{
+		apiAlt.GET("/data", func(c *gin.Context) {
+			c.String(http.StatusOK, "Data retrieved successfully (header-based)")
+		})
+	}
+
+	// Example with dynamic cost: POST requests cost more
+	apiDynamic := r.Group("/api-dynamic")
+	apiDynamic.Use(ginMiddleware.Middleware(ginMiddleware.Config{
+		Manager:     manager,
+		GetUserID:   ginMiddleware.FromContext("UserID"),
+		GetResource: ginMiddleware.FixedResource("api_calls"),
+		GetAmount: ginMiddleware.DynamicCost(func(c *gin.Context) int {
+			// POST requests cost 5, GET requests cost 1
+			if c.Request.Method == "POST" {
+				return 5
+			}
+			return 1
+		}),
+		PeriodType: goquota.PeriodTypeDaily,
+	}))
+	{
+		apiDynamic.GET("/read", func(c *gin.Context) {
+			c.String(http.StatusOK, "Read operation (cost: 1)")
+		})
+		apiDynamic.POST("/write", func(c *gin.Context) {
+			c.String(http.StatusOK, "Write operation (cost: 5)")
+		})
+	}
+
+	// Example with custom error handler
+	apiCustom := r.Group("/api-custom")
+	apiCustom.Use(ginMiddleware.Middleware(ginMiddleware.Config{
+		Manager:                 manager,
+		GetUserID:               ginMiddleware.FromContext("UserID"),
+		GetResource:             ginMiddleware.FixedResource("api_calls"),
+		GetAmount:               ginMiddleware.FixedAmount(1),
+		PeriodType:              goquota.PeriodTypeDaily,
+		QuotaExceededStatusCode: http.StatusPaymentRequired, // Use 402 instead of 429
+		OnQuotaExceeded: func(c *gin.Context, usage *goquota.Usage) {
+			// Custom error response format
+			c.JSON(http.StatusPaymentRequired, gin.H{
+				"error": gin.H{
+					"code":    "QUOTA_EXCEEDED",
+					"message": "Monthly quota exceeded",
+					"details": gin.H{
+						"used":  usage.Used,
+						"limit": usage.Limit,
+					},
+				},
+			})
+		},
+	}))
+	{
+		apiCustom.GET("/premium", func(c *gin.Context) {
+			c.String(http.StatusOK, "Premium endpoint")
+		})
+	}
+
 	// Start server
 	println("Gin server starting on :8080")
 	println("Try: curl -H \"X-User-ID: user1\" http://localhost:8080/api/data")
+	println("Check quota: curl -H \"X-User-ID: user1\" http://localhost:8080/quota")
 
 	if err := r.Run(":8080"); err != nil {
 		panic(err)
