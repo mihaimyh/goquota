@@ -11,10 +11,14 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Anniversary-based billing cycles** - Preserve subscription anniversary dates across months
 - **Prorated quota adjustments** - Handle mid-cycle tier changes fairly
 - **Multiple quota types** - Support both daily and monthly quotas
-- **Pluggable storage** - Firestore, in-memory, or custom backends
+- **Pluggable storage** - Redis (recommended), Firestore, In-Memory, or custom backends
+- **High Performance** - Redis adapter uses atomic Lua scripts for <1ms latency
 - **Transaction-safe** - Prevent over-consumption with atomic operations
-- **HTTP middleware** - Easy integration with web frameworks
-- **Production-ready** - 73%+ test coverage, used in production
+- **Refund Support** - Gracefully handle failed operations with idempotency and audit trails
+- **Soft Limits & Warnings** - Trigger callbacks when usage approaches limits (e.g. 80%)
+- **Observability** - Built-in Prometheus metrics and structured logging
+- **HTTP Middlewares** - Easy integration with standard `net/http` servers
+- **Production-ready** - >80% test coverage, battle-tested in production
 
 ## Installation
 
@@ -30,7 +34,7 @@ package main
 import (
     "context"
     "time"
-    
+
     "github.com/mihaimyh/goquota/pkg/goquota"
     "github.com/mihaimyh/goquota/storage/memory"
 )
@@ -38,7 +42,7 @@ import (
 func main() {
     // Create storage
     storage := memory.New()
-    
+
     // Configure tiers
     config := goquota.Config{
         DefaultTier: "free",
@@ -51,10 +55,10 @@ func main() {
             },
         },
     }
-    
+
     // Create manager
     manager, _ := goquota.NewManager(storage, config)
-    
+
     // Set user entitlement
     ctx := context.Background()
     manager.SetEntitlement(ctx, &goquota.Entitlement{
@@ -62,7 +66,7 @@ func main() {
         Tier:   "pro",
         SubscriptionStartDate: time.Now().UTC(),
     })
-    
+
     // Consume quota
     err := manager.Consume(ctx, "user123", "api_calls", 1, goquota.PeriodTypeMonthly)
     if err == goquota.ErrQuotaExceeded {
@@ -73,15 +77,30 @@ func main() {
 
 ## Storage Adapters
 
-### In-Memory (Testing)
+### Redis (Recommended for Production)
+
+High-performance, atomic storage using Lua scripts. Supports clusters and automatic TTL expiration.
 
 ```go
-import "github.com/mihaimyh/goquota/storage/memory"
+import (
+    "github.com/redis/go-redis/v9"
+    redisStorage "github.com/mihaimyh/goquota/storage/redis"
+)
 
-storage := memory.New()
+// Create Redis client
+client := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+
+// Initialize storage
+storage, err := redisStorage.New(client, redisStorage.Config{
+    KeyPrefix:      "quota:",
+    EntitlementTTL: 24 * time.Hour,
+    UsageTTL:       7 * 24 * time.Hour, // Keep usage for 1 week past expiry
+})
 ```
 
-### Firestore (Production)
+### Firestore (Serverless)
+
+Ideal for Google Cloud Serverless environments.
 
 ```go
 import (
@@ -96,7 +115,56 @@ storage, _ := firestoreStorage.New(client, firestoreStorage.Config{
 })
 ```
 
+### In-Memory (Testing)
+
+```go
+import "github.com/mihaimyh/goquota/storage/memory"
+
+storage := memory.New()
+```
+
+## Advanced Features
+
+### Quota Refunds
+
+Handle failed operations by refunding the consumed quota. Supports idempotency keys to prevent double-refunds.
+
+```go
+// Operation failed, refund the quota
+err := manager.Refund(ctx, &goquota.RefundRequest{
+    UserID:         "user123",
+    Resource:       "api_calls",
+    Amount:         1,
+    PeriodType:     goquota.PeriodTypeMonthly,
+    IdempotencyKey: "req_123_refund", // Unique key for this refund
+    Reason:         "Service timeout",
+})
+```
+
+### Soft Limits & Warnings
+
+Receive notifications when a user is nearing their limit.
+
+```go
+manager.SetWarningCallback(func(ctx context.Context, userID, resource string, pctUsed float64) {
+    if pctUsed >= 80.0 {
+        fmt.Printf("Warning: User %s used %.2f%% of %s quota\n", userID, pctUsed, resource)
+        // Send email alert, etc.
+    }
+})
+```
+
+### Metrics
+
+The library exposes Prometheus metrics by default via the `metrics` package.
+
+- `goquota_ops_total{operation="consume", status="success"}`
+- `goquota_ops_latency_seconds`
+- `goquota_usage_ratio`
+
 ## HTTP Middleware
+
+Integrate directly with your HTTP handlers.
 
 ```go
 import (
@@ -111,112 +179,55 @@ quotaMiddleware := httpMiddleware.Middleware(httpMiddleware.Config{
     GetResource: httpMiddleware.FixedResource("api_calls"),
     GetAmount:   httpMiddleware.FixedAmount(1),
     PeriodType:  goquota.PeriodTypeDaily,
+    // Optional: Only blocking if over 100% of limit, but warn at 80%
+    UseSoftLimit: false,
 })
 
 // Apply to handler
 http.Handle("/api/endpoint", quotaMiddleware(yourHandler))
 ```
 
-## Anniversary-Based Billing
+## Anniversary-Based Billing & Proration
 
-Unlike simple monthly quotas that reset on the 1st of each month, goquota preserves subscription anniversary dates:
+`goquota` is designed for real-world subscription billing:
 
-```
-User subscribed on Jan 15
- Cycle 1: Jan 15 - Feb 15
- Cycle 2: Feb 15 - Mar 15
- Cycle 3: Mar 15 - Apr 15
- ...
-```
+- **Anniversaries**: Cycles follow the user's subscription date (e.g. Jan 15 -> Feb 15), not calendar months.
+- **Proration**: If a user upgrades headers mid-cycle, their usage carries over proportionally.
 
-This ensures fair billing aligned with subscription dates, even for month-end edge cases (e.g., Jan 31  Feb 28).
-
-## Prorated Tier Changes
-
-When users upgrade or downgrade mid-cycle, quotas are adjusted proportionally:
-
-```
-User on "scholar" tier (3600 seconds/month)
- Day 1-10: Consumed 1000 seconds
- Day 10: Upgrade to "fluent" (18000 seconds/month)
- New limit: 1000 (used) + (18000  20/30 days remaining) = 13000 seconds
-```
+  > _Example_: User consumes 50% of Basic tier. Upgrading to Pro (10x limit) means they start with 50% of Pro usage, preserving the "percent used" fairness.
 
 ## Examples
 
-See the [examples](examples/) directory for complete working examples:
+See the [examples](examples/) directory:
 
-- [Basic Usage](examples/basic/) - Simple quota management
-- [Firestore Integration](examples/firestore/) - Production setup with Firestore
-- [HTTP Server](examples/http-server/) - Web API with quota enforcement
+- [Basic Usage](examples/basic/)
+- [Redis Integration](examples/redis/)
+- [Firestore Integration](examples/firestore/)
+- [HTTP Server](examples/http-server/)
 
 ## API Reference
 
-### Manager
+### Manager Interface
 
 ```go
-// Create manager
-manager, err := goquota.NewManager(storage, config)
+// Core Operations
+Consume(ctx, userID, resource, amount, periodType) error
+Refund(ctx, req *RefundRequest) error
+GetQuota(ctx, userID, resource, periodType) (*Usage, error)
 
-// Get current billing cycle
-period, err := manager.GetCurrentCycle(ctx, userID)
-
-// Get quota status
-usage, err := manager.GetQuota(ctx, userID, "resource", goquota.PeriodTypeMonthly)
-
-// Consume quota
-err := manager.Consume(ctx, userID, "resource", amount, goquota.PeriodTypeMonthly)
-
-// Apply tier change
-err := manager.ApplyTierChange(ctx, userID, "old_tier", "new_tier", "resource")
-
-// Manage entitlements
-err := manager.SetEntitlement(ctx, entitlement)
-ent, err := manager.GetEntitlement(ctx, userID)
-```
-
-### Storage Interface
-
-Implement custom storage backends:
-
-```go
-type Storage interface {
-    GetEntitlement(ctx context.Context, userID string) (*Entitlement, error)
-    SetEntitlement(ctx context.Context, ent *Entitlement) error
-    GetUsage(ctx context.Context, userID, resource string, period Period) (*Usage, error)
-    ConsumeQuota(ctx context.Context, req *ConsumeRequest) error
-    ApplyTierChange(ctx context.Context, req *TierChangeRequest) error
-}
+// Management
+SetEntitlement(ctx, entitlement) error
+ApplyTierChange(ctx, userID, oldTier, newTier, resource) error
+SetWarningCallback(callback)
 ```
 
 ## Testing
 
 ```bash
-# Run all tests
-go test ./...
-
-# Run with coverage
+# Run all tests with coverage
 go test -cover ./...
-
-# Run specific package tests
-go test ./pkg/goquota/...
-go test ./storage/memory/...
 ```
-
-## Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure `golangci-lint` passes
-5. Submit a pull request
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details
-
-## Acknowledgments
-
-Extracted from a production SaaS application managing subscription quotas for thousands of users.
