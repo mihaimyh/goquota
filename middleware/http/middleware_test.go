@@ -157,6 +157,7 @@ func TestMiddleware_MissingAuth(t *testing.T) {
 func TestMiddleware_NoEntitlement(t *testing.T) {
 	manager := setupTestManager(t)
 	// Don't set up entitlement for user2
+	// User should be allowed to use default tier quota
 
 	mw := Middleware(Config{
 		Manager:     manager,
@@ -176,9 +177,23 @@ func TestMiddleware_NoEntitlement(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	// Should return 403 Forbidden (no entitlement)
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("Expected status 403, got %d", rec.Code)
+	// Should return 200 OK - users without entitlements can use default tier
+	if rec.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", rec.Code)
+	}
+
+	// Verify quota was consumed using default tier
+	ctx := context.Background()
+	quota, err := manager.GetQuota(ctx, "user2", "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("Failed to get quota: %v", err)
+	}
+	if quota.Used != 1 {
+		t.Errorf("Expected 1 used, got %d", quota.Used)
+	}
+	// Default tier is "free" with 100 monthly quota
+	if quota.Limit != 100 {
+		t.Errorf("Expected limit 100 (default tier), got %d", quota.Limit)
 	}
 }
 
@@ -188,33 +203,40 @@ func TestMiddleware_FromContext(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user_from_ctx", "pro")
 
-	key := contextKey("user_id")
+	key := ContextKey("user_id")
 
 	mw := Middleware(Config{
 		Manager:     manager,
-		GetUserID:   FromContext(ContextKey(key)),
+		GetUserID:   FromContext(key),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
 	})
 
-	// Wrap with middleware that sets context
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), key, "user_from_ctx")
-		r = r.WithContext(ctx)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
 
-		mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})).ServeHTTP(w, r)
-	})
-
+	// Create request with context value already set
 	req := httptest.NewRequest("GET", "/api/test", nil)
+	ctx := context.WithValue(req.Context(), key, "user_from_ctx")
+	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", rec.Code)
+	}
+
+	// Verify quota was consumed
+	ctxBg := context.Background()
+	quota, err := manager.GetQuota(ctxBg, "user_from_ctx", "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("Failed to get quota: %v", err)
+	}
+	if quota.Used != 1 {
+		t.Errorf("Expected 1 used, got %d", quota.Used)
 	}
 }
 
