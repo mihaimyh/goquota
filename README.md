@@ -11,7 +11,7 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Anniversary-based billing cycles** - Preserve subscription anniversary dates across months
 - **Prorated quota adjustments** - Handle mid-cycle tier changes fairly
 - **Multiple quota types** - Support both daily and monthly quotas
-- **Pluggable storage** - Redis (recommended), Firestore, In-Memory, or custom backends
+- **Pluggable storage** - Redis (recommended), PostgreSQL, Firestore, In-Memory, or custom backends
 - **High Performance** - Redis adapter uses atomic Lua scripts for <1ms latency
 - **Transaction-safe** - Prevent over-consumption with atomic operations
 - **Idempotency Keys** - Prevent double-charging on retries with client-provided idempotency keys
@@ -168,6 +168,46 @@ storage, _ := firestoreStorage.New(client, firestoreStorage.Config{
    - If you plan to query documents by `expiresAt` (e.g., for manual cleanup jobs or debugging), Firestore requires composite indexes when filtering by multiple fields
    - The library uses direct document lookups by ID (idempotency key), so indexes are not required for normal operation
    - If you add custom cleanup functions that query `WHERE expiresAt < NOW()`, ensure you create the required composite indexes in Firestore
+
+### PostgreSQL (SQL-based)
+
+Ideal for applications already using PostgreSQL. Provides ACID transactions with row-level locking for atomic quota operations. Rate limiting is handled in-memory for performance.
+
+```go
+import (
+    "context"
+    "time"
+    
+    postgresStorage "github.com/mihaimyh/goquota/storage/postgres"
+)
+
+ctx := context.Background()
+config := postgresStorage.DefaultConfig()
+config.ConnectionString = "postgres://user:password@localhost:5432/goquota?sslmode=disable"
+config.CleanupEnabled = true
+config.CleanupInterval = 1 * time.Hour
+config.RecordTTL = 7 * 24 * time.Hour
+
+storage, err := postgresStorage.New(ctx, config)
+if err != nil {
+    log.Fatal(err)
+}
+defer storage.Close() // Important: closes connection pool and cleanup goroutine
+```
+
+**Database Setup:**
+Run the migration to create required tables:
+```bash
+psql -d goquota -f storage/postgres/migrations/001_initial_schema.sql
+```
+
+**Important Notes:**
+- **Quotas**: Stored in PostgreSQL with global synchronization across instances
+- **Rate Limits**: Handled in-memory (local per instance) for performance. In a cluster of N instances, effective rate limit is `N × ConfiguredRate`
+- **Idempotency Keys**: Scoped per user, allowing safe reuse across different users
+- **Cleanup**: Automatic background cleanup of expired audit records
+
+See [storage/postgres/README.md](storage/postgres/README.md) for detailed documentation.
 
 ### In-Memory (Testing)
 
@@ -644,6 +684,7 @@ See the [examples](examples/) directory:
 
 - [Basic Usage](examples/basic/)
 - [Redis Integration](examples/redis/)
+- [PostgreSQL Integration](examples/postgres/)
 - [Firestore Integration](examples/firestore/)
 - [HTTP Server](examples/http-server/)
 - [Gin Framework](examples/gin/)
