@@ -33,6 +33,7 @@ type Provider struct {
 	webhookSecret []byte
 	apiKey        string
 	acceptHMAC    bool
+	metrics       billing.Metrics
 }
 
 // NewProvider creates a new RevenueCat billing provider
@@ -87,6 +88,12 @@ func NewProvider(config billing.Config) (*Provider, error) {
 		}
 	}()
 
+	// Setup metrics (optional)
+	metrics := config.Metrics
+	if metrics == nil {
+		metrics = &billing.NoopMetrics{}
+	}
+
 	return &Provider{
 		manager:       config.Manager,
 		config:        config,
@@ -97,6 +104,7 @@ func NewProvider(config billing.Config) (*Provider, error) {
 		webhookSecret: webhookSecret,
 		apiKey:        apiKey,
 		acceptHMAC:    config.EnableHMAC,
+		metrics:       metrics,
 	}, nil
 }
 
@@ -150,6 +158,7 @@ func (p *Provider) MapEntitlementToTier(entitlementID string) string {
 
 // handleWebhook processes incoming RevenueCat webhook events
 func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
 	setSecurityHeaders(w)
 
 	if r.Method != http.MethodPost {
@@ -174,8 +183,10 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if strings.Contains(err.Error(), "too large") {
 			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+			p.metrics.RecordWebhookError(providerName, "payload_too_large")
 		} else {
 			http.Error(w, fmt.Sprintf("invalid payload: %v", err), http.StatusBadRequest)
+			p.metrics.RecordWebhookError(providerName, "invalid_payload")
 		}
 		return
 	}
@@ -184,6 +195,7 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	tokenOrSig := extractTokenOrSignature(r)
 	if !p.verifyRequest(tokenOrSig, body) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		p.metrics.RecordWebhookError(providerName, "auth_failed")
 		return
 	}
 
@@ -192,27 +204,39 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if err := parseWebhookPayload(body, &payload); err != nil {
 		// Provide more detailed error for debugging (but don't expose sensitive data)
 		http.Error(w, fmt.Sprintf("invalid payload: %v", err), http.StatusBadRequest)
+		p.metrics.RecordWebhookError(providerName, "invalid_payload")
 		return
 	}
 
 	userID := strings.TrimSpace(payload.Event.AppUserID)
 	if userID == "" {
 		http.Error(w, "missing user id", http.StatusBadRequest)
+		p.metrics.RecordWebhookError(providerName, "missing_user_id")
 		return
 	}
 
+	eventType := strings.TrimSpace(payload.Event.Type)
+	if eventType == "" {
+		eventType = "UNKNOWN"
+	}
+
 	// Handle TEST events
-	if strings.EqualFold(strings.TrimSpace(payload.Event.Type), "TEST") {
+	if strings.EqualFold(eventType, "TEST") {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("ok")); err != nil {
 			return
 		}
+		p.metrics.RecordWebhookEvent(providerName, "TEST", "success")
+		p.metrics.RecordWebhookProcessingDuration(providerName, "TEST", time.Since(startTime))
 		return
 	}
 
 	// Process webhook event
 	if err := p.processWebhookEvent(r.Context(), &payload, userID); err != nil {
 		http.Error(w, "failed to process webhook", http.StatusInternalServerError)
+		p.metrics.RecordWebhookEvent(providerName, eventType, "error")
+		p.metrics.RecordWebhookError(providerName, "processing_error")
+		p.metrics.RecordWebhookProcessingDuration(providerName, eventType, time.Since(startTime))
 		return
 	}
 
@@ -220,9 +244,14 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write([]byte("ok")); err != nil {
 		return
 	}
+
+	p.metrics.RecordWebhookEvent(providerName, eventType, "success")
+	p.metrics.RecordWebhookProcessingDuration(providerName, eventType, time.Since(startTime))
 }
 
 // processWebhookEvent processes a webhook event with timestamp-based idempotency
+//
+//nolint:gocyclo // Complex business logic with multiple validation and processing paths
 func (p *Provider) processWebhookEvent(ctx context.Context, payload *webhookPayload, userID string) error {
 	// Parse event timestamp (supports both timestamp_ms and event_timestamp_ms)
 	eventTimestamp := parseEventTimestamp(payload.getEventTimestamp())
@@ -254,6 +283,11 @@ func (p *Provider) processWebhookEvent(ctx context.Context, payload *webhookPayl
 		previousTier = existing.Tier
 	}
 	tierChanged := previousTier != effectiveTier
+
+	// Record tier change metric
+	if tierChanged {
+		p.metrics.RecordTierChange(providerName, previousTier, effectiveTier)
+	}
 
 	// Set subscription start date
 	subscriptionStartDate := time.Time{}

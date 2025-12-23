@@ -19,6 +19,7 @@ import (
 
 	ginMiddleware "github.com/mihaimyh/goquota/middleware/gin"
 	"github.com/mihaimyh/goquota/pkg/billing"
+	billingPromMetrics "github.com/mihaimyh/goquota/pkg/billing/metrics/prometheus"
 	"github.com/mihaimyh/goquota/pkg/billing/revenuecat"
 	"github.com/mihaimyh/goquota/pkg/goquota"
 	zerolog_adapter "github.com/mihaimyh/goquota/pkg/goquota/logger/zerolog"
@@ -204,6 +205,9 @@ func main() {
 	} else {
 		// Create provider if webhook secret is provided (API key is optional for webhook-only usage)
 		if hasWebhookSecret {
+			// Create billing metrics (optional - uses same namespace as goquota metrics)
+			billingMetrics := billingPromMetrics.DefaultMetrics("goquota_comprehensive")
+
 			rcProvider, err := revenuecat.NewProvider(billing.Config{
 				Manager: manager,
 				TierMapping: map[string]string{
@@ -219,6 +223,7 @@ func main() {
 				},
 				WebhookSecret: webhookSecret,
 				APIKey:        apiKey, // May be empty for webhook-only usage
+				Metrics:       billingMetrics, // Optional: enables Prometheus metrics for billing operations
 			})
 			if err != nil {
 				fmt.Printf("   ⚠ Failed to create RevenueCat provider: %v\n", err)
@@ -239,6 +244,7 @@ func main() {
 				} else {
 					fmt.Println("     ⚠ Restore purchases disabled: REVENUECAT_SECRET_API_KEY not set")
 				}
+				fmt.Println("     - Prometheus metrics enabled for billing operations")
 			}
 		} else {
 			fmt.Println("   ⚠ RevenueCat webhook disabled: REVENUECAT_WEBHOOK_SECRET not set")

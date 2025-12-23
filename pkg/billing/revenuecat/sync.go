@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,16 +32,20 @@ type revenueCatEntitlement struct {
 //
 //nolint:gocyclo // Complex business logic with multiple error handling paths
 func (p *Provider) syncUserFromAPI(ctx context.Context, userID string) (string, error) {
+	startTime := time.Now()
 	if strings.TrimSpace(p.apiKey) == "" {
+		p.metrics.RecordUserSync(providerName, "error")
 		return p.defaultTier, fmt.Errorf("revenuecat API key not configured")
 	}
 
 	// Build API URL
 	url := fmt.Sprintf("%s/subscribers/%s", revenueCatAPIBaseURL, userID)
+	endpoint := "/subscribers/{id}"
 
 	// Create request
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
+		p.metrics.RecordUserSync(providerName, "error")
 		return p.defaultTier, fmt.Errorf("failed to create request: %w", err)
 	}
 
@@ -50,29 +55,50 @@ func (p *Provider) syncUserFromAPI(ctx context.Context, userID string) (string, 
 	// Execute request
 	res, err := p.httpClient.Do(req)
 	if err != nil {
+		p.metrics.RecordAPICall(providerName, endpoint, "error")
+		p.metrics.RecordUserSync(providerName, "error")
+		p.metrics.RecordUserSyncDuration(providerName, time.Since(startTime))
 		return p.defaultTier, fmt.Errorf("failed to fetch subscriber: %w", err)
 	}
 	defer res.Body.Close()
 
+	// Record API call metrics
+	statusCode := strconv.Itoa(res.StatusCode)
+	p.metrics.RecordAPICall(providerName, endpoint, statusCode)
+	p.metrics.RecordAPICallDuration(providerName, endpoint, time.Since(startTime))
+
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
+		p.metrics.RecordUserSync(providerName, "error")
+		p.metrics.RecordUserSyncDuration(providerName, time.Since(startTime))
 		return p.defaultTier, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	// Handle 404 - user not found in RevenueCat
 	if res.StatusCode == http.StatusNotFound {
 		// User doesn't exist in RevenueCat - set to default tier
-		return p.syncToDefaultTier(ctx, userID)
+		tier, err := p.syncToDefaultTier(ctx, userID)
+		if err != nil {
+			p.metrics.RecordUserSync(providerName, "error")
+		} else {
+			p.metrics.RecordUserSync(providerName, "success")
+		}
+		p.metrics.RecordUserSyncDuration(providerName, time.Since(startTime))
+		return tier, err
 	}
 
 	// Handle other errors
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		p.metrics.RecordUserSync(providerName, "error")
+		p.metrics.RecordUserSyncDuration(providerName, time.Since(startTime))
 		return p.defaultTier, fmt.Errorf("revenuecat API error: status %d, body: %s", res.StatusCode, string(body))
 	}
 
 	// Parse response
 	var payload revenueCatSubscriberResponse
 	if err := json.Unmarshal(body, &payload); err != nil {
+		p.metrics.RecordUserSync(providerName, "error")
+		p.metrics.RecordUserSyncDuration(providerName, time.Since(startTime))
 		return p.defaultTier, fmt.Errorf("failed to parse response: %w", err)
 	}
 
@@ -82,6 +108,8 @@ func (p *Provider) syncUserFromAPI(ctx context.Context, userID string) (string, 
 	// Get existing entitlement to check for tier changes
 	existing, err := p.manager.GetEntitlement(ctx, userID)
 	if err != nil && err != goquota.ErrEntitlementNotFound {
+		p.metrics.RecordUserSync(providerName, "error")
+		p.metrics.RecordUserSyncDuration(providerName, time.Since(startTime))
 		return tier, err
 	}
 
@@ -90,6 +118,11 @@ func (p *Provider) syncUserFromAPI(ctx context.Context, userID string) (string, 
 	if existing != nil {
 		previousTier = existing.Tier
 		tierChanged = previousTier != tier
+	}
+
+	// Record tier change metric
+	if tierChanged {
+		p.metrics.RecordTierChange(providerName, previousTier, tier)
 	}
 
 	// Set subscription start date
@@ -116,6 +149,8 @@ func (p *Provider) syncUserFromAPI(ctx context.Context, userID string) (string, 
 
 	// Update entitlement
 	if err := p.manager.SetEntitlement(ctx, ent); err != nil {
+		p.metrics.RecordUserSync(providerName, "error")
+		p.metrics.RecordUserSyncDuration(providerName, time.Since(startTime))
 		return tier, fmt.Errorf("failed to set entitlement: %w", err)
 	}
 
@@ -128,6 +163,8 @@ func (p *Provider) syncUserFromAPI(ctx context.Context, userID string) (string, 
 		_ = tier
 	}
 
+	p.metrics.RecordUserSync(providerName, "success")
+	p.metrics.RecordUserSyncDuration(providerName, time.Since(startTime))
 	return tier, nil
 }
 

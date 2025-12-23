@@ -33,4 +33,9 @@ type Config struct {
 	// When enabled, the provider will verify webhook signatures using HMAC-SHA256.
 	// Defaults to false (uses Bearer token authentication).
 	EnableHMAC bool
+
+	// Metrics is an optional metrics collector for tracking billing provider operations.
+	// If nil, metrics will be silently ignored (no-op).
+	// Use billing/metrics/prometheus.DefaultMetrics(namespace) for Prometheus metrics.
+	Metrics Metrics
 }
