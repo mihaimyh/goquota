@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'goquota'
+    environment: 'development'
+
+scrape_configs:
+  - job_name: 'comprehensive-example'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: '/metrics'
+    static_configs:
+      - targets:
+          - 'comprehensive-example:9090'
+        labels:
+          service: 'goquota-comprehensive'
+          instance: 'comprehensive-example'
+
