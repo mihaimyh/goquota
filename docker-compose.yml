@@ -33,6 +33,43 @@ services:
       retries: 5
     restart: unless-stopped
 
+  comprehensive-example:
+    build:
+      context: .
+      dockerfile: examples/comprehensive/Dockerfile
+    container_name: goquota-comprehensive-example
+    ports:
+      - "8080:8080"  # HTTP server
+      - "9090:9090"  # Prometheus metrics
+    environment:
+      - REDIS_HOST=redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "-O", "-", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  k6-load-test:
+    image: grafana/k6:latest
+    container_name: goquota-k6
+    volumes:
+      - ./examples/comprehensive/k6:/scripts
+    depends_on:
+      comprehensive-example:
+        condition: service_healthy
+    environment:
+      - BASE_URL=http://comprehensive-example:8080
+      - K6_VUS=50
+      - K6_DURATION=60s
+    # Default command can be overridden when running:
+    # docker-compose run --rm k6-load-test run /scripts/load-test.js
+    command: run /scripts/load-test.js
+
 volumes:
   redis-data:
     driver: local

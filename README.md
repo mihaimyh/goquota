@@ -691,6 +691,7 @@ See the [examples](examples/) directory:
 - [Echo Framework](examples/echo/)
 - [Fallback Strategies](examples/fallback/)
 - [Rate Limiting](examples/rate-limiting/)
+- [Comprehensive Example](examples/comprehensive/) - **All features in one example with Docker support**
 
 ## API Reference
 
