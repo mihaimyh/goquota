@@ -53,7 +53,8 @@ func main() {
 			"fluent_annual":   "fluent",
 			"*":               "explorer", // Default tier for unknown entitlements
 		},
-		Secret: os.Getenv("REVENUECAT_SECRET"),
+		WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+		APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
 	})
 	if err != nil {
 		log.Fatal(err)

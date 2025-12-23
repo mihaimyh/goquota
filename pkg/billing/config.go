@@ -17,8 +17,12 @@ type Config struct {
 	//   - "*" or "default": Maps unknown entitlements to the default tier
 	TierMapping map[string]string
 
-	// Secret is the API key or webhook secret for authenticating with the provider
-	Secret string
+	// WebhookSecret is used to verify incoming webhook requests (e.g. RevenueCat
+	// X-RevenueCat-Signature or Bearer tokens).
+	WebhookSecret string
+
+	// APIKey is used for outbound API calls to the billing provider (e.g. SyncUser).
+	APIKey string
 
 	// HTTPClient is an optional HTTP client for API calls.
 	// If nil, a default client with 10s timeout will be used.

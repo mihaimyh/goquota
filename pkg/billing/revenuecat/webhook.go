@@ -160,7 +160,7 @@ func extractTokenOrSignature(r *http.Request) string {
 
 // verifyRequest verifies the webhook request signature or token
 func (p *Provider) verifyRequest(tokenOrSig string, body []byte) bool {
-	if len(p.secret) == 0 {
+	if len(p.webhookSecret) == 0 {
 		return false
 	}
 	if strings.TrimSpace(tokenOrSig) == "" {
@@ -168,7 +168,7 @@ func (p *Provider) verifyRequest(tokenOrSig string, body []byte) bool {
 	}
 
 	// Primary: token match (RevenueCat common setup)
-	if subtle.ConstantTimeCompare([]byte(tokenOrSig), p.secret) == 1 {
+	if subtle.ConstantTimeCompare([]byte(tokenOrSig), p.webhookSecret) == 1 {
 		return true
 	}
 
@@ -180,7 +180,7 @@ func (p *Provider) verifyRequest(tokenOrSig string, body []byte) bool {
 	if err != nil {
 		return false
 	}
-	mac := hmac.New(sha256.New, p.secret)
+	mac := hmac.New(sha256.New, p.webhookSecret)
 	if _, err := mac.Write(body); err != nil {
 		return false
 	}

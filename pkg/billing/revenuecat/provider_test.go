@@ -69,7 +69,8 @@ func TestProvider_Name(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -87,7 +88,8 @@ func TestProvider_WebhookHandler(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -108,7 +110,8 @@ func TestProvider_MapEntitlementToTier(t *testing.T) {
 			"fluent_monthly":  testTierFluent,
 			"*":               testTierExplorer,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -141,7 +144,8 @@ func TestProvider_Webhook_Idempotency(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -275,7 +279,8 @@ func TestProvider_Webhook_OutOfOrderDelivery(t *testing.T) {
 			"scholar_monthly": testTierScholar,
 			"fluent_monthly":  testTierFluent,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -369,7 +374,8 @@ func TestProvider_SyncUser(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 		HTTPClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -408,7 +414,8 @@ func TestProvider_Webhook_InvalidSignature(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -435,7 +442,8 @@ func TestProvider_Webhook_TestEvent(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -483,7 +491,8 @@ func TestProvider_Webhook_BodySizeLimit(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -566,7 +575,8 @@ func TestProvider_Webhook_RenewalEvent(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -626,7 +636,8 @@ func TestProvider_Webhook_ExpirationEvent(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -691,7 +702,8 @@ func TestProvider_Webhook_CancellationEvent(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -757,7 +769,8 @@ func TestProvider_Webhook_EmptyBody(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -781,7 +794,8 @@ func TestProvider_Webhook_InvalidJSON(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -805,7 +819,8 @@ func TestProvider_Webhook_MissingUserID(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -889,7 +904,8 @@ func TestProvider_SyncUser_WithMockServer(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 		HTTPClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -927,7 +943,8 @@ func TestProvider_SyncUser_NotFound(t *testing.T) {
 			"scholar_monthly": testTierScholar,
 			"*":               testTierExplorer,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 		HTTPClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -956,7 +973,8 @@ func TestProvider_SyncUser_ServerError(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 		HTTPClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -983,7 +1001,8 @@ func TestProvider_Webhook_ConcurrentProcessing(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1037,7 +1056,8 @@ func TestProvider_Webhook_InvalidMethod(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1064,7 +1084,8 @@ func TestProvider_Webhook_NoSecret(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: "", // Empty secret
+		WebhookSecret: "", // Empty secret
+		APIKey:        "",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1090,7 +1111,8 @@ func TestProvider_Webhook_ContextCancellation(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1226,7 +1248,8 @@ func TestProvider_MapEntitlementToTier_DefaultKey(t *testing.T) {
 			"scholar_monthly": testTierScholar,
 			"*":               testTierExplorer, // Default key
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1257,7 +1280,8 @@ func TestProvider_MapEntitlementToTier_DefaultKeyCaseInsensitive(t *testing.T) {
 			"scholar_monthly": testTierScholar,
 			"default":         "explorer", // Alternative default key
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1276,7 +1300,8 @@ func TestProvider_Webhook_SubscriberEntitlements(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1344,7 +1369,8 @@ func TestProvider_Webhook_InactiveEntitlement(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1412,7 +1438,8 @@ func TestProvider_Webhook_ZeroTimestamp(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1459,8 +1486,9 @@ func TestProvider_Webhook_HMACSignature(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret:     "hmac-secret",
-		EnableHMAC: true,
+		WebhookSecret: "hmac-secret",
+		APIKey:        "hmac-secret",
+		EnableHMAC:    true,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1493,8 +1521,9 @@ func TestProvider_Webhook_HMACSignatureInvalid(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret:     "hmac-secret",
-		EnableHMAC: true,
+		WebhookSecret: "hmac-secret",
+		APIKey:        "hmac-secret",
+		EnableHMAC:    true,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1521,8 +1550,9 @@ func TestProvider_Webhook_HMACDisabled(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret:     "hmac-secret",
-		EnableHMAC: false, // HMAC disabled
+		WebhookSecret: "hmac-secret",
+		APIKey:        "hmac-secret",
+		EnableHMAC:    false, // HMAC disabled
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1556,7 +1586,8 @@ func TestProvider_Webhook_DirectToken(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: "direct-token",
+		WebhookSecret: "direct-token",
+		APIKey:        "direct-token",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1583,7 +1614,8 @@ func TestProvider_Webhook_MultipleJSONObjects(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1609,7 +1641,8 @@ func TestProvider_Webhook_XRevenueCatSignatureHeader(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1644,7 +1677,8 @@ func TestProvider_SyncUser_NetworkError(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 		HTTPClient: &http.Client{
 			Timeout: 1 * time.Nanosecond, // Extremely short timeout
 		},
@@ -1677,7 +1711,8 @@ func TestProvider_SyncUser_InvalidJSONResponse(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 		HTTPClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -1705,7 +1740,8 @@ func TestProvider_Webhook_ExpiredEntitlementInSubscriber(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1774,7 +1810,8 @@ func TestProvider_Webhook_GracePeriod(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1836,7 +1873,8 @@ func TestProvider_Webhook_EventEntitlementID(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -1913,7 +1951,8 @@ func TestProvider_SyncUser_ExpiredEntitlement(t *testing.T) {
 			"scholar_monthly": testTierScholar,
 			"*":               testTierExplorer,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 		HTTPClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -1943,7 +1982,8 @@ func TestProvider_Webhook_NoEntitlementsInEvent(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -2140,8 +2180,9 @@ func TestGetClientIP(t *testing.T) {
 
 func TestNewProvider_NoManager(t *testing.T) {
 	_, err := NewProvider(billing.Config{
-		Manager: nil, // Missing manager
-		Secret:  "test-secret",
+		Manager:       nil, // Missing manager
+		WebhookSecret: "test-secret",
+		APIKey:        "test-secret",
 	})
 	if err == nil {
 		t.Error("Expected error when Manager is nil")
@@ -2158,7 +2199,8 @@ func TestNewProvider_BearerPrefixInSecret(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: "Bearer test-secret", // Secret with Bearer prefix
+		WebhookSecret: "Bearer test-secret", // Secret with Bearer prefix
+		APIKey:        "Bearer test-secret",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -2186,7 +2228,8 @@ func TestProvider_Webhook_RateLimitExceeded(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -2238,7 +2281,8 @@ func TestProvider_Webhook_ExpirationAtMsZero(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -2298,7 +2342,8 @@ func TestProvider_Webhook_PurchaseDateMs(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -2362,7 +2407,8 @@ func TestProvider_Webhook_ExistingSubscriptionStartDatePreserved(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -2405,7 +2451,8 @@ func TestProvider_Webhook_TierChangeFromDefault(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -2435,7 +2482,8 @@ func TestProvider_Webhook_TierChangeToDefault(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -2491,7 +2539,8 @@ func TestProvider_SyncUser_Unauthorized(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: "wrong-secret",
+		WebhookSecret: "wrong-secret",
+		APIKey:        "wrong-secret",
 		HTTPClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -2518,7 +2567,8 @@ func TestProvider_SyncUser_EmptySecret(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: "", // Empty secret
+		WebhookSecret: "", // Empty secret
+		APIKey:        "",
 		HTTPClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -2546,7 +2596,8 @@ func TestProvider_Webhook_CustomerInfoEntitlements(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -2614,7 +2665,8 @@ func TestProvider_Webhook_ExpirationAtMsInEvent(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -2684,7 +2736,8 @@ func TestProvider_Webhook_ExpirationAtMsInSubscriber(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -2763,7 +2816,8 @@ func TestProvider_Webhook_BILLING_ISSUEEvent(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -2825,7 +2879,8 @@ func TestProvider_Webhook_SUBSCRIPTION_PAUSEDEvent(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -3015,7 +3070,8 @@ func TestProvider_Webhook_ExtractTierFromDetails_NoExpirationInEventOrSubscriber
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -3088,7 +3144,8 @@ func TestProvider_Webhook_ExtractTierFromDetails_MultipleEntitlements(t *testing
 			"fluent_monthly":  testTierFluent,
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -3161,7 +3218,8 @@ func TestProvider_Webhook_ExtractTierFromDetails_InvalidExpirationDate(t *testin
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -3230,7 +3288,8 @@ func TestProvider_Webhook_ExtractTierFromDetails_NoActiveEntitlements(t *testing
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -3299,7 +3358,8 @@ func TestProvider_Webhook_ExtractTierFromDetails_Inactive(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -3367,7 +3427,8 @@ func TestProvider_Webhook_ExtractTierFromDetails_NoExpiration(t *testing.T) {
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -3434,7 +3495,8 @@ func TestProvider_Webhook_ExtractTierFromDetails_ExpiresDateInSubscriber(t *test
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
@@ -3513,7 +3575,8 @@ func TestProvider_Webhook_ExtractTierFromDetails_InvalidPurchaseDate(t *testing.
 		TierMapping: map[string]string{
 			"scholar_monthly": testTierScholar,
 		},
-		Secret: testSecret,
+		WebhookSecret: testSecret,
+		APIKey:        testSecret,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)

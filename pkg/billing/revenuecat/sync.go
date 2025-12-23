@@ -31,8 +31,8 @@ type revenueCatEntitlement struct {
 //
 //nolint:gocyclo // Complex business logic with multiple error handling paths
 func (p *Provider) syncUserFromAPI(ctx context.Context, userID string) (string, error) {
-	if len(p.secret) == 0 {
-		return p.defaultTier, fmt.Errorf("revenuecat secret not configured")
+	if strings.TrimSpace(p.apiKey) == "" {
+		return p.defaultTier, fmt.Errorf("revenuecat API key not configured")
 	}
 
 	// Build API URL
@@ -44,7 +44,7 @@ func (p *Provider) syncUserFromAPI(ctx context.Context, userID string) (string, 
 		return p.defaultTier, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+string(p.secret))
+	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	req.Header.Set("Accept", "application/json")
 
 	// Execute request

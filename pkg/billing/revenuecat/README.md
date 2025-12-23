@@ -53,7 +53,8 @@ provider, err := revenuecat.NewProvider(billing.Config{
         "fluent_monthly":  "fluent",
         "*":               "explorer",
     },
-    Secret: os.Getenv("REVENUECAT_SECRET"),
+    WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+    APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
 })
 if err != nil {
     log.Fatal(err)
@@ -84,7 +85,8 @@ go get github.com/mihaimyh/goquota/pkg/billing/revenuecat
 
 - **Manager**: The `goquota.Manager` instance that will be updated
 - **TierMapping**: Maps RevenueCat entitlement/product IDs to goquota tiers
-- **Secret**: RevenueCat API secret (Bearer token)
+- **WebhookSecret**: RevenueCat webhook secret for verifying incoming webhook requests
+- **APIKey**: RevenueCat API key for outbound API calls (e.g. SyncUser)
 
 ### Optional Fields
 
@@ -100,7 +102,8 @@ provider, err := revenuecat.NewProvider(billing.Config{
         "premium_monthly": "premium",
         "premium_annual":  "premium",
     },
-    Secret: "rcsk_...", // RevenueCat API secret
+    WebhookSecret: "yWt", // RevenueCat webhook secret
+    APIKey:        "sk_",  // RevenueCat API key
 })
 ```
 
@@ -123,7 +126,8 @@ provider, err := revenuecat.NewProvider(billing.Config{
         "premium_monthly": "premium",
         "*":               "free",
     },
-    Secret: os.Getenv("REVENUECAT_SECRET"),
+    WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+    APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
     HTTPClient: httpClient,
     EnableHMAC: false, // Use Bearer token (default)
 })
@@ -137,8 +141,9 @@ For enhanced security, enable HMAC signature verification:
 provider, err := revenuecat.NewProvider(billing.Config{
     Manager: manager,
     TierMapping: tierMapping,
-    Secret: os.Getenv("REVENUECAT_HMAC_SECRET"),
-    EnableHMAC: true, // Enable HMAC verification
+    WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+    APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
+    EnableHMAC:    true, // Enable HMAC verification
 })
 ```
 
@@ -155,10 +160,11 @@ When `EnableHMAC` is `true`, the provider expects HMAC-SHA256 signatures in the 
 5. Select events to receive (recommended: **All Events**)
 6. Copy the **Webhook Secret** (starts with `rcsk_`)
 
-### Step 2: Set Environment Variable
+### Step 2: Set Environment Variables
 
 ```bash
-export REVENUECAT_SECRET="rcsk_..."
+export REVENUECAT_WEBHOOK_SECRET="yWt"
+export REVENUECAT_SECRET_API_KEY="sk_"
 ```
 
 ### Step 3: Register Handler
@@ -360,8 +366,9 @@ Triggered when testing webhook configuration.
 Simple token matching using the RevenueCat API secret:
 
 ```go
-Secret: "rcsk_..." // RevenueCat API secret
-EnableHMAC: false  // Default
+WebhookSecret: "yWt" // RevenueCat webhook secret
+APIKey:        "sk_"  // RevenueCat API key
+EnableHMAC:    false  // Default
 ```
 
 The provider checks the `Authorization: Bearer <token>` header.
@@ -371,8 +378,9 @@ The provider checks the `Authorization: Bearer <token>` header.
 Cryptographic signature verification using HMAC-SHA256:
 
 ```go
-Secret: "your_hmac_secret"
-EnableHMAC: true
+WebhookSecret: "your_hmac_secret" // HMAC secret for webhook verification
+APIKey:        "sk_your_api_key"  // API key for SyncUser calls
+EnableHMAC:    true
 ```
 
 The provider verifies signatures in the `X-RevenueCat-Signature` header.
@@ -516,7 +524,8 @@ func main() {
             "fluent_annual":   "fluent",
             "*":               "explorer", // Default tier
         },
-        Secret: os.Getenv("REVENUECAT_SECRET"),
+        WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+    APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
     })
     if err != nil {
         log.Fatal(err)
@@ -569,10 +578,11 @@ httpClient := &http.Client{
 }
 
 provider, _ := revenuecat.NewProvider(billing.Config{
-    Manager: manager,
-    TierMapping: tierMapping,
-    Secret: secret,
-    HTTPClient: httpClient,
+    Manager:       manager,
+    TierMapping:   tierMapping,
+    WebhookSecret: webhookSecret,
+    APIKey:        apiKey,
+    HTTPClient:    httpClient,
 })
 ```
 
@@ -580,10 +590,11 @@ provider, _ := revenuecat.NewProvider(billing.Config{
 
 ```go
 provider, _ := revenuecat.NewProvider(billing.Config{
-    Manager: manager,
-    TierMapping: tierMapping,
-    Secret: os.Getenv("REVENUECAT_HMAC_SECRET"),
-    EnableHMAC: true, // Enable HMAC signature verification
+    Manager:       manager,
+    TierMapping:   tierMapping,
+    WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+    APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
+    EnableHMAC:    true, // Enable HMAC signature verification
 })
 ```
 
@@ -606,7 +617,8 @@ provider, _ := revenuecat.NewProvider(billing.Config{
         // Default
         "*":                "free",
     },
-    Secret: secret,
+    WebhookSecret: webhookSecret,
+    APIKey:        apiKey,
 })
 ```
 
@@ -617,7 +629,7 @@ provider, _ := revenuecat.NewProvider(billing.Config{
 **Symptoms**: Webhooks are received but entitlements aren't updating.
 
 **Solutions**:
-1. **Check authentication**: Verify `Secret` matches RevenueCat webhook secret
+1. **Check authentication**: Verify `WebhookSecret` matches RevenueCat webhook secret
 2. **Check logs**: Look for error messages in webhook handler
 3. **Test event**: Send a `TEST` event from RevenueCat dashboard
 4. **Check tier mapping**: Verify entitlement ID is in `TierMapping`
@@ -636,7 +648,7 @@ log.Printf("Headers: %v", r.Header)
 **Solutions**:
 1. **Check user exists**: Verify user exists in RevenueCat dashboard
 2. **Check active entitlements**: User's subscription may have expired
-3. **Check API credentials**: Verify `Secret` is correct
+3. **Check API credentials**: Verify `APIKey` is correct
 4. **Check tier mapping**: Verify entitlement IDs match `TierMapping`
 
 **Debug**:
@@ -687,7 +699,7 @@ if err != nil {
 **Symptoms**: Webhook returns `401 Unauthorized`.
 
 **Solutions**:
-1. **Check secret**: Verify `Secret` matches RevenueCat webhook secret
+1. **Check secret**: Verify `WebhookSecret` matches RevenueCat webhook secret
 2. **Check HMAC setting**: If using HMAC, ensure `EnableHMAC: true`
 3. **Check header**: Verify `Authorization` or `X-RevenueCat-Signature` header is present
 
@@ -745,9 +757,10 @@ func NewProvider(config billing.Config) (*Provider, error)
 **Example**:
 ```go
 provider, err := revenuecat.NewProvider(billing.Config{
-    Manager: manager,
-    TierMapping: map[string]string{"premium_monthly": "premium"},
-    Secret: "rcsk_...",
+    Manager:       manager,
+    TierMapping:   map[string]string{"premium_monthly": "premium"},
+    WebhookSecret: "yWt",
+    APIKey:        "sk_",
 })
 ```
 
@@ -886,7 +899,8 @@ TierMapping: map[string]string{
 - **Rotate secrets** periodically
 
 ```go
-Secret: os.Getenv("REVENUECAT_SECRET"),
+WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
 ```
 
 ### 3. Error Handling

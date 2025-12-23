@@ -18,6 +18,8 @@ import (
 	"github.com/rs/zerolog"
 
 	ginMiddleware "github.com/mihaimyh/goquota/middleware/gin"
+	"github.com/mihaimyh/goquota/pkg/billing"
+	"github.com/mihaimyh/goquota/pkg/billing/revenuecat"
 	"github.com/mihaimyh/goquota/pkg/goquota"
 	zerolog_adapter "github.com/mihaimyh/goquota/pkg/goquota/logger/zerolog"
 	prometheus_adapter "github.com/mihaimyh/goquota/pkg/goquota/metrics/prometheus"
@@ -25,6 +27,7 @@ import (
 	redisStorage "github.com/mihaimyh/goquota/storage/redis"
 )
 
+//nolint:gocyclo // Comprehensive example demonstrating all features
 func main() {
 	ctx := context.Background()
 
@@ -60,7 +63,9 @@ func main() {
 
 	// Test Redis connection
 	if err := redisClient.Ping(ctx).Err(); err != nil {
-		log.Fatalf("Failed to connect to Redis: %v\nMake sure Redis is running (e.g., via Docker: docker-compose up -d redis)", err)
+		//nolint:gocritic // Intentional: log.Fatalf exits before defer runs, which is acceptable for example
+		log.Fatalf("Failed to connect to Redis: %v\n"+
+			"Make sure Redis is running (e.g., via Docker: docker-compose up -d redis)", err)
 	}
 	fmt.Println("   ✓ Connected to Redis")
 
@@ -153,7 +158,7 @@ func main() {
 		},
 		CircuitBreakerConfig: &goquota.CircuitBreakerConfig{
 			Enabled:          true,
-			FailureThreshold: 3,        // Open circuit after 3 consecutive failures
+			FailureThreshold: 3,                // Open circuit after 3 consecutive failures
 			ResetTimeout:     10 * time.Second, // Wait 10s before half-open
 		},
 		FallbackConfig: &goquota.FallbackConfig{
@@ -181,6 +186,42 @@ func main() {
 	fmt.Println("     - Fallback strategies enabled")
 	fmt.Println("     - Warning thresholds configured")
 	fmt.Println("     - Metrics and logging enabled")
+
+	// ============================================================
+	// 3b. Optional: Configure RevenueCat Billing Provider
+	// ============================================================
+	fmt.Println("3b. Configuring RevenueCat billing provider (optional)...")
+	var billingProvider billing.Provider
+	webhookSecret := os.Getenv("REVENUECAT_WEBHOOK_SECRET")
+	apiKey := os.Getenv("REVENUECAT_SECRET_API_KEY")
+	if webhookSecret == "" || apiKey == "" {
+		fmt.Println("   ⚠ RevenueCat disabled: REVENUECAT_WEBHOOK_SECRET or REVENUECAT_SECRET_API_KEY not set")
+	} else {
+		rcProvider, err := revenuecat.NewProvider(billing.Config{
+			Manager: manager,
+			TierMapping: map[string]string{
+				// Map RevenueCat entitlements/products to goquota tiers
+				"free_monthly":       "free",
+				"free_annual":        "free",
+				"pro_monthly":        "pro",
+				"pro_annual":         "pro",
+				"enterprise_monthly": "enterprise",
+				"enterprise_annual":  "enterprise",
+				"*":                  "free", // Default / unknown entitlements
+				"default":            "free",
+			},
+			WebhookSecret: webhookSecret,
+			APIKey:        apiKey,
+		})
+		if err != nil {
+			fmt.Printf("   ⚠ Failed to create RevenueCat provider: %v\n", err)
+		} else {
+			billingProvider = rcProvider
+			fmt.Println("   ✓ RevenueCat provider configured")
+			fmt.Println("     - Webhook endpoint: POST /webhooks/revenuecat")
+			fmt.Println("     - Restore purchases endpoint: POST /api/restore-purchases")
+		}
+	}
 
 	// ============================================================
 	// 4. Programmatic Demonstrations
@@ -252,16 +293,19 @@ func main() {
 	// 5. HTTP Server with Middleware
 	// ============================================================
 	// Setup secondary storage with test users for fallback demo
-	_ = secondaryStorage.SetEntitlement(ctx, &goquota.Entitlement{
+	if err := secondaryStorage.SetEntitlement(ctx, &goquota.Entitlement{
 		UserID:                user1,
 		Tier:                  "free",
 		SubscriptionStartDate: time.Now().UTC(),
 		UpdatedAt:             time.Now().UTC(),
-	})
+	}); err != nil {
+		logger.Warn("Failed to set entitlement in secondary storage", goquota.Field{Key: "error", Value: err})
+	}
 
 	// Start Prometheus metrics server in background
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
+		//nolint:gosec // Example code: timeout not required for metrics endpoint
 		if err := http.ListenAndServe(":9090", nil); err != nil {
 			logger.Error("Metrics server failed", goquota.Field{Key: "error", Value: err})
 		}
@@ -323,6 +367,45 @@ func main() {
 		})
 	})
 
+	// ============================================================
+	// 5a. Billing Integration Endpoints (RevenueCat)
+	// ============================================================
+	if billingProvider != nil {
+		// RevenueCat webhook endpoint (used by RevenueCat to push entitlement changes)
+		r.POST("/webhooks/revenuecat", gin.WrapH(billingProvider.WebhookHandler()))
+
+		// Restore purchases / manual sync endpoint
+		r.POST("/api/restore-purchases", func(c *gin.Context) {
+			// Prefer explicit query parameter, fall back to authenticated user header
+			userID := c.Query("user_id")
+			if userID == "" {
+				userID = c.GetHeader("X-User-ID")
+			}
+			if userID == "" {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": "missing user identifier (provide ?user_id=... or X-User-ID header)",
+				})
+				return
+			}
+
+			tier, err := billingProvider.SyncUser(c.Request.Context(), userID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error":   "failed to sync purchases",
+					"details": err.Error(),
+				})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{
+				"user_id": userID,
+				"tier":    tier,
+			})
+		})
+	} else {
+		fmt.Println("   ℹ Billing endpoints not registered (RevenueCat provider disabled)")
+	}
+
 	// Protected API endpoints with middleware
 	api := r.Group("/api")
 	api.Use(ginMiddleware.Middleware(ginMiddleware.Config{
@@ -368,28 +451,27 @@ func main() {
 			})
 		},
 	}))
-	{
-		api.GET("/data", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{
-				"message": "Data retrieved successfully",
-				"cost":    1,
-			})
-		})
 
-		api.POST("/write", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{
-				"message": "Write operation completed",
-				"cost":    5,
-			})
+	api.GET("/data", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Data retrieved successfully",
+			"cost":    1,
 		})
+	})
 
-		api.POST("/expensive", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{
-				"message": "Expensive operation completed",
-				"cost":    10,
-			})
+	api.POST("/write", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Write operation completed",
+			"cost":    5,
 		})
-	}
+	})
+
+	api.POST("/expensive", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Expensive operation completed",
+			"cost":    10,
+		})
+	})
 
 	// Print server information
 	fmt.Println("   ✓ HTTP server configured with:")
@@ -423,7 +505,11 @@ func demoBasicQuotaOperations(ctx context.Context, manager *goquota.Manager, use
 	fmt.Println("--- Demo 1: Basic Quota Operations ---")
 
 	// Get initial quota
-	usage, _ := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	usage, err := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("Error getting quota: %v\n", err)
+		return
+	}
 	fmt.Printf("Initial monthly quota: %d/%d used\n", usage.Used, usage.Limit)
 
 	// Consume monthly quota
@@ -437,7 +523,11 @@ func demoBasicQuotaOperations(ctx context.Context, manager *goquota.Manager, use
 
 	// Consume daily quota
 	fmt.Println("Consuming 10 API calls (daily)...")
-	dailyUsage, _ := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeDaily)
+	dailyUsage, err := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeDaily)
+	if err != nil {
+		fmt.Printf("Error getting daily quota: %v\n", err)
+		return
+	}
 	newUsedDaily, err := manager.Consume(ctx, userID, "api_calls", 10, goquota.PeriodTypeDaily)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -446,7 +536,11 @@ func demoBasicQuotaOperations(ctx context.Context, manager *goquota.Manager, use
 	}
 
 	// Get updated quota
-	usage, _ = manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	usage, err = manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("Error getting updated quota: %v\n", err)
+		return
+	}
 	fmt.Printf("Final monthly quota: %d/%d (%.1f%%)\n\n", usage.Used, usage.Limit,
 		float64(usage.Used)/float64(usage.Limit)*100)
 }
@@ -504,7 +598,11 @@ func demoIdempotencyKeys(ctx context.Context, manager *goquota.Manager, userID s
 
 	// First request with idempotency key
 	fmt.Printf("First request with idempotency key '%s'...\n", idempotencyKey)
-	usage1, _ := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	usage1, err := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("Error getting quota: %v\n", err)
+		return
+	}
 	newUsed1, err := manager.Consume(
 		ctx,
 		userID,
@@ -560,18 +658,26 @@ func demoRefunds(ctx context.Context, manager *goquota.Manager, userID string) {
 	fmt.Println("--- Demo 4: Refunds ---")
 
 	// Get initial usage
-	usageBefore, _ := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	usageBefore, err := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("Error getting quota: %v\n", err)
+		return
+	}
 	fmt.Printf("Usage before: %d/%d\n", usageBefore.Used, usageBefore.Limit)
 
 	// Consume quota for an operation
 	fmt.Println("Consuming 5 API calls for an operation...")
-	_, err := manager.Consume(ctx, userID, "api_calls", 5, goquota.PeriodTypeMonthly)
+	_, err = manager.Consume(ctx, userID, "api_calls", 5, goquota.PeriodTypeMonthly)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
 
-	usageAfterConsume, _ := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	usageAfterConsume, err := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("Error getting quota after consume: %v\n", err)
+		return
+	}
 	fmt.Printf("Usage after consume: %d/%d\n", usageAfterConsume.Used, usageAfterConsume.Limit)
 
 	// Operation fails, refund the quota
@@ -608,7 +714,11 @@ func demoRefunds(ctx context.Context, manager *goquota.Manager, userID string) {
 	}
 
 	// Verify quota restored
-	usageAfterRefund, _ := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	usageAfterRefund, err := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("Error getting quota after refund: %v\n", err)
+		return
+	}
 	fmt.Printf("\nUsage after refund: %d/%d\n", usageAfterRefund.Used, usageAfterRefund.Limit)
 	if usageAfterRefund.Used == usageBefore.Used {
 		fmt.Println("  ✓ Quota successfully restored to original value")
@@ -621,19 +731,27 @@ func demoTierChanges(ctx context.Context, manager *goquota.Manager, userID strin
 
 	// Start with free tier
 	fmt.Println("Starting with 'free' tier (1000 monthly quota)...")
-	usage, _ := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	usage, err := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("Error getting quota: %v\n", err)
+		return
+	}
 	fmt.Printf("Initial usage: %d/%d (%.1f%%)\n", usage.Used, usage.Limit,
 		float64(usage.Used)/float64(usage.Limit)*100)
 
 	// Consume 50% of free tier quota
 	fmt.Println("\nConsuming 500 API calls (50% of free tier)...")
-	_, err := manager.Consume(ctx, userID, "api_calls", 500, goquota.PeriodTypeMonthly)
+	_, err = manager.Consume(ctx, userID, "api_calls", 500, goquota.PeriodTypeMonthly)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
 
-	usage, _ = manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	usage, err = manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("Error getting quota after consumption: %v\n", err)
+		return
+	}
 	fmt.Printf("Usage after consumption: %d/%d (%.1f%%)\n", usage.Used, usage.Limit,
 		float64(usage.Used)/float64(usage.Limit)*100)
 
@@ -646,7 +764,11 @@ func demoTierChanges(ctx context.Context, manager *goquota.Manager, userID strin
 	}
 
 	// Get updated quota (should be prorated)
-	usage, _ = manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	usage, err = manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("Error getting quota after upgrade: %v\n", err)
+		return
+	}
 	fmt.Printf("Usage after upgrade: %d/%d (%.1f%%)\n", usage.Used, usage.Limit,
 		float64(usage.Used)/float64(usage.Limit)*100)
 	fmt.Println("  ✓ Proration preserved: still at ~50% of new limit")
@@ -658,7 +780,11 @@ func demoSoftLimits(ctx context.Context, manager *goquota.Manager, userID string
 	fmt.Println("Warning thresholds configured: 50%, 80%, 90%")
 
 	// Get current usage
-	usage, _ := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	usage, err := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("Error getting quota: %v\n", err)
+		return
+	}
 	fmt.Printf("Current usage: %d/%d (%.1f%%)\n", usage.Used, usage.Limit,
 		float64(usage.Used)/float64(usage.Limit)*100)
 
@@ -677,7 +803,11 @@ func demoSoftLimits(ctx context.Context, manager *goquota.Manager, userID string
 		fmt.Println("  Usage already exceeds 80% threshold")
 	}
 
-	usage, _ = manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	usage, err = manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("Error getting final quota: %v\n", err)
+		return
+	}
 	fmt.Printf("Final usage: %d/%d (%.1f%%)\n\n", usage.Used, usage.Limit,
 		float64(usage.Used)/float64(usage.Limit)*100)
 }
@@ -721,7 +851,7 @@ func demoFallbackStrategies() {
 // Warning handler implementation
 type warningHandler struct{}
 
-func (h *warningHandler) OnWarning(ctx context.Context, usage *goquota.Usage, threshold float64) {
+func (h *warningHandler) OnWarning(_ context.Context, usage *goquota.Usage, threshold float64) {
 	pct := float64(usage.Used) / float64(usage.Limit) * 100
 	fmt.Printf("  ⚠️  WARNING: User %s reached %.0f%% threshold (%.1f%% used, %d/%d)\n",
 		usage.UserID, threshold*100, pct, usage.Used, usage.Limit)

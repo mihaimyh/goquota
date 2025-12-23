@@ -106,7 +106,8 @@ provider, err := revenuecat.NewProvider(billing.Config{
         "fluent_monthly":  "fluent",
         "*":               "explorer", // Default tier for unknown entitlements
     },
-    Secret: os.Getenv("REVENUECAT_SECRET"),
+    WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+    APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
 })
 if err != nil {
     log.Fatal(err)
@@ -167,7 +168,8 @@ provider, err := revenuecat.NewProvider(billing.Config{
         "premium_monthly": "premium",
         "*":               "free",
     },
-    Secret: os.Getenv("REVENUECAT_SECRET"),
+    WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+    APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
 })
 ```
 
@@ -181,7 +183,8 @@ For complete documentation, see [RevenueCat Provider Documentation](revenuecat/R
 |-------|------|----------|-------------|
 | `Manager` | `*goquota.Manager` | Yes | The goquota Manager instance |
 | `TierMapping` | `map[string]string` | Yes | Maps provider IDs to goquota tiers |
-| `Secret` | `string` | Yes | API key or webhook secret |
+| `WebhookSecret` | `string` | Yes | Webhook secret for verifying incoming webhook requests |
+| `APIKey` | `string` | Yes | API key for outbound API calls (e.g. SyncUser) |
 | `HTTPClient` | `*http.Client` | No | Custom HTTP client (default: 10s timeout) |
 | `EnableHMAC` | `bool` | No | Enable HMAC signature verification |
 
@@ -222,7 +225,8 @@ In your RevenueCat dashboard:
 ### 2. Environment Variables
 
 ```bash
-export REVENUECAT_SECRET="rcsk_..."
+export REVENUECAT_WEBHOOK_SECRET="yWt"
+export REVENUECAT_SECRET_API_KEY="sk_"
 export REVENUECAT_ENABLE_HMAC="false"  # Optional
 ```
 
@@ -428,9 +432,11 @@ TierMapping: map[string]string{
 - **Never commit secrets** to version control
 - **Use environment variables** or secret management systems
 - **Rotate secrets** periodically
+- **Use separate secrets** for webhooks and API calls
 
 ```go
-Secret: os.Getenv("REVENUECAT_SECRET"),
+WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
 ```
 
 ### 3. Error Handling
@@ -484,11 +490,12 @@ The `billing.Provider` interface is designed to support multiple providers. Futu
 import "github.com/mihaimyh/goquota/pkg/billing/stripe"
 
 provider, err := stripe.NewProvider(billing.Config{
-    Manager: manager,
-    TierMapping: map[string]string{
+    Manager:       manager,
+    TierMapping:   map[string]string{
         "price_premium": "premium",
     },
-    Secret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+    WebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+    APIKey:        os.Getenv("STRIPE_API_KEY"),
 })
 ```
 
@@ -498,11 +505,12 @@ provider, err := stripe.NewProvider(billing.Config{
 import "github.com/mihaimyh/goquota/pkg/billing/paypal"
 
 provider, err := paypal.NewProvider(billing.Config{
-    Manager: manager,
-    TierMapping: map[string]string{
+    Manager:       manager,
+    TierMapping:   map[string]string{
         "premium_subscription": "premium",
     },
-    Secret: os.Getenv("PAYPAL_CLIENT_SECRET"),
+    WebhookSecret: os.Getenv("PAYPAL_WEBHOOK_SECRET"),
+    APIKey:        os.Getenv("PAYPAL_CLIENT_SECRET"),
 })
 ```
 
@@ -566,7 +574,8 @@ func main() {
             "scholar_monthly": "scholar",
             "*":               "explorer",
         },
-        Secret: os.Getenv("REVENUECAT_SECRET"),
+        WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+        APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
     })
     
     // 3. Register webhook
@@ -605,10 +614,11 @@ httpClient := &http.Client{
 }
 
 provider, _ := revenuecat.NewProvider(billing.Config{
-    Manager: manager,
-    TierMapping: tierMapping,
-    Secret: secret,
-    HTTPClient: httpClient,
+    Manager:       manager,
+    TierMapping:   tierMapping,
+    WebhookSecret: webhookSecret,
+    APIKey:        apiKey,
+    HTTPClient:    httpClient,
 })
 ```
 
@@ -616,10 +626,11 @@ provider, _ := revenuecat.NewProvider(billing.Config{
 
 ```go
 provider, _ := revenuecat.NewProvider(billing.Config{
-    Manager: manager,
-    TierMapping: tierMapping,
-    Secret: os.Getenv("REVENUECAT_HMAC_SECRET"),
-    EnableHMAC: true, // Enable HMAC signature verification
+    Manager:       manager,
+    TierMapping:   tierMapping,
+    WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+    APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
+    EnableHMAC:    true, // Enable HMAC signature verification
 })
 ```
 
@@ -627,7 +638,7 @@ provider, _ := revenuecat.NewProvider(billing.Config{
 
 ### Webhook Not Processing
 
-1. **Check authentication**: Verify `Secret` matches RevenueCat webhook secret
+1. **Check authentication**: Verify `WebhookSecret` matches RevenueCat webhook secret
 2. **Check endpoint**: Ensure webhook URL is accessible
 3. **Check logs**: Look for error messages in webhook handler
 4. **Test event**: Send a `TEST` event from RevenueCat dashboard
@@ -661,11 +672,12 @@ type Provider interface {
 
 ```go
 type Config struct {
-    Manager     *goquota.Manager
-    TierMapping map[string]string
-    Secret      string
-    HTTPClient  *http.Client  // Optional
-    EnableHMAC  bool          // Optional
+    Manager       *goquota.Manager
+    TierMapping   map[string]string
+    WebhookSecret string
+    APIKey        string
+    HTTPClient    *http.Client  // Optional
+    EnableHMAC    bool          // Optional
 }
 ```
 

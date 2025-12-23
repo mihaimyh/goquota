@@ -23,14 +23,15 @@ const (
 
 // Provider implements the billing.Provider interface for RevenueCat
 type Provider struct {
-	manager     *goquota.Manager
-	config      billing.Config
-	httpClient  *http.Client
-	rateLimiter *rateLimiter
-	tierMapping map[string]string
-	defaultTier string
-	secret      []byte
-	acceptHMAC  bool
+	manager       *goquota.Manager
+	config        billing.Config
+	httpClient    *http.Client
+	rateLimiter   *rateLimiter
+	tierMapping   map[string]string
+	defaultTier   string
+	webhookSecret []byte
+	apiKey        string
+	acceptHMAC    bool
 }
 
 // NewProvider creates a new RevenueCat billing provider
@@ -47,11 +48,13 @@ func NewProvider(config billing.Config) (*Provider, error) {
 		}
 	}
 
-	// Setup secret
-	secret := []byte(strings.TrimSpace(config.Secret))
-	secretStr := string(secret)
-	if strings.HasPrefix(strings.ToLower(secretStr), "bearer ") {
-		secret = []byte(strings.TrimSpace(secretStr[len("bearer "):]))
+	// Setup secrets / API keys
+	webhookSecret := []byte(strings.TrimSpace(config.WebhookSecret))
+	apiKey := strings.TrimSpace(config.APIKey)
+
+	// Allow API key to be provided as a Bearer token and strip the prefix.
+	if strings.HasPrefix(strings.ToLower(apiKey), "bearer ") {
+		apiKey = strings.TrimSpace(apiKey[len("bearer "):])
 	}
 
 	// Get default tier - use "explorer" as fallback
@@ -84,14 +87,15 @@ func NewProvider(config billing.Config) (*Provider, error) {
 	}()
 
 	return &Provider{
-		manager:     config.Manager,
-		config:      config,
-		httpClient:  httpClient,
-		rateLimiter: limiter,
-		tierMapping: tierMapping,
-		defaultTier: defaultTier,
-		secret:      secret,
-		acceptHMAC:  config.EnableHMAC,
+		manager:       config.Manager,
+		config:        config,
+		httpClient:    httpClient,
+		rateLimiter:   limiter,
+		tierMapping:   tierMapping,
+		defaultTier:   defaultTier,
+		webhookSecret: webhookSecret,
+		apiKey:        apiKey,
+		acceptHMAC:    config.EnableHMAC,
 	}, nil
 }
 
@@ -152,7 +156,7 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(p.secret) == 0 {
+	if len(p.webhookSecret) == 0 {
 		http.Error(w, "webhook not configured", http.StatusServiceUnavailable)
 		return
 	}

@@ -13,6 +13,7 @@ This example demonstrates all goquota features in a single application:
 - **Tier Changes & Proration** - Mid-cycle upgrades/downgrades
 - **Soft Limits & Warnings** - Threshold-based callbacks
 - **HTTP Middleware** - Gin framework with dynamic cost calculation
+ - **Billing Integration (optional)** - RevenueCat provider for automatic entitlement → tier sync
 
 ## Running Locally
 
@@ -26,6 +27,15 @@ This example demonstrates all goquota features in a single application:
 2. **Run the example**:
    ```bash
    go run examples/comprehensive/main.go
+   ```
+
+3. **(Optional) Enable RevenueCat billing integration**:
+   ```bash
+   export REVENUECAT_WEBHOOK_SECRET="yWt"
+   export REVENUECAT_SECRET_API_KEY="sk_"
+   # or on Windows PowerShell:
+   # $env:REVENUECAT_WEBHOOK_SECRET="..."
+   # $env:REVENUECAT_SECRET_API_KEY="..."
    ```
 
 The example will:
@@ -75,7 +85,19 @@ curl -X POST -H "X-User-ID: user1_free" http://localhost:8080/api/expensive
 
 # View Prometheus metrics
 curl http://localhost:9090/metrics
+
+# (Optional) Restore purchases / sync from RevenueCat
+curl -X POST "http://localhost:8080/api/restore-purchases?user_id=user1_free"
+
+# (Optional) RevenueCat webhook (normally called by RevenueCat, not manually)
+curl -X POST "http://localhost:8080/webhooks/revenuecat" \
+  -H "Authorization: Bearer $REVENUECAT_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"event":{"id":"test","type":"TEST","app_user_id":"user1_free"}}'
 ```
+
+> Note: Billing endpoints (`/webhooks/revenuecat`, `/api/restore-purchases`) are only
+> registered when `REVENUECAT_SECRET` is set and the provider initializes successfully.
 
 ## What the Example Demonstrates
 
@@ -102,6 +124,9 @@ curl http://localhost:9090/metrics
 
 - `REDIS_HOST` - Redis connection string (default: `localhost:6379`)
   - Use `redis:6379` when running in Docker Compose
+ - `REVENUECAT_WEBHOOK_SECRET` - RevenueCat webhook secret used to verify `/webhooks/revenuecat` (optional)
+ - `REVENUECAT_SECRET_API_KEY` - RevenueCat API key used by `SyncUser` for `/api/restore-purchases` (optional)
+   - If either is unset, the example still runs but billing integration is disabled
 
 ## Files
 
