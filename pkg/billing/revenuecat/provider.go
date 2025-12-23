@@ -74,6 +74,15 @@ func NewProvider(config billing.Config) (*Provider, error) {
 	// Setup rate limiter
 	limiter := newRateLimiter(defaultRateLimitRequests, defaultRateLimitWindow)
 
+	// Start background cleanup to prevent unbounded growth of the IP map
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			limiter.Cleanup()
+		}
+	}()
+
 	return &Provider{
 		manager:     config.Manager,
 		config:      config,

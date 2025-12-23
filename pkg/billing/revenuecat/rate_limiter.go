@@ -35,12 +35,6 @@ func (rl *rateLimiter) allow(ip string) bool {
 
 	now := time.Now()
 
-	// Cleanup expired entries periodically (every 100 requests to avoid overhead)
-	// This prevents memory leak from indefinite map growth
-	if len(rl.requests) > 0 && len(rl.requests)%100 == 0 {
-		rl.cleanupExpired(now)
-	}
-
 	b, exists := rl.requests[ip]
 
 	if !exists || now.After(b.resetAt) {
