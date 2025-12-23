@@ -80,7 +80,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(goquota_comprehensive_quota_consumption_total{success=\"true\"}[5m])) / sum(rate(goquota_comprehensive_quota_consumption_total[5m]))",
+          "expr": "(sum(rate(goquota_comprehensive_quota_consumption_total{success=\"true\"}[5m])) / sum(rate(goquota_comprehensive_quota_consumption_total[5m]))) or vector(0)",
           "refId": "A"
         }
       ],
@@ -264,7 +264,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.50, sum(rate(goquota_comprehensive_quota_consumption_amount_bucket[5m])) by (le, resource, tier))",
+          "expr": "histogram_quantile(0.50, sum(rate(goquota_comprehensive_quota_consumption_amount_bucket[5m])) by (le, resource, tier)) or vector(0)",
           "legendFormat": "p50 - {{resource}} - {{tier}}",
           "refId": "A"
         },
@@ -273,7 +273,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum(rate(goquota_comprehensive_quota_consumption_amount_bucket[5m])) by (le, resource, tier))",
+          "expr": "histogram_quantile(0.95, sum(rate(goquota_comprehensive_quota_consumption_amount_bucket[5m])) by (le, resource, tier)) or vector(0)",
           "legendFormat": "p95 - {{resource}} - {{tier}}",
           "refId": "B"
         },
@@ -282,7 +282,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum(rate(goquota_comprehensive_quota_consumption_amount_bucket[5m])) by (le, resource, tier))",
+          "expr": "histogram_quantile(0.99, sum(rate(goquota_comprehensive_quota_consumption_amount_bucket[5m])) by (le, resource, tier)) or vector(0)",
           "legendFormat": "p99 - {{resource}} - {{tier}}",
           "refId": "C"
         }

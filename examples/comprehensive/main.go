@@ -151,6 +151,11 @@ func main() {
 			EntitlementTTL: 5 * time.Minute,
 			UsageTTL:       30 * time.Second,
 		},
+		CircuitBreakerConfig: &goquota.CircuitBreakerConfig{
+			Enabled:          true,
+			FailureThreshold: 3,        // Open circuit after 3 consecutive failures
+			ResetTimeout:     10 * time.Second, // Wait 10s before half-open
+		},
 		FallbackConfig: &goquota.FallbackConfig{
 			Enabled:                       true,
 			FallbackToCache:               true,
