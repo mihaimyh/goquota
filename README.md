@@ -21,6 +21,7 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Fallback Strategies** - Graceful degradation when storage is unavailable (cache, optimistic, secondary storage)
 - **Observability** - Built-in Prometheus metrics and structured logging
 - **HTTP Middlewares** - Easy integration with standard `net/http` servers, Gin, Echo, and Fiber frameworks with rate limit headers
+- **Billing Provider Integration** - Unified interface for RevenueCat, Stripe, and other payment providers with automatic webhook processing
 
 ## Installation
 
@@ -380,6 +381,44 @@ The library exposes Prometheus metrics by default via the `metrics` package.
 - `goquota_fallback_hits_total{strategy="cache"}`
 - `goquota_rate_limit_check_duration_seconds{resource="api_calls"}`
 - `goquota_rate_limit_exceeded_total{resource="api_calls"}`
+
+## Billing Provider Integration
+
+`goquota` includes a unified billing provider interface that automatically processes webhooks from payment providers (RevenueCat, Stripe, etc.) and updates user entitlements in real-time.
+
+### Features
+
+- **Provider Agnostic**: Switch between RevenueCat, Stripe, or any provider with zero code changes
+- **Automatic Webhook Processing**: Real-time entitlement updates from payment providers
+- **Idempotent**: Handles duplicate and out-of-order webhook deliveries safely
+- **Secure**: Built-in rate limiting, DoS protection, and signature verification
+
+### Quick Example
+
+```go
+import (
+    "github.com/mihaimyh/goquota/pkg/billing"
+    "github.com/mihaimyh/goquota/pkg/billing/revenuecat"
+)
+
+// Create billing provider
+provider, _ := revenuecat.NewProvider(billing.Config{
+    Manager: manager,
+    TierMapping: map[string]string{
+        "premium_monthly": "premium",
+        "*":               "free",
+    },
+    Secret: os.Getenv("REVENUECAT_SECRET"),
+})
+
+// Register webhook endpoint
+http.Handle("/webhooks/revenuecat", provider.WebhookHandler())
+
+// Sync user (Restore Purchases)
+tier, _ := provider.SyncUser(ctx, userID)
+```
+
+See [pkg/billing/README.md](pkg/billing/README.md) for complete documentation.
 
 ## Supported Frameworks
 
