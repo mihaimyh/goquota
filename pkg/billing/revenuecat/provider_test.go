@@ -169,7 +169,9 @@ func TestProvider_Webhook_Idempotency(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "event-1",
 			Type:           "INITIAL_PURCHASE",
@@ -460,7 +462,9 @@ func TestProvider_Webhook_TestEvent(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:          "test-event",
 			Type:        "TEST",
@@ -533,7 +537,9 @@ func createTestPayload(userID, entitlementID string, timestamp time.Time) webhoo
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "test-event",
 			Type:           "INITIAL_PURCHASE",
@@ -596,7 +602,9 @@ func TestProvider_Webhook_RenewalEvent(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "renewal-event",
 			Type:           "RENEWAL",
@@ -663,7 +671,9 @@ func TestProvider_Webhook_ExpirationEvent(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "expiration-event",
 			Type:           "EXPIRATION",
@@ -729,7 +739,9 @@ func TestProvider_Webhook_CancellationEvent(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "cancellation-event",
 			Type:           "CANCELLATION",
@@ -837,7 +849,9 @@ func TestProvider_Webhook_MissingUserID(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:   "test-event",
 			Type: "INITIAL_PURCHASE",
@@ -1322,7 +1336,9 @@ func TestProvider_Webhook_SubscriberEntitlements(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:        "test-event",
 			Type:      "INITIAL_PURCHASE",
@@ -1331,7 +1347,7 @@ func TestProvider_Webhook_SubscriberEntitlements(t *testing.T) {
 			// No EntitlementIDs in event, should fall back to subscriber
 			TimestampMs: time.Now().UnixMilli(),
 		},
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -1391,7 +1407,9 @@ func TestProvider_Webhook_InactiveEntitlement(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:          "test-event",
 			Type:        "INITIAL_PURCHASE",
@@ -1399,7 +1417,7 @@ func TestProvider_Webhook_InactiveEntitlement(t *testing.T) {
 			ProductID:   "scholar_monthly",
 			TimestampMs: time.Now().UnixMilli(),
 		},
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -1762,7 +1780,9 @@ func TestProvider_Webhook_ExpiredEntitlementInSubscriber(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "test-event",
 			Type:           "INITIAL_PURCHASE",
@@ -1771,7 +1791,7 @@ func TestProvider_Webhook_ExpiredEntitlementInSubscriber(t *testing.T) {
 			EntitlementIDs: []string{"scholar_monthly"},
 			TimestampMs:    time.Now().UnixMilli(),
 		},
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -1833,7 +1853,9 @@ func TestProvider_Webhook_GracePeriod(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "expiration-event",
 			Type:           "EXPIRATION",
@@ -1894,7 +1916,9 @@ func TestProvider_Webhook_EventEntitlementID(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:            "test-event",
 			Type:          "INITIAL_PURCHASE",
@@ -2003,7 +2027,9 @@ func TestProvider_Webhook_NoEntitlementsInEvent(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:        "test-event",
 			Type:      "INITIAL_PURCHASE",
@@ -2302,7 +2328,9 @@ func TestProvider_Webhook_ExpirationAtMsZero(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "test-event",
 			Type:           "INITIAL_PURCHASE",
@@ -2366,7 +2394,9 @@ func TestProvider_Webhook_PurchaseDateMs(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "test-event",
 			Type:           "INITIAL_PURCHASE",
@@ -2509,7 +2539,9 @@ func TestProvider_Webhook_TierChangeToDefault(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "expiration-event",
 			Type:           "EXPIRATION",
@@ -2618,7 +2650,9 @@ func TestProvider_Webhook_CustomerInfoEntitlements(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:        "test-event",
 			Type:      "INITIAL_PURCHASE",
@@ -2627,7 +2661,7 @@ func TestProvider_Webhook_CustomerInfoEntitlements(t *testing.T) {
 			// No EntitlementIDs in event, no Subscriber entitlements
 			TimestampMs: time.Now().UnixMilli(),
 		},
-		CustomerInfo: entitlementContainer{
+		CustomerInfo: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -2687,7 +2721,9 @@ func TestProvider_Webhook_ExpirationAtMsInEvent(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "test-event",
 			Type:           "INITIAL_PURCHASE",
@@ -2758,7 +2794,9 @@ func TestProvider_Webhook_ExpirationAtMsInSubscriber(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "test-event",
 			Type:           "INITIAL_PURCHASE",
@@ -2768,7 +2806,7 @@ func TestProvider_Webhook_ExpirationAtMsInSubscriber(t *testing.T) {
 			ExpirationAtMs: 0, // No expiration in event
 			TimestampMs:    time.Now().UnixMilli(),
 		},
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -2839,7 +2877,9 @@ func TestProvider_Webhook_BILLING_ISSUEEvent(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "billing-issue-event",
 			Type:           "BILLING_ISSUE",
@@ -2902,7 +2942,9 @@ func TestProvider_Webhook_SUBSCRIPTION_PAUSEDEvent(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "paused-event",
 			Type:           "SUBSCRIPTION_PAUSED",
@@ -2990,7 +3032,7 @@ func TestEntitlement_ParseTimes_Nil(_ *testing.T) {
 
 func TestWebhookPayload_ResolveEntitlement_CaseInsensitive(t *testing.T) {
 	payload := webhookPayload{
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"SCHOLAR_MONTHLY": { // Uppercase key
 					ProductIdentifier: "scholar_monthly",
@@ -3013,7 +3055,7 @@ func TestWebhookPayload_ResolveEntitlement_CaseInsensitive(t *testing.T) {
 
 func TestWebhookPayload_ResolveEntitlement_FromCustomerInfo(t *testing.T) {
 	payload := webhookPayload{
-		CustomerInfo: entitlementContainer{
+		CustomerInfo: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -3042,11 +3084,13 @@ func TestWebhookPayload_ResolveEntitlement_EmptyEntitlementID(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			EntitlementID: "scholar_monthly",
 		},
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -3091,7 +3135,9 @@ func TestProvider_Webhook_ExtractTierFromDetails_NoExpirationInEventOrSubscriber
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "test-event",
 			Type:           "INITIAL_PURCHASE",
@@ -3101,7 +3147,7 @@ func TestProvider_Webhook_ExtractTierFromDetails_NoExpirationInEventOrSubscriber
 			ExpirationAtMs: 0, // No expiration
 			TimestampMs:    time.Now().UnixMilli(),
 		},
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -3166,7 +3212,9 @@ func TestProvider_Webhook_ExtractTierFromDetails_MultipleEntitlements(t *testing
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:          "test-event",
 			Type:        "INITIAL_PURCHASE",
@@ -3174,7 +3222,7 @@ func TestProvider_Webhook_ExtractTierFromDetails_MultipleEntitlements(t *testing
 			ProductID:   "scholar_monthly",
 			TimestampMs: time.Now().UnixMilli(),
 		},
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -3239,7 +3287,9 @@ func TestProvider_Webhook_ExtractTierFromDetails_InvalidExpirationDate(t *testin
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "test-event",
 			Type:           "INITIAL_PURCHASE",
@@ -3248,7 +3298,7 @@ func TestProvider_Webhook_ExtractTierFromDetails_InvalidExpirationDate(t *testin
 			EntitlementIDs: []string{"scholar_monthly"},
 			TimestampMs:    time.Now().UnixMilli(),
 		},
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -3311,7 +3361,9 @@ func TestProvider_Webhook_ExtractTierFromDetails_NoActiveEntitlements(t *testing
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:          "test-event",
 			Type:        "INITIAL_PURCHASE",
@@ -3319,7 +3371,7 @@ func TestProvider_Webhook_ExtractTierFromDetails_NoActiveEntitlements(t *testing
 			ProductID:   "scholar_monthly",
 			TimestampMs: time.Now().UnixMilli(),
 		},
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -3380,7 +3432,9 @@ func TestProvider_Webhook_ExtractTierFromDetails_Inactive(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:          "test-event",
 			Type:        "INITIAL_PURCHASE",
@@ -3388,7 +3442,7 @@ func TestProvider_Webhook_ExtractTierFromDetails_Inactive(t *testing.T) {
 			ProductID:   "scholar_monthly",
 			TimestampMs: time.Now().UnixMilli(),
 		},
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -3448,7 +3502,9 @@ func TestProvider_Webhook_ExtractTierFromDetails_NoExpiration(t *testing.T) {
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:          "test-event",
 			Type:        "INITIAL_PURCHASE",
@@ -3456,7 +3512,7 @@ func TestProvider_Webhook_ExtractTierFromDetails_NoExpiration(t *testing.T) {
 			ProductID:   "scholar_monthly",
 			TimestampMs: time.Now().UnixMilli(),
 		},
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -3517,7 +3573,9 @@ func TestProvider_Webhook_ExtractTierFromDetails_ExpiresDateInSubscriber(t *test
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "test-event",
 			Type:           "INITIAL_PURCHASE",
@@ -3527,7 +3585,7 @@ func TestProvider_Webhook_ExtractTierFromDetails_ExpiresDateInSubscriber(t *test
 			ExpirationAtMs: 0, // No expiration in event
 			TimestampMs:    time.Now().UnixMilli(),
 		},
-		Subscriber: entitlementContainer{
+		Subscriber: &entitlementContainer{
 			Entitlements: map[string]entitlement{
 				"scholar_monthly": {
 					ProductIdentifier: "scholar_monthly",
@@ -3596,7 +3654,9 @@ func TestProvider_Webhook_ExtractTierFromDetails_InvalidPurchaseDate(t *testing.
 			ExpirationReason string   `json:"expiration_reason"`
 			ExpirationAtMs   int64    `json:"expiration_at_ms"`
 			TimestampMs      int64    `json:"timestamp_ms"`
+			EventTimestampMs int64    `json:"event_timestamp_ms"`
 			PurchaseDateMs   int64    `json:"purchase_date_ms"`
+			PurchasedAtMs    int64    `json:"purchased_at_ms"`
 		}{
 			ID:             "test-event",
 			Type:           "INITIAL_PURCHASE",

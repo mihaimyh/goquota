@@ -1,0 +1,7 @@
+version: "2"
+tunnels:
+  webhook:
+    addr: comprehensive-example:8080
+    proto: http
+    inspect: true
+

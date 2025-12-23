@@ -25,12 +25,16 @@ type webhookPayload struct {
 		ProductID        string   `json:"product_id"`
 		ExpirationReason string   `json:"expiration_reason"`
 		ExpirationAtMs   int64    `json:"expiration_at_ms"`
-		TimestampMs      int64    `json:"timestamp_ms"`
-		PurchaseDateMs   int64    `json:"purchase_date_ms"`
+		// Support both field name variations for timestamp
+		TimestampMs      int64 `json:"timestamp_ms"`
+		EventTimestampMs int64 `json:"event_timestamp_ms"`
+		// Support both field name variations for purchase date
+		PurchaseDateMs int64 `json:"purchase_date_ms"`
+		PurchasedAtMs  int64 `json:"purchased_at_ms"`
 	} `json:"event"`
 
-	Subscriber   entitlementContainer `json:"subscriber"`
-	CustomerInfo entitlementContainer `json:"customer_info"`
+	Subscriber   *entitlementContainer `json:"subscriber,omitempty"`
+	CustomerInfo *entitlementContainer `json:"customer_info,omitempty"`
 }
 
 type entitlementContainer struct {
@@ -77,16 +81,20 @@ func (p *webhookPayload) resolveEntitlement(entitlementID string) *entitlement {
 
 	// Case-insensitive fallback
 	if entitlementID != "" {
-		for key, ent := range p.Subscriber.Entitlements {
-			if strings.EqualFold(key, entitlementID) {
-				ent.parseTimes()
-				return &ent
+		if p.Subscriber != nil && p.Subscriber.Entitlements != nil {
+			for key, ent := range p.Subscriber.Entitlements {
+				if strings.EqualFold(key, entitlementID) {
+					ent.parseTimes()
+					return &ent
+				}
 			}
 		}
-		for key, ent := range p.CustomerInfo.Entitlements {
-			if strings.EqualFold(key, entitlementID) {
-				ent.parseTimes()
-				return &ent
+		if p.CustomerInfo != nil && p.CustomerInfo.Entitlements != nil {
+			for key, ent := range p.CustomerInfo.Entitlements {
+				if strings.EqualFold(key, entitlementID) {
+					ent.parseTimes()
+					return &ent
+				}
 			}
 		}
 	}
@@ -100,13 +108,13 @@ func (p *webhookPayload) lookupEntitlement(id string) *entitlement {
 		return nil
 	}
 
-	if p.Subscriber.Entitlements != nil {
+	if p.Subscriber != nil && p.Subscriber.Entitlements != nil {
 		if ent, ok := p.Subscriber.Entitlements[id]; ok {
 			ent.parseTimes()
 			return &ent
 		}
 	}
-	if p.CustomerInfo.Entitlements != nil {
+	if p.CustomerInfo != nil && p.CustomerInfo.Entitlements != nil {
 		if ent, ok := p.CustomerInfo.Entitlements[id]; ok {
 			ent.parseTimes()
 			return &ent
@@ -188,10 +196,15 @@ func (p *Provider) verifyRequest(tokenOrSig string, body []byte) bool {
 	return hmac.Equal(expected, computed)
 }
 
-// parseWebhookPayload parses the webhook JSON payload with strict validation
+// parseWebhookPayload parses the webhook JSON payload
+// Note: We allow unknown fields to be forward-compatible with RevenueCat API changes
 func parseWebhookPayload(body []byte, payload *webhookPayload) error {
+	if len(body) == 0 {
+		return fmt.Errorf("empty body")
+	}
+
 	dec := json.NewDecoder(strings.NewReader(string(body)))
-	dec.DisallowUnknownFields()
+	// Don't use DisallowUnknownFields() - RevenueCat may add new fields we don't know about
 	if err := dec.Decode(payload); err != nil {
 		return fmt.Errorf("failed to parse webhook payload: %w", err)
 	}
@@ -202,11 +215,28 @@ func parseWebhookPayload(body []byte, payload *webhookPayload) error {
 }
 
 // parseEventTimestamp converts a millisecond timestamp to time.Time
+// Supports both timestamp_ms and event_timestamp_ms field names
 func parseEventTimestamp(timestampMs int64) time.Time {
 	if timestampMs <= 0 {
 		return time.Time{}
 	}
 	return time.Unix(0, timestampMs*int64(time.Millisecond)).UTC()
+}
+
+// getEventTimestamp extracts the timestamp from the event, supporting both field names
+func (p *webhookPayload) getEventTimestamp() int64 {
+	if p.Event.EventTimestampMs > 0 {
+		return p.Event.EventTimestampMs
+	}
+	return p.Event.TimestampMs
+}
+
+// getPurchaseTimestamp extracts the purchase timestamp from the event, supporting both field names
+func (p *webhookPayload) getPurchaseTimestamp() int64 {
+	if p.Event.PurchasedAtMs > 0 {
+		return p.Event.PurchasedAtMs
+	}
+	return p.Event.PurchaseDateMs
 }
 
 // extractTierFromPayload extracts tier information from the webhook payload

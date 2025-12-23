@@ -192,34 +192,57 @@ func main() {
 	// ============================================================
 	fmt.Println("3b. Configuring RevenueCat billing provider (optional)...")
 	var billingProvider billing.Provider
+	var hasWebhookSecret, hasAPIKey bool
 	webhookSecret := os.Getenv("REVENUECAT_WEBHOOK_SECRET")
 	apiKey := os.Getenv("REVENUECAT_SECRET_API_KEY")
-	if webhookSecret == "" || apiKey == "" {
-		fmt.Println("   ⚠ RevenueCat disabled: REVENUECAT_WEBHOOK_SECRET or REVENUECAT_SECRET_API_KEY not set")
+	hasWebhookSecret = webhookSecret != ""
+	hasAPIKey = apiKey != ""
+
+	if !hasWebhookSecret && !hasAPIKey {
+		fmt.Println("   ⚠ RevenueCat disabled: REVENUECAT_WEBHOOK_SECRET and REVENUECAT_SECRET_API_KEY not set")
+		fmt.Println("     To enable RevenueCat webhooks, set REVENUECAT_WEBHOOK_SECRET environment variable")
 	} else {
-		rcProvider, err := revenuecat.NewProvider(billing.Config{
-			Manager: manager,
-			TierMapping: map[string]string{
-				// Map RevenueCat entitlements/products to goquota tiers
-				"free_monthly":       "free",
-				"free_annual":        "free",
-				"pro_monthly":        "pro",
-				"pro_annual":         "pro",
-				"enterprise_monthly": "enterprise",
-				"enterprise_annual":  "enterprise",
-				"*":                  "free", // Default / unknown entitlements
-				"default":            "free",
-			},
-			WebhookSecret: webhookSecret,
-			APIKey:        apiKey,
-		})
-		if err != nil {
-			fmt.Printf("   ⚠ Failed to create RevenueCat provider: %v\n", err)
+		// Create provider if webhook secret is provided (API key is optional for webhook-only usage)
+		if hasWebhookSecret {
+			rcProvider, err := revenuecat.NewProvider(billing.Config{
+				Manager: manager,
+				TierMapping: map[string]string{
+					// Map RevenueCat entitlements/products to goquota tiers
+					"free_monthly":       "free",
+					"free_annual":        "free",
+					"pro_monthly":        "pro",
+					"pro_annual":         "pro",
+					"enterprise_monthly": "enterprise",
+					"enterprise_annual":  "enterprise",
+					"*":                  "free", // Default / unknown entitlements
+					"default":            "free",
+				},
+				WebhookSecret: webhookSecret,
+				APIKey:        apiKey, // May be empty for webhook-only usage
+			})
+			if err != nil {
+				fmt.Printf("   ⚠ Failed to create RevenueCat provider: %v\n", err)
+				fmt.Println("     Webhook endpoint will NOT be available")
+			} else {
+				billingProvider = rcProvider
+				fmt.Println("   ✓ RevenueCat provider configured")
+				if hasWebhookSecret {
+					fmt.Println("     - Webhook endpoint: POST /webhooks/revenuecat")
+					secretPreviewLen := 8
+					if len(webhookSecret) < secretPreviewLen {
+						secretPreviewLen = len(webhookSecret)
+					}
+					fmt.Printf("     - Webhook secret: %s... (configured)\n", webhookSecret[:secretPreviewLen])
+				}
+				if hasAPIKey {
+					fmt.Println("     - Restore purchases endpoint: POST /api/restore-purchases")
+				} else {
+					fmt.Println("     ⚠ Restore purchases disabled: REVENUECAT_SECRET_API_KEY not set")
+				}
+			}
 		} else {
-			billingProvider = rcProvider
-			fmt.Println("   ✓ RevenueCat provider configured")
-			fmt.Println("     - Webhook endpoint: POST /webhooks/revenuecat")
-			fmt.Println("     - Restore purchases endpoint: POST /api/restore-purchases")
+			fmt.Println("   ⚠ RevenueCat webhook disabled: REVENUECAT_WEBHOOK_SECRET not set")
+			fmt.Println("     (API key alone is not sufficient for webhook verification)")
 		}
 	}
 
@@ -372,38 +395,54 @@ func main() {
 	// ============================================================
 	if billingProvider != nil {
 		// RevenueCat webhook endpoint (used by RevenueCat to push entitlement changes)
+		// Provider is only created if webhook secret is provided, so this route is always registered
 		r.POST("/webhooks/revenuecat", gin.WrapH(billingProvider.WebhookHandler()))
+		fmt.Println("   ✓ RevenueCat webhook route registered: POST /webhooks/revenuecat")
 
 		// Restore purchases / manual sync endpoint
-		r.POST("/api/restore-purchases", func(c *gin.Context) {
-			// Prefer explicit query parameter, fall back to authenticated user header
-			userID := c.Query("user_id")
-			if userID == "" {
-				userID = c.GetHeader("X-User-ID")
-			}
-			if userID == "" {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"error": "missing user identifier (provide ?user_id=... or X-User-ID header)",
-				})
-				return
-			}
+		// Only register if API key is provided (required for SyncUser)
+		if hasAPIKey {
+			r.POST("/api/restore-purchases", func(c *gin.Context) {
+				// Prefer explicit query parameter, fall back to authenticated user header
+				userID := c.Query("user_id")
+				if userID == "" {
+					userID = c.GetHeader("X-User-ID")
+				}
+				if userID == "" {
+					c.JSON(http.StatusBadRequest, gin.H{
+						"error": "missing user identifier (provide ?user_id=... or X-User-ID header)",
+					})
+					return
+				}
 
-			tier, err := billingProvider.SyncUser(c.Request.Context(), userID)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error":   "failed to sync purchases",
-					"details": err.Error(),
-				})
-				return
-			}
+				tier, err := billingProvider.SyncUser(c.Request.Context(), userID)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{
+						"error":   "failed to sync purchases",
+						"details": err.Error(),
+					})
+					return
+				}
 
-			c.JSON(http.StatusOK, gin.H{
-				"user_id": userID,
-				"tier":    tier,
+				c.JSON(http.StatusOK, gin.H{
+					"user_id": userID,
+					"tier":    tier,
+				})
+			})
+			fmt.Println("   ✓ Restore purchases route registered: POST /api/restore-purchases")
+		}
+	} else {
+		fmt.Println("   ⚠ Billing endpoints NOT registered (RevenueCat provider disabled)")
+		fmt.Println("     Set REVENUECAT_WEBHOOK_SECRET environment variable to enable webhooks")
+		// Register a helpful error endpoint for debugging
+		r.POST("/webhooks/revenuecat", func(c *gin.Context) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "RevenueCat webhook not configured",
+				"message": "REVENUECAT_WEBHOOK_SECRET environment variable is not set",
+				"endpoint": "/webhooks/revenuecat",
 			})
 		})
-	} else {
-		fmt.Println("   ℹ Billing endpoints not registered (RevenueCat provider disabled)")
+		fmt.Println("     Debug endpoint registered: POST /webhooks/revenuecat (returns 503)")
 	}
 
 	// Protected API endpoints with middleware

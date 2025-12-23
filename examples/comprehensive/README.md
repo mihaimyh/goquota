@@ -63,6 +63,52 @@ The example will automatically:
 - Connect to Redis using Docker networking
 - Expose ports 8080 (HTTP) and 9090 (Prometheus metrics)
 
+### Exposing Webhooks for RevenueCat (Local Development)
+
+RevenueCat webhooks require a publicly accessible URL. For local development, use ngrok:
+
+1. **Get a free ngrok account** and auth token from [ngrok.com](https://ngrok.com)
+
+2. **Set the ngrok auth token**:
+   ```bash
+   # Linux/Mac
+   export NGROK_AUTHTOKEN="your_ngrok_token"
+   
+   # Windows PowerShell
+   $env:NGROK_AUTHTOKEN="your_ngrok_token"
+   ```
+
+3. **Start ngrok tunnel**:
+   ```bash
+   docker-compose --profile webhook-tunnel up -d ngrok
+   ```
+
+4. **Get the public URL**:
+   ```bash
+   # View ngrok web interface at http://localhost:4040
+   # Or get the URL via API:
+   curl http://localhost:4040/api/tunnels | jq '.tunnels[0].public_url'
+   ```
+
+5. **Configure RevenueCat webhook**:
+   - Go to RevenueCat Dashboard → Project Settings → Webhooks
+   - Add webhook URL: `https://your-ngrok-url.ngrok.io/webhooks/revenuecat`
+   - Copy the webhook secret and set `REVENUECAT_WEBHOOK_SECRET`
+
+6. **Set RevenueCat credentials** and restart:
+   ```bash
+   export REVENUECAT_WEBHOOK_SECRET="your_webhook_secret"
+   export REVENUECAT_SECRET_API_KEY="your_api_key"
+   docker-compose restart comprehensive-example
+   ```
+
+**Note**: The ngrok URL changes each time you restart ngrok (unless you have a paid plan with static domains). Update the webhook URL in RevenueCat if needed.
+
+**Alternative**: You can also use [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/) (free, no account required):
+```bash
+cloudflared tunnel --url http://localhost:8080
+```
+
 ## Testing the API
 
 Once running, test the endpoints:

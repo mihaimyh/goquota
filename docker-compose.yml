@@ -43,6 +43,10 @@ services:
       - "9090:9090"  # Prometheus metrics
     environment:
       - REDIS_HOST=redis:6379
+      # RevenueCat billing integration (optional)
+      # Set these environment variables on the host before running docker-compose
+      - REVENUECAT_WEBHOOK_SECRET=${REVENUECAT_WEBHOOK_SECRET:-}
+      - REVENUECAT_SECRET_API_KEY=${REVENUECAT_SECRET_API_KEY:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -106,6 +110,28 @@ services:
     depends_on:
       - prometheus
     restart: unless-stopped
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: goquota-ngrok
+    command:
+      - "start"
+      - "--all"
+      - "--authtoken"
+      - "${NGROK_AUTHTOKEN}"
+      - "--config"
+      - "/etc/ngrok.yml"
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN:-}
+    volumes:
+      - ./examples/comprehensive/ngrok.yml:/etc/ngrok.yml:ro
+    ports:
+      - "4040:4040"  # ngrok web interface
+    depends_on:
+      - comprehensive-example
+    restart: unless-stopped
+    profiles:
+      - webhook-tunnel  # Only start when explicitly requested
 
 volumes:
   redis-data:

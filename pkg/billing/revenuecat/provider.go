@@ -2,6 +2,7 @@ package revenuecat
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -174,7 +175,7 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(err.Error(), "too large") {
 			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 		} else {
-			http.Error(w, "invalid payload", http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("invalid payload: %v", err), http.StatusBadRequest)
 		}
 		return
 	}
@@ -189,7 +190,8 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	// Parse webhook payload
 	var payload webhookPayload
 	if err := parseWebhookPayload(body, &payload); err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
+		// Provide more detailed error for debugging (but don't expose sensitive data)
+		http.Error(w, fmt.Sprintf("invalid payload: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -222,8 +224,8 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 // processWebhookEvent processes a webhook event with timestamp-based idempotency
 func (p *Provider) processWebhookEvent(ctx context.Context, payload *webhookPayload, userID string) error {
-	// Parse event timestamp
-	eventTimestamp := parseEventTimestamp(payload.Event.TimestampMs)
+	// Parse event timestamp (supports both timestamp_ms and event_timestamp_ms)
+	eventTimestamp := parseEventTimestamp(payload.getEventTimestamp())
 
 	// Extract tier information from payload
 	tier, expiresAt, _, _ := p.extractTierFromPayload(payload)
@@ -259,7 +261,8 @@ func (p *Provider) processWebhookEvent(ctx context.Context, payload *webhookPayl
 		subscriptionStartDate = existing.SubscriptionStartDate
 	} else if effectiveTier != p.defaultTier {
 		// First time entering a paid tier
-		if purchaseAt := parseEventTimestamp(payload.Event.PurchaseDateMs); !purchaseAt.IsZero() {
+		// Supports both purchase_date_ms and purchased_at_ms field names
+		if purchaseAt := parseEventTimestamp(payload.getPurchaseTimestamp()); !purchaseAt.IsZero() {
 			subscriptionStartDate = startOfDayUTC(purchaseAt)
 		} else {
 			subscriptionStartDate = startOfDayUTC(time.Now().UTC())
