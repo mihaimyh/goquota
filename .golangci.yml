@@ -27,6 +27,7 @@ linters-settings:
       - style
     disabled-checks:
       - dupImport
+      - hugeParam # Config structs passed by value for consistency across Gin/Echo/Fiber middleware
       - ifElseChain
       - octalLiteral
       - whyNoLint

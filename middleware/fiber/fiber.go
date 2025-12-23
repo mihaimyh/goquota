@@ -1,33 +1,32 @@
-// Package gin provides Gin middleware for quota enforcement
-package gin
+// Package fiber provides Fiber middleware for quota enforcement
+package fiber
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"time"
 
-	gongin "github.com/gin-gonic/gin"
+	"github.com/gofiber/fiber/v2"
 
 	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
-// UserIDExtractor extracts the user ID from a Gin context
+// UserIDExtractor extracts the user ID from a Fiber context
 // Return empty string if user is not authenticated
-type UserIDExtractor func(c *gongin.Context) string
+type UserIDExtractor func(c *fiber.Ctx) string
 
-// ResourceExtractor extracts the resource name from a Gin context
+// ResourceExtractor extracts the resource name from a Fiber context
 // For example: "api_calls", "audio_seconds", "tts_characters"
-type ResourceExtractor func(c *gongin.Context) string
+type ResourceExtractor func(c *fiber.Ctx) string
 
-// AmountExtractor calculates the quota amount to consume from the Gin context
+// AmountExtractor calculates the quota amount to consume from the Fiber context
 // For example: count API calls as 1, or calculate TTS characters from request body
-type AmountExtractor func(c *gongin.Context) (int, error)
+type AmountExtractor func(c *fiber.Ctx) (int, error)
 
-// IdempotencyKeyExtractor extracts the idempotency key from a Gin context
+// IdempotencyKeyExtractor extracts the idempotency key from a Fiber context
 // Return empty string if no idempotency key is available
-type IdempotencyKeyExtractor func(c *gongin.Context) string
+type IdempotencyKeyExtractor func(c *fiber.Ctx) string
 
 // Config holds middleware configuration
 type Config struct {
@@ -57,47 +56,47 @@ type Config struct {
 
 	// OnRateLimitExceeded is called when rate limit is exceeded
 	// If nil, uses default response: 429 JSON with rate limit headers
-	OnRateLimitExceeded func(c *gongin.Context, retryAfter time.Duration, info *goquota.RateLimitInfo)
+	OnRateLimitExceeded func(c *fiber.Ctx, retryAfter time.Duration, info *goquota.RateLimitInfo) error
 
 	// OnQuotaExceeded is called when quota is exceeded
 	// If nil, uses default response: QuotaExceededStatusCode JSON with usage info
-	OnQuotaExceeded func(c *gongin.Context, usage *goquota.Usage)
+	OnQuotaExceeded func(c *fiber.Ctx, usage *goquota.Usage) error
 
 	// OnUnauthorized is called when user is not authenticated
 	// If nil, returns 401 Unauthorized
-	OnUnauthorized func(c *gongin.Context)
+	OnUnauthorized func(c *fiber.Ctx) error
 
 	// OnError is called when an internal error occurs
 	// If nil, returns 500 Internal Server Error
-	OnError func(c *gongin.Context, err error)
+	OnError func(c *fiber.Ctx, err error) error
 
 	// OnWarning is called when a soft limit warning threshold is crossed.
 	// Use this to add custom headers or log warnings.
 	// If nil, a default X-Quota-Warning header is added.
 	//
-	// IMPORTANT: This function should ONLY set headers (c.Header).
-	// Do NOT write to the response body (c.JSON, c.String, etc.) or status code,
+	// IMPORTANT: This function should ONLY set headers (c.Set).
+	// Do NOT write to the response body (c.JSON, c.Send, etc.) or status code,
 	// as this will interfere with the actual request handler that runs after
 	// the middleware completes.
-	OnWarning func(c *gongin.Context, usage *goquota.Usage, threshold float64)
+	OnWarning func(c *fiber.Ctx, usage *goquota.Usage, threshold float64)
 }
 
-// Middleware creates a Gin middleware that enforces quota limits
+// Middleware creates a Fiber middleware that enforces quota limits
 //
 //nolint:gocyclo // Complex function handles rate limiting, quota consumption, and multiple error cases
-func Middleware(cfg Config) gongin.HandlerFunc {
+func Middleware(cfg Config) fiber.Handler {
 	// Validate required configuration at startup (fail fast)
 	if cfg.Manager == nil {
-		panic("goquota/gin: Config.Manager is required")
+		panic("goquota/fiber: Config.Manager is required")
 	}
 	if cfg.GetUserID == nil {
-		panic("goquota/gin: Config.GetUserID is required")
+		panic("goquota/fiber: Config.GetUserID is required")
 	}
 	if cfg.GetResource == nil {
-		panic("goquota/gin: Config.GetResource is required")
+		panic("goquota/fiber: Config.GetResource is required")
 	}
 	if cfg.GetAmount == nil {
-		panic("goquota/gin: Config.GetAmount is required")
+		panic("goquota/fiber: Config.GetAmount is required")
 	}
 
 	// Set defaults
@@ -105,23 +104,20 @@ func Middleware(cfg Config) gongin.HandlerFunc {
 		cfg.PeriodType = goquota.PeriodTypeMonthly
 	}
 	if cfg.QuotaExceededStatusCode == 0 {
-		cfg.QuotaExceededStatusCode = http.StatusTooManyRequests
+		cfg.QuotaExceededStatusCode = fiber.StatusTooManyRequests
 	}
 	if cfg.GetIdempotencyKey == nil {
 		cfg.GetIdempotencyKey = IdempotencyKeyFromHeader("X-Request-ID")
 	}
 
-	return func(c *gongin.Context) {
+	return func(c *fiber.Ctx) error {
 		// Extract user ID
 		userID := cfg.GetUserID(c)
 		if userID == "" {
 			if cfg.OnUnauthorized != nil {
-				cfg.OnUnauthorized(c)
-			} else {
-				defaultUnauthorized(c)
+				return cfg.OnUnauthorized(c)
 			}
-			c.Abort()
-			return
+			return defaultUnauthorized(c)
 		}
 
 		// Extract resource and amount
@@ -132,19 +128,17 @@ func Middleware(cfg Config) gongin.HandlerFunc {
 				err = fmt.Errorf("invalid amount: %d", amount)
 			}
 			if cfg.OnError != nil {
-				cfg.OnError(c, err)
-			} else {
-				c.JSON(http.StatusBadRequest, gongin.H{"error": "Bad Request"})
+				return cfg.OnError(c, err)
 			}
-			c.Abort()
-			return
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Bad Request"})
 		}
 
 		// Extract idempotency key if available
 		idempotencyKey := cfg.GetIdempotencyKey(c)
 
 		// Check and consume quota
-		ctx := c.Request.Context()
+		// CRITICAL: Fiber uses fasthttp, so we must use c.UserContext() to get context.Context
+		ctx := c.UserContext()
 
 		// Set up warning handler if needed
 		if cfg.OnWarning != nil {
@@ -174,43 +168,34 @@ func Middleware(cfg Config) gongin.HandlerFunc {
 			if errors.As(err, &rateLimitErr) {
 				// Add rate limit headers
 				if rateLimitErr.Info != nil {
-					c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", rateLimitErr.Info.Limit))
-					c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", rateLimitErr.Info.Remaining))
-					c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", rateLimitErr.Info.ResetTime.Unix()))
+					c.Set("X-RateLimit-Limit", fmt.Sprintf("%d", rateLimitErr.Info.Limit))
+					c.Set("X-RateLimit-Remaining", fmt.Sprintf("%d", rateLimitErr.Info.Remaining))
+					c.Set("X-RateLimit-Reset", fmt.Sprintf("%d", rateLimitErr.Info.ResetTime.Unix()))
 				}
 				if rateLimitErr.RetryAfter > 0 {
-					c.Header("Retry-After", fmt.Sprintf("%.0f", rateLimitErr.RetryAfter.Seconds()))
+					c.Set("Retry-After", fmt.Sprintf("%.0f", rateLimitErr.RetryAfter.Seconds()))
 				}
 
 				if cfg.OnRateLimitExceeded != nil {
-					cfg.OnRateLimitExceeded(c, rateLimitErr.RetryAfter, rateLimitErr.Info)
-				} else {
-					defaultRateLimitExceeded(c, rateLimitErr.RetryAfter)
+					return cfg.OnRateLimitExceeded(c, rateLimitErr.RetryAfter, rateLimitErr.Info)
 				}
-				c.Abort()
-				return
+				return defaultRateLimitExceeded(c, rateLimitErr.RetryAfter)
 			}
 
 			if err == goquota.ErrQuotaExceeded {
 				// Get current usage for error response
 				usage, usageErr := cfg.Manager.GetQuota(ctx, userID, resource, cfg.PeriodType)
 				if usageErr == nil && cfg.OnQuotaExceeded != nil {
-					cfg.OnQuotaExceeded(c, usage)
-				} else {
-					defaultQuotaExceeded(c, usage, cfg.QuotaExceededStatusCode)
+					return cfg.OnQuotaExceeded(c, usage)
 				}
-				c.Abort()
-				return
+				return defaultQuotaExceeded(c, usage, cfg.QuotaExceededStatusCode)
 			}
 
 			// Other errors (storage, etc.)
 			if cfg.OnError != nil {
-				cfg.OnError(c, err)
-			} else {
-				defaultError(c, err)
+				return cfg.OnError(c, err)
 			}
-			c.Abort()
-			return
+			return defaultError(c, err)
 		}
 
 		// Quota consumed successfully - add rate limit headers if available
@@ -218,13 +203,10 @@ func Middleware(cfg Config) gongin.HandlerFunc {
 		addRateLimitHeadersOnSuccess(ctx, c, cfg.Manager, userID, resource)
 
 		// Proceed to handler
-		c.Next()
+		return c.Next()
 	}
 }
 
-// addRateLimitHeadersOnSuccess attempts to add rate limit headers on successful requests.
-// This follows industry standards (GitHub, Stripe) where rate limit headers are included
-// on all responses, not just errors.
 // addRateLimitHeadersOnSuccess attempts to add rate limit headers on successful requests.
 // This follows industry standards (GitHub, Stripe) where rate limit headers are included
 // on all responses, not just errors.
@@ -236,19 +218,19 @@ func Middleware(cfg Config) gongin.HandlerFunc {
 // without consuming tokens.
 //
 // For now, rate limit headers are only added when rate limits are exceeded (in error cases).
-func addRateLimitHeadersOnSuccess(_ context.Context, _ *gongin.Context, _ *goquota.Manager, _, _ string) {
+func addRateLimitHeadersOnSuccess(_ context.Context, _ *fiber.Ctx, _ *goquota.Manager, _, _ string) {
 	// This is intentionally a no-op until Manager exposes rate limit info API
 	// When Manager.GetRateLimitInfo() is available, this function should:
 	// 1. Call manager.GetRateLimitInfo(ctx, userID, resource)
 	// 2. If info is available, add headers:
-	//    c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", info.Limit))
-	//    c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", info.Remaining))
-	//    c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", info.ResetTime.Unix()))
+	//    c.Set("X-RateLimit-Limit", fmt.Sprintf("%d", info.Limit))
+	//    c.Set("X-RateLimit-Remaining", fmt.Sprintf("%d", info.Remaining))
+	//    c.Set("X-RateLimit-Reset", fmt.Sprintf("%d", info.ResetTime.Unix()))
 }
 
 type warningHandler struct {
-	c *gongin.Context
-	f func(*gongin.Context, *goquota.Usage, float64)
+	c *fiber.Ctx
+	f func(*fiber.Ctx, *goquota.Usage, float64)
 }
 
 func (h *warningHandler) OnWarning(_ context.Context, usage *goquota.Usage, threshold float64) {
@@ -259,57 +241,56 @@ func (h *warningHandler) OnWarning(_ context.Context, usage *goquota.Usage, thre
 
 // Default error handlers
 
-func defaultUnauthorized(c *gongin.Context) {
-	c.JSON(http.StatusUnauthorized, gongin.H{"error": "Unauthorized"})
+func defaultUnauthorized(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
 }
 
-func defaultRateLimitExceeded(c *gongin.Context, retryAfter time.Duration) {
-	c.JSON(http.StatusTooManyRequests, gongin.H{
+func defaultRateLimitExceeded(c *fiber.Ctx, retryAfter time.Duration) error {
+	return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
 		"error":       "Rate limit exceeded",
 		"retry_after": retryAfter.Seconds(),
 	})
 }
 
-func defaultQuotaExceeded(c *gongin.Context, usage *goquota.Usage, statusCode int) {
+func defaultQuotaExceeded(c *fiber.Ctx, usage *goquota.Usage, statusCode int) error {
 	if usage != nil {
-		c.JSON(statusCode, gongin.H{
+		return c.Status(statusCode).JSON(fiber.Map{
 			"error": "Quota exceeded",
 			"used":  usage.Used,
 			"limit": usage.Limit,
 		})
-	} else {
-		c.JSON(statusCode, gongin.H{"error": "Quota exceeded"})
 	}
+	return c.Status(statusCode).JSON(fiber.Map{"error": "Quota exceeded"})
 }
 
-func defaultError(c *gongin.Context, _ error) {
-	c.JSON(http.StatusInternalServerError, gongin.H{"error": "Internal Server Error"})
+func defaultError(c *fiber.Ctx, _ error) error {
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Internal Server Error"})
 }
 
 // DefaultWarningHandler is the default OnWarning implementation.
 // It adds X-Quota-Warning-Threshold, X-Quota-Warning-Used, and X-Quota-Warning-Limit headers.
-func defaultWarningHandler(c *gongin.Context, usage *goquota.Usage, threshold float64) {
-	c.Header("X-Quota-Warning-Threshold", fmt.Sprintf("%.2f", threshold))
-	c.Header("X-Quota-Warning-Used", fmt.Sprintf("%d", usage.Used))
-	c.Header("X-Quota-Warning-Limit", fmt.Sprintf("%d", usage.Limit))
+func defaultWarningHandler(c *fiber.Ctx, usage *goquota.Usage, threshold float64) {
+	c.Set("X-Quota-Warning-Threshold", fmt.Sprintf("%.2f", threshold))
+	c.Set("X-Quota-Warning-Used", fmt.Sprintf("%d", usage.Used))
+	c.Set("X-Quota-Warning-Limit", fmt.Sprintf("%d", usage.Limit))
 }
 
 // Convenience extractors for User ID
 
-// FromContext returns a UserIDExtractor that gets user ID from Gin context values
+// FromContext returns a UserIDExtractor that gets user ID from Fiber context values (Locals)
 // This is the recommended approach for integrating with auth middleware that sets
-// user information via c.Set("UserID", "...") or similar.
+// user information via c.Locals("UserID", "...") or similar.
 //
 // Example:
 //
 //	// In your auth middleware:
-//	c.Set("UserID", userID)
+//	c.Locals("UserID", userID)
 //
 //	// In quota middleware config:
-//	GetUserID: gin.FromContext("UserID")
+//	GetUserID: fiber.FromContext("UserID")
 func FromContext(key string) UserIDExtractor {
-	return func(c *gongin.Context) string {
-		if val, exists := c.Get(key); exists {
+	return func(c *fiber.Ctx) string {
+		if val := c.Locals(key); val != nil {
 			if str, ok := val.(string); ok {
 				return str
 			}
@@ -319,22 +300,23 @@ func FromContext(key string) UserIDExtractor {
 }
 
 // FromHeader returns a UserIDExtractor that gets user ID from a header
+// Fiber v2 uses c.Get() for headers (not c.GetHeader())
 func FromHeader(headerName string) UserIDExtractor {
-	return func(c *gongin.Context) string {
-		return c.GetHeader(headerName)
+	return func(c *fiber.Ctx) string {
+		return c.Get(headerName)
 	}
 }
 
 // FromParam returns a UserIDExtractor that gets user ID from a route parameter
 func FromParam(paramName string) UserIDExtractor {
-	return func(c *gongin.Context) string {
-		return c.Param(paramName)
+	return func(c *fiber.Ctx) string {
+		return c.Params(paramName)
 	}
 }
 
 // FromQuery returns a UserIDExtractor that gets user ID from a query parameter
 func FromQuery(queryName string) UserIDExtractor {
-	return func(c *gongin.Context) string {
+	return func(c *fiber.Ctx) string {
 		return c.Query(queryName)
 	}
 }
@@ -343,15 +325,15 @@ func FromQuery(queryName string) UserIDExtractor {
 
 // FixedResource returns a ResourceExtractor that always returns a fixed resource name
 func FixedResource(resource string) ResourceExtractor {
-	return func(*gongin.Context) string {
+	return func(*fiber.Ctx) string {
 		return resource
 	}
 }
 
 // FromRoute returns a ResourceExtractor that extracts resource from the route path
 func FromRoute() ResourceExtractor {
-	return func(c *gongin.Context) string {
-		return c.FullPath()
+	return func(c *fiber.Ctx) string {
+		return c.Route().Path
 	}
 }
 
@@ -359,14 +341,14 @@ func FromRoute() ResourceExtractor {
 
 // FixedAmount returns an AmountExtractor that always returns a fixed amount
 func FixedAmount(amount int) AmountExtractor {
-	return func(*gongin.Context) (int, error) {
+	return func(*fiber.Ctx) (int, error) {
 		return amount, nil
 	}
 }
 
 // DynamicCost returns an AmountExtractor that calculates cost based on a function
-func DynamicCost(costFunc func(*gongin.Context) int) AmountExtractor {
-	return func(c *gongin.Context) (int, error) {
+func DynamicCost(costFunc func(*fiber.Ctx) int) AmountExtractor {
+	return func(c *fiber.Ctx) (int, error) {
 		return costFunc(c), nil
 	}
 }
@@ -375,15 +357,15 @@ func DynamicCost(costFunc func(*gongin.Context) int) AmountExtractor {
 
 // IdempotencyKeyFromHeader returns an IdempotencyKeyExtractor that gets the key from a header
 func IdempotencyKeyFromHeader(headerName string) IdempotencyKeyExtractor {
-	return func(c *gongin.Context) string {
-		return c.GetHeader(headerName)
+	return func(c *fiber.Ctx) string {
+		return c.Get(headerName)
 	}
 }
 
-// IdempotencyKeyFromContext returns an IdempotencyKeyExtractor that gets the key from context values
+// IdempotencyKeyFromContext returns an IdempotencyKeyExtractor that gets the key from context values (Locals)
 func IdempotencyKeyFromContext(key string) IdempotencyKeyExtractor {
-	return func(c *gongin.Context) string {
-		if val, exists := c.Get(key); exists {
+	return func(c *fiber.Ctx) string {
+		if val := c.Locals(key); val != nil {
 			if str, ok := val.(string); ok {
 				return str
 			}

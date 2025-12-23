@@ -1,4 +1,4 @@
-package gin
+package echo
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/labstack/echo/v4"
 
 	"github.com/mihaimyh/goquota/pkg/goquota"
 	"github.com/mihaimyh/goquota/storage/memory"
@@ -71,16 +71,16 @@ func TestMiddleware_Success(t *testing.T) {
 	setupEntitlement(t, manager, "user1", "pro")
 
 	// Create middleware
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
 	}))
-	r.GET("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	// Create request
@@ -89,7 +89,7 @@ func TestMiddleware_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	// Execute
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	// Verify
 	if rec.Code != http.StatusOK {
@@ -111,23 +111,23 @@ func TestMiddleware_QuotaExceeded(t *testing.T) {
 	}
 
 	// Create middleware
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
 	}))
-	r.GET("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	// Should return 429 Too Many Requests
 	if rec.Code != http.StatusTooManyRequests {
@@ -138,23 +138,23 @@ func TestMiddleware_QuotaExceeded(t *testing.T) {
 func TestMiddleware_MissingAuth(t *testing.T) {
 	manager := setupTestManager(t)
 
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
 	}))
-	r.GET("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	// No X-User-ID header
 	rec := httptest.NewRecorder()
 
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	// Should return 401 Unauthorized
 	if rec.Code != http.StatusUnauthorized {
@@ -167,23 +167,23 @@ func TestMiddleware_NoEntitlement(t *testing.T) {
 	// Don't set up entitlement for user2
 	// User should be allowed to use default tier quota
 
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
 	}))
-	r.GET("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user2")
 	rec := httptest.NewRecorder()
 
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	// Should return 200 OK - users without entitlements can use default tier
 	if rec.Code != http.StatusOK {
@@ -209,27 +209,29 @@ func TestMiddleware_FromContext(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user_from_ctx", "pro")
 
-	r := gin.New()
-	r.Use(func(c *gin.Context) {
-		// Mock auth middleware that sets user ID in context
-		c.Set("UserID", "user_from_ctx")
-		c.Next()
+	e := echo.New()
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			// Mock auth middleware that sets user ID in context
+			c.Set("UserID", "user_from_ctx")
+			return next(c)
+		}
 	})
-	r.Use(Middleware(Config{
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromContext("UserID"),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
 	}))
-	r.GET("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	rec := httptest.NewRecorder()
 
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", rec.Code)
@@ -257,31 +259,31 @@ func TestMiddleware_CustomErrorHandler(t *testing.T) {
 	}
 
 	customErrorCalled := false
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
-		OnQuotaExceeded: func(c *gin.Context, usage *goquota.Usage) {
+		OnQuotaExceeded: func(c echo.Context, usage *goquota.Usage) error {
 			customErrorCalled = true
-			c.JSON(http.StatusPaymentRequired, gin.H{
+			return c.JSON(http.StatusPaymentRequired, map[string]interface{}{
 				"error": "custom quota exceeded",
 				"used":  usage.Used,
 				"limit": usage.Limit,
 			})
 		},
 	}))
-	r.GET("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	if !customErrorCalled {
 		t.Error("Custom error handler was not called")
@@ -313,23 +315,23 @@ func TestMiddleware_CustomRateLimitHandler(t *testing.T) {
 	setupEntitlement(t, manager, "user1", "free")
 
 	customRateLimitCalled := false
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
-		OnRateLimitExceeded: func(c *gin.Context, retryAfter time.Duration, _ *goquota.RateLimitInfo) {
+		OnRateLimitExceeded: func(c echo.Context, retryAfter time.Duration, _ *goquota.RateLimitInfo) error {
 			customRateLimitCalled = true
-			c.JSON(http.StatusTooManyRequests, gin.H{
+			return c.JSON(http.StatusTooManyRequests, map[string]interface{}{
 				"error":       "custom rate limit exceeded",
 				"retry_after": retryAfter.Seconds(),
 			})
 		},
 	}))
-	r.GET("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	// Make 6 requests rapidly to exceed rate limit
@@ -337,14 +339,14 @@ func TestMiddleware_CustomRateLimitHandler(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 		req.Header.Set("X-User-ID", "user1")
 		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
+		e.ServeHTTP(rec, req)
 	}
 
 	// 6th request should hit rate limit
 	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	if !customRateLimitCalled {
 		t.Error("Custom rate limit handler was not called")
@@ -358,16 +360,16 @@ func TestMiddleware_DailyPeriod(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user1", "free")
 
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeDaily,
 	}))
-	r.GET("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	// Make 10 requests (daily limit for free tier)
@@ -375,7 +377,7 @@ func TestMiddleware_DailyPeriod(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 		req.Header.Set("X-User-ID", "user1")
 		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
+		e.ServeHTTP(rec, req)
 
 		if rec.Code != http.StatusOK {
 			t.Errorf("Request %d: Expected status 200, got %d", i+1, rec.Code)
@@ -386,7 +388,7 @@ func TestMiddleware_DailyPeriod(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusTooManyRequests {
 		t.Errorf("Expected status 429 after exceeding daily limit, got %d", rec.Code)
@@ -403,8 +405,8 @@ func TestMiddleware_ConfigurableStatusCode(t *testing.T) {
 		_, _ = manager.Consume(ctx, "user1", "api_calls", 1, goquota.PeriodTypeMonthly)
 	}
 
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:                 manager,
 		GetUserID:               FromHeader("X-User-ID"),
 		GetResource:             FixedResource("api_calls"),
@@ -412,15 +414,15 @@ func TestMiddleware_ConfigurableStatusCode(t *testing.T) {
 		PeriodType:              goquota.PeriodTypeMonthly,
 		QuotaExceededStatusCode: http.StatusPaymentRequired, // Use 402 instead of 429
 	}))
-	r.GET("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	// Should return 402 Payment Required
 	if rec.Code != http.StatusPaymentRequired {
@@ -432,8 +434,8 @@ func TestMiddleware_IdempotencyKey(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user1", "pro")
 
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:           manager,
 		GetUserID:         FromHeader("X-User-ID"),
 		GetResource:       FixedResource("api_calls"),
@@ -441,8 +443,8 @@ func TestMiddleware_IdempotencyKey(t *testing.T) {
 		PeriodType:        goquota.PeriodTypeMonthly,
 		GetIdempotencyKey: IdempotencyKeyFromHeader("X-Request-ID"),
 	}))
-	r.POST("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.POST("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	// First request
@@ -450,7 +452,7 @@ func TestMiddleware_IdempotencyKey(t *testing.T) {
 	req.Header.Set("X-User-ID", "user1")
 	req.Header.Set("X-Request-ID", "req-123")
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", rec.Code)
@@ -461,7 +463,7 @@ func TestMiddleware_IdempotencyKey(t *testing.T) {
 	req2.Header.Set("X-User-ID", "user1")
 	req2.Header.Set("X-Request-ID", "req-123")
 	rec2 := httptest.NewRecorder()
-	r.ServeHTTP(rec2, req2)
+	e.ServeHTTP(rec2, req2)
 
 	if rec2.Code != http.StatusOK {
 		t.Errorf("Expected status 200 for duplicate request, got %d", rec2.Code)
@@ -482,13 +484,15 @@ func TestMiddleware_CustomIdempotencyKeyExtractor(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user1", "pro")
 
-	r := gin.New()
-	r.Use(func(c *gin.Context) {
-		// Mock middleware that sets correlation ID
-		c.Set("CorrelationID", "corr-456")
-		c.Next()
+	e := echo.New()
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			// Mock middleware that sets correlation ID
+			c.Set("CorrelationID", "corr-456")
+			return next(c)
+		}
 	})
-	r.Use(Middleware(Config{
+	e.Use(Middleware(Config{
 		Manager:           manager,
 		GetUserID:         FromHeader("X-User-ID"),
 		GetResource:       FixedResource("api_calls"),
@@ -496,15 +500,15 @@ func TestMiddleware_CustomIdempotencyKeyExtractor(t *testing.T) {
 		PeriodType:        goquota.PeriodTypeMonthly,
 		GetIdempotencyKey: IdempotencyKeyFromContext("CorrelationID"),
 	}))
-	r.POST("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.POST("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	// First request
 	req := httptest.NewRequest("POST", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", rec.Code)
@@ -514,7 +518,7 @@ func TestMiddleware_CustomIdempotencyKeyExtractor(t *testing.T) {
 	req2 := httptest.NewRequest("POST", "/api/test", http.NoBody)
 	req2.Header.Set("X-User-ID", "user1")
 	rec2 := httptest.NewRecorder()
-	r.ServeHTTP(rec2, req2)
+	e.ServeHTTP(rec2, req2)
 
 	// Verify quota was only consumed once
 	ctx := context.Background()
@@ -531,31 +535,31 @@ func TestMiddleware_DynamicCost(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user1", "pro")
 
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
-		GetAmount: DynamicCost(func(c *gin.Context) int {
-			if c.Request.Method == "POST" {
+		GetAmount: DynamicCost(func(c echo.Context) int {
+			if c.Request().Method == "POST" {
 				return 5 // POST costs 5
 			}
 			return 1 // GET costs 1
 		}),
 		PeriodType: goquota.PeriodTypeMonthly,
 	}))
-	r.GET("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
-	r.POST("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.POST("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	// GET request
 	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("GET: Expected status 200, got %d", rec.Code)
 	}
@@ -564,7 +568,7 @@ func TestMiddleware_DynamicCost(t *testing.T) {
 	req2 := httptest.NewRequest("POST", "/api/test", http.NoBody)
 	req2.Header.Set("X-User-ID", "user1")
 	rec2 := httptest.NewRecorder()
-	r.ServeHTTP(rec2, req2)
+	e.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusOK {
 		t.Errorf("POST: Expected status 200, got %d", rec2.Code)
 	}
@@ -584,23 +588,23 @@ func TestMiddleware_ZeroAmount(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user1", "pro")
 
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(0),
 		PeriodType:  goquota.PeriodTypeMonthly,
 	}))
-	r.GET("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	// Should return 400 Bad Request for zero amount
 	if rec.Code != http.StatusBadRequest {
@@ -612,23 +616,23 @@ func TestMiddleware_NegativeAmount(t *testing.T) {
 	manager := setupTestManager(t)
 	setupEntitlement(t, manager, "user1", "pro")
 
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(-5),
 		PeriodType:  goquota.PeriodTypeMonthly,
 	}))
-	r.GET("/api/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/api/test", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	req := httptest.NewRequest("GET", "/api/test", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	// Should return 400 Bad Request for negative amount
 	if rec.Code != http.StatusBadRequest {
@@ -658,16 +662,16 @@ func TestMiddleware_Warnings(t *testing.T) {
 		_, _ = manager.Consume(ctx, "user1", "requests", 1, goquota.PeriodTypeMonthly)
 	}
 
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("requests"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
 	}))
-	r.GET("/", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	// 80th request - should trigger warning header
@@ -675,7 +679,7 @@ func TestMiddleware_Warnings(t *testing.T) {
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", rec.Code)
@@ -716,20 +720,20 @@ func TestMiddleware_CustomWarningHandler(t *testing.T) {
 	}
 
 	customWarningCalled := false
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("requests"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
-		OnWarning: func(c *gin.Context, _ *goquota.Usage, _ float64) {
+		OnWarning: func(c echo.Context, _ *goquota.Usage, _ float64) {
 			customWarningCalled = true
-			c.Header("X-Custom-Warning", "true")
+			c.Response().Header().Set("X-Custom-Warning", "true")
 		},
 	}))
-	r.GET("/", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
+	e.GET("/", func(c echo.Context) error {
+		return c.String(http.StatusOK, "success")
 	})
 
 	// 80th request - should trigger custom warning
@@ -737,7 +741,7 @@ func TestMiddleware_CustomWarningHandler(t *testing.T) {
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	if !customWarningCalled {
 		t.Error("Custom warning handler was not called")
@@ -763,8 +767,8 @@ func TestMiddleware_StorageError(t *testing.T) {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
 
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
@@ -772,15 +776,15 @@ func TestMiddleware_StorageError(t *testing.T) {
 		PeriodType:  goquota.PeriodTypeMonthly,
 		// Verify default OnError behavior (should return 500)
 	}))
-	r.GET("/", func(c *gin.Context) {
-		c.Status(http.StatusOK)
+	e.GET("/", func(c echo.Context) error {
+		return c.NoContent(http.StatusOK)
 	})
 
 	req := httptest.NewRequest("GET", "/", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	// Should return 500 Internal Server Error
 	if rec.Code != http.StatusInternalServerError {
@@ -805,30 +809,30 @@ func TestMiddleware_StorageError_CustomHandler(t *testing.T) {
 	}
 
 	customErrorCalled := false
-	r := gin.New()
-	r.Use(Middleware(Config{
+	e := echo.New()
+	e.Use(Middleware(Config{
 		Manager:     manager,
 		GetUserID:   FromHeader("X-User-ID"),
 		GetResource: FixedResource("api_calls"),
 		GetAmount:   FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
-		OnError: func(c *gin.Context, err error) {
+		OnError: func(c echo.Context, err error) error {
 			customErrorCalled = true
-			c.JSON(http.StatusServiceUnavailable, gin.H{
+			return c.JSON(http.StatusServiceUnavailable, map[string]interface{}{
 				"error":   "Service temporarily unavailable",
 				"details": err.Error(),
 			})
 		},
 	}))
-	r.GET("/", func(c *gin.Context) {
-		c.Status(http.StatusOK)
+	e.GET("/", func(c echo.Context) error {
+		return c.NoContent(http.StatusOK)
 	})
 
 	req := httptest.NewRequest("GET", "/", http.NoBody)
 	req.Header.Set("X-User-ID", "user1")
 	rec := httptest.NewRecorder()
 
-	r.ServeHTTP(rec, req)
+	e.ServeHTTP(rec, req)
 
 	if !customErrorCalled {
 		t.Error("Custom error handler was not called")
@@ -838,70 +842,11 @@ func TestMiddleware_StorageError_CustomHandler(t *testing.T) {
 	}
 }
 
-func TestMiddleware_HeadersOnSuccess(t *testing.T) {
-	storage := memory.New()
-	config := goquota.Config{
-		DefaultTier: "free",
-		Tiers: map[string]goquota.TierConfig{
-			"free": {
-				MonthlyQuotas: map[string]int{"api_calls": 100},
-				RateLimits: map[string]goquota.RateLimitConfig{
-					"api_calls": {
-						Algorithm: "token_bucket",
-						Rate:      10,
-						Window:    time.Second,
-						Burst:     10,
-					},
-				},
-			},
-		},
-	}
-	manager, _ := goquota.NewManager(storage, &config)
-	setupEntitlement(t, manager, "user1", "free")
-
-	r := gin.New()
-	r.Use(Middleware(Config{
-		Manager:     manager,
-		GetUserID:   FromHeader("X-User-ID"),
-		GetResource: FixedResource("api_calls"),
-		GetAmount:   FixedAmount(1),
-		PeriodType:  goquota.PeriodTypeMonthly,
-	}))
-	r.GET("/", func(c *gin.Context) {
-		c.Status(http.StatusOK)
-	})
-
-	req := httptest.NewRequest("GET", "/", http.NoBody)
-	req.Header.Set("X-User-ID", "user1")
-	rec := httptest.NewRecorder()
-
-	r.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", rec.Code)
-	}
-
-	// Check if rate limit headers exist on successful response
-	// Note: Currently, headers are only added on rate limit errors (429 responses).
-	// To add headers on success, Manager would need to expose GetRateLimitInfo() API.
-	// This test documents the desired behavior for when that feature is implemented.
-	remaining := rec.Header().Get("X-RateLimit-Remaining")
-	if remaining == "" {
-		t.Log("NOTE: Rate limit headers are not included on successful responses.")
-		t.Log("Industry standard (GitHub, Stripe) includes X-RateLimit-* headers on all responses.")
-		t.Log("To implement: Manager needs GetRateLimitInfo(userID, resource) method.")
-		// When implemented, this test should verify headers are present:
-		// if remaining == "" {
-		//     t.Error("Expected X-RateLimit-Remaining header on successful response")
-		// }
-	}
-}
-
 func TestMiddleware_ConfigValidation_MissingManager(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("Expected panic when Manager is nil")
-		} else if msg, ok := r.(string); !ok || msg != "goquota/gin: Config.Manager is required" {
+		} else if msg, ok := r.(string); !ok || msg != "goquota/echo: Config.Manager is required" {
 			t.Errorf("Expected panic message about Manager, got: %v", r)
 		}
 	}()
@@ -918,7 +863,7 @@ func TestMiddleware_ConfigValidation_MissingGetUserID(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("Expected panic when GetUserID is nil")
-		} else if msg, ok := r.(string); !ok || msg != "goquota/gin: Config.GetUserID is required" {
+		} else if msg, ok := r.(string); !ok || msg != "goquota/echo: Config.GetUserID is required" {
 			t.Errorf("Expected panic message about GetUserID, got: %v", r)
 		}
 	}()
@@ -936,7 +881,7 @@ func TestMiddleware_ConfigValidation_MissingGetResource(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("Expected panic when GetResource is nil")
-		} else if msg, ok := r.(string); !ok || msg != "goquota/gin: Config.GetResource is required" {
+		} else if msg, ok := r.(string); !ok || msg != "goquota/echo: Config.GetResource is required" {
 			t.Errorf("Expected panic message about GetResource, got: %v", r)
 		}
 	}()
@@ -954,7 +899,7 @@ func TestMiddleware_ConfigValidation_MissingGetAmount(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("Expected panic when GetAmount is nil")
-		} else if msg, ok := r.(string); !ok || msg != "goquota/gin: Config.GetAmount is required" {
+		} else if msg, ok := r.(string); !ok || msg != "goquota/echo: Config.GetAmount is required" {
 			t.Errorf("Expected panic message about GetAmount, got: %v", r)
 		}
 	}()

@@ -20,7 +20,7 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Soft Limits & Warnings** - Trigger callbacks when usage approaches limits (e.g. 80%)
 - **Fallback Strategies** - Graceful degradation when storage is unavailable (cache, optimistic, secondary storage)
 - **Observability** - Built-in Prometheus metrics and structured logging
-- **HTTP Middlewares** - Easy integration with standard `net/http` servers and Gin framework with rate limit headers
+- **HTTP Middlewares** - Easy integration with standard `net/http` servers, Gin, Echo, and Fiber frameworks with rate limit headers
 
 ## Installation
 
@@ -341,7 +341,25 @@ The library exposes Prometheus metrics by default via the `metrics` package.
 - `goquota_rate_limit_check_duration_seconds{resource="api_calls"}`
 - `goquota_rate_limit_exceeded_total{resource="api_calls"}`
 
+## Supported Frameworks
+
+`goquota` provides native middleware for popular Go web frameworks:
+
+- **Gin** - High-performance HTTP web framework
+- **Echo** - High performance, minimalist Go web framework
+- **Fiber** - Express-inspired web framework built on Fasthttp
+- **Standard `net/http`** - Built-in Go HTTP server
+
+All middleware implementations provide:
+- Automatic quota and rate limit enforcement
+- Standard rate limit headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, `Retry-After`)
+- Customizable error responses via callbacks
+- Dynamic cost calculation based on request properties
+- Framework-specific extractors for user ID, resource, and amount
+
 ## HTTP Middleware
+
+### Standard `net/http` Middleware
 
 Integrate directly with your HTTP handlers.
 
@@ -462,6 +480,155 @@ api.Use(ginMiddleware.Middleware(ginMiddleware.Config{
 }))
 ```
 
+### Echo Framework Middleware
+
+Native middleware for the [Echo](https://github.com/labstack/echo) web framework.
+
+```go
+import (
+    "github.com/labstack/echo/v4"
+    echoMiddleware "github.com/mihaimyh/goquota/middleware/echo"
+)
+
+// Create Echo instance
+e := echo.New()
+
+// Mock authentication middleware (sets UserID in context)
+e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        userID := c.Request().Header.Get("X-User-ID")
+        if userID != "" {
+            c.Set("UserID", userID) // Set in context for quota middleware
+        }
+        return next(c)
+    }
+})
+
+// Apply quota middleware
+api := e.Group("/api")
+api.Use(echoMiddleware.Middleware(echoMiddleware.Config{
+    Manager:     manager,
+    GetUserID:   echoMiddleware.FromContext("UserID"), // Recommended: Extract from context
+    GetResource: echoMiddleware.FixedResource("api_calls"),
+    GetAmount:   echoMiddleware.FixedAmount(1),
+    PeriodType:  goquota.PeriodTypeMonthly,
+}))
+
+api.GET("/data", func(c echo.Context) error {
+    return c.String(200, "Data retrieved successfully")
+})
+```
+
+**Echo-Specific Extractors:**
+- `FromContext(key)` - Extract from Echo context (recommended for auth middleware integration)
+- `FromHeader(headerName)` - Extract from HTTP header
+- `FromParam(paramName)` - Extract from route parameter
+- `FromQuery(queryName)` - Extract from query parameter
+
+**Custom Error Responses:**
+```go
+api.Use(echoMiddleware.Middleware(echoMiddleware.Config{
+    Manager:     manager,
+    GetUserID:   echoMiddleware.FromContext("UserID"),
+    GetResource: echoMiddleware.FixedResource("api_calls"),
+    GetAmount:   echoMiddleware.FixedAmount(1),
+    PeriodType:  goquota.PeriodTypeMonthly,
+    OnQuotaExceeded: func(c echo.Context, usage *goquota.Usage) error {
+        return c.JSON(http.StatusPaymentRequired, map[string]interface{}{
+            "error": map[string]interface{}{
+                "code":    "QUOTA_EXCEEDED",
+                "message": "Monthly quota exceeded",
+                "details": map[string]interface{}{
+                    "used":  usage.Used,
+                    "limit": usage.Limit,
+                },
+            },
+        })
+    },
+    OnRateLimitExceeded: func(c echo.Context, retryAfter time.Duration, _ *goquota.RateLimitInfo) error {
+        return c.JSON(http.StatusTooManyRequests, map[string]interface{}{
+            "error":      "Rate limit exceeded",
+            "retry_after": retryAfter.Seconds(),
+        })
+    },
+}))
+```
+
+### Fiber Framework Middleware
+
+Native middleware for the [Fiber](https://github.com/gofiber/fiber) web framework.
+
+```go
+import (
+    "github.com/gofiber/fiber/v2"
+    fiberMiddleware "github.com/mihaimyh/goquota/middleware/fiber"
+)
+
+// Create Fiber app
+app := fiber.New()
+
+// Mock authentication middleware (sets UserID in locals)
+app.Use(func(c *fiber.Ctx) error {
+    userID := c.Get("X-User-ID")
+    if userID != "" {
+        c.Locals("UserID", userID) // Set in locals for quota middleware
+    }
+    return c.Next()
+})
+
+// Apply quota middleware
+api := app.Group("/api")
+api.Use(fiberMiddleware.Middleware(fiberMiddleware.Config{
+    Manager:     manager,
+    GetUserID:   fiberMiddleware.FromLocals("UserID"), // Recommended: Extract from locals
+    GetResource: fiberMiddleware.FixedResource("api_calls"),
+    GetAmount:   fiberMiddleware.FixedAmount(1),
+    PeriodType:  goquota.PeriodTypeMonthly,
+}))
+
+api.Get("/data", func(c *fiber.Ctx) error {
+    return c.SendString("Data retrieved successfully")
+})
+```
+
+**Fiber-Specific Extractors:**
+- `FromLocals(key)` - Extract from Fiber locals (recommended for auth middleware integration)
+- `FromHeader(headerName)` - Extract from HTTP header
+- `FromParams(paramName)` - Extract from route parameter
+- `FromQuery(queryName)` - Extract from query parameter
+
+**Custom Error Responses:**
+```go
+api.Use(fiberMiddleware.Middleware(fiberMiddleware.Config{
+    Manager:     manager,
+    GetUserID:   fiberMiddleware.FromLocals("UserID"),
+    GetResource: fiberMiddleware.FixedResource("api_calls"),
+    GetAmount:   fiberMiddleware.FixedAmount(1),
+    PeriodType:  goquota.PeriodTypeMonthly,
+    OnQuotaExceeded: func(c *fiber.Ctx, usage *goquota.Usage) error {
+        return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{
+            "error": fiber.Map{
+                "code":    "QUOTA_EXCEEDED",
+                "message": "Monthly quota exceeded",
+                "details": fiber.Map{
+                    "used":  usage.Used,
+                    "limit": usage.Limit,
+                },
+            },
+        })
+    },
+    OnRateLimitExceeded: func(c *fiber.Ctx, retryAfter time.Duration, _ *goquota.RateLimitInfo) error {
+        return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+            "error":      "Rate limit exceeded",
+            "retry_after": retryAfter.Seconds(),
+        })
+    },
+}))
+```
+
+**Important Note for Fiber:**
+Fiber uses `fasthttp` instead of `net/http`, so the middleware correctly bridges contexts using `c.UserContext()` to ensure compatibility with storage adapters that require standard `context.Context` (like Postgres transactions).
+
 ## Anniversary-Based Billing & Proration
 
 `goquota` is designed for real-world subscription billing:
@@ -480,6 +647,7 @@ See the [examples](examples/) directory:
 - [Firestore Integration](examples/firestore/)
 - [HTTP Server](examples/http-server/)
 - [Gin Framework](examples/gin/)
+- [Echo Framework](examples/echo/)
 - [Fallback Strategies](examples/fallback/)
 - [Rate Limiting](examples/rate-limiting/)
 
