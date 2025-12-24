@@ -103,6 +103,8 @@ func (p *Provider) processWebhookEvent(ctx context.Context, event *stripe.Event)
 		return p.handleInvoicePaymentFailed(ctx, event, eventTimestamp)
 	case "checkout.session.completed":
 		return p.handleCheckoutSessionCompleted(ctx, event, eventTimestamp)
+	case "payment_intent.refunded":
+		return p.handlePaymentIntentRefunded(ctx, event, eventTimestamp)
 	default:
 		// Unknown event type - ignore silently
 		return nil
@@ -374,6 +376,12 @@ func (p *Provider) handleCheckoutSessionCompleted(
 		return fmt.Errorf("metadata.user_id missing on checkout session %s", session.ID)
 	}
 
+	// Check if this is a payment (one-time) or subscription checkout
+	if session.Mode == stripe.CheckoutSessionModePayment {
+		// Handle one-time payment (credit top-up)
+		return p.handlePaymentCheckout(ctx, &session, eventTimestamp)
+	}
+
 	subscriptionID := ""
 	if session.Subscription != nil {
 		subscriptionID = session.Subscription.ID
@@ -511,6 +519,114 @@ func (p *Provider) extractTierFromSubscription(
 func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+}
+
+// handlePaymentCheckout processes one-time payment checkout sessions
+func (p *Provider) handlePaymentCheckout(
+	ctx context.Context, session *stripe.CheckoutSession, _ time.Time,
+) error {
+	userID := ""
+	resource := ""
+	if session.Metadata != nil {
+		userID = session.Metadata["user_id"]
+		resource = session.Metadata["resource"]
+	}
+	if userID == "" {
+		// Fallback to ClientReferenceID
+		userID = session.ClientReferenceID
+	}
+	if userID == "" {
+		return fmt.Errorf("metadata.user_id or client_reference_id missing on checkout session %s", session.ID)
+	}
+	if resource == "" {
+		return fmt.Errorf("metadata.resource missing on checkout session %s", session.ID)
+	}
+
+	// Extract amount from line items
+	var amount int
+	if len(session.LineItems.Data) > 0 {
+		// Amount is in cents, convert to credits (1 cent = 1 credit, or use conversion factor)
+		// For now, assume 1 cent = 1 credit (can be made configurable)
+		amount = int(session.AmountTotal)
+	} else {
+		return fmt.Errorf("no line items found in checkout session %s", session.ID)
+	}
+
+	// Get payment intent ID for idempotency
+	paymentIntentID := ""
+	if session.PaymentIntent != nil {
+		paymentIntentID = session.PaymentIntent.ID
+	}
+	if paymentIntentID == "" {
+		return fmt.Errorf("payment_intent missing on checkout session %s", session.ID)
+	}
+
+	// Call TopUpLimit with idempotency key
+	err := p.manager.TopUpLimit(ctx, userID, resource, amount, goquota.WithTopUpIdempotencyKey(paymentIntentID))
+	if err != nil {
+		return fmt.Errorf("failed to top up limit: %w", err)
+	}
+
+	return nil
+}
+
+// handlePaymentIntentRefunded processes payment_intent.refunded events
+func (p *Provider) handlePaymentIntentRefunded(
+	ctx context.Context, event *stripe.Event, _ time.Time,
+) error {
+	var paymentIntent stripe.PaymentIntent
+	if err := json.Unmarshal(event.Data.Raw, &paymentIntent); err != nil {
+		return fmt.Errorf("failed to unmarshal payment intent: %w", err)
+	}
+
+	// Lookup original top-up record by payment intent ID
+	// We need to query the top_up_records to find the original purchase
+	// For now, we'll need to store this mapping or query Stripe checkout session
+	// The simplest approach: query the checkout session that created this payment intent
+
+	// Get checkout session from payment intent metadata or search
+	// For v1, we'll require the checkout session to have the metadata
+	// In a production system, you might want to store payment_intent -> top_up mapping
+
+	// Extract from payment intent metadata if available
+	userID := ""
+	resource := ""
+	if paymentIntent.Metadata != nil {
+		userID = paymentIntent.Metadata["user_id"]
+		resource = paymentIntent.Metadata["resource"]
+	}
+
+	if userID == "" || resource == "" {
+		// Try to find checkout session
+		// Note: This is a simplified implementation
+		// In production, you should store the mapping payment_intent_id -> (user_id, resource, amount)
+		return fmt.Errorf("cannot determine user_id and resource for refund - metadata missing")
+	}
+
+	// For payment_intent.refunded, we need to retrieve the refund details
+	// For now, we'll use a simplified approach: use the original payment intent amount
+	// In production, you should track the original top-up amount and refund proportionally
+	// For v1, we'll refund the full amount (assuming full refund)
+	// Note: For partial refunds, you should listen to charge.refunded events instead
+	refundAmount := int(paymentIntent.Amount)
+	if refundAmount == 0 {
+		// No amount specified, skip
+		return nil
+	}
+
+	// Convert from cents to credits (same conversion as top-up)
+	creditsRefund := refundAmount
+
+	// Use payment intent ID as idempotency key for refund
+	refundID := fmt.Sprintf("%s_refund", paymentIntent.ID)
+	err := p.manager.RefundCredits(
+		ctx, userID, resource, creditsRefund, "stripe_refund", goquota.WithRefundIdempotencyKey(refundID),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to refund credits: %w", err)
+	}
+
+	return nil
 }
 
 func startOfDayUTC(t time.Time) time.Time {

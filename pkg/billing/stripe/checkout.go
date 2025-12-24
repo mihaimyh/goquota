@@ -77,6 +77,68 @@ func (p *Provider) CheckoutURL(ctx context.Context, userID, tier, successURL, ca
 	return session.URL, nil
 }
 
+// CheckoutURLForPayment creates a Stripe Checkout Session for one-time payment (credit top-up) and returns the URL.
+// The resource and amount should be specified in metadata.
+func (p *Provider) CheckoutURLForPayment(
+	ctx context.Context, userID, resource string, amount int64, successURL, cancelURL string,
+) (string, error) {
+	startTime := time.Now()
+
+	// 1. Resolve Customer ID (optional - Stripe can create customer during checkout)
+	customerID, err := p.resolveCustomerID(ctx, userID)
+	if err != nil && !errors.Is(err, billing.ErrCustomerNotFound) && !errors.Is(err, billing.ErrUserNotFound) {
+		p.metrics.RecordAPICall(providerName, "/checkout/sessions", "customer_resolution_failed")
+		return "", fmt.Errorf("failed to resolve customer: %w", err)
+	}
+
+	// 2. Create Checkout Session for one-time payment
+	params := &stripe.CheckoutSessionCreateParams{
+		Mode: stripe.String(string(stripe.CheckoutSessionModePayment)),
+		LineItems: []*stripe.CheckoutSessionCreateLineItemParams{
+			{
+				PriceData: &stripe.CheckoutSessionCreateLineItemPriceDataParams{
+					Currency: stripe.String("usd"), // TODO: Make configurable
+					ProductData: &stripe.CheckoutSessionCreateLineItemPriceDataProductDataParams{
+						Name: stripe.String(fmt.Sprintf("Credit Pack: %s", resource)),
+					},
+					UnitAmount: stripe.Int64(amount), // Amount in cents
+				},
+				Quantity: stripe.Int64(1),
+			},
+		},
+		SuccessURL: stripe.String(successURL),
+		CancelURL:  stripe.String(cancelURL),
+	}
+
+	// CRITICAL: Inject metadata for webhook handler
+	params.Metadata = map[string]string{
+		"user_id":  userID,
+		"resource": resource,
+	}
+
+	// Attach existing customer if found (avoids duplicates)
+	if customerID != "" {
+		params.Customer = stripe.String(customerID)
+	} else {
+		// Use ClientReferenceID to link new customer to userID
+		params.ClientReferenceID = stripe.String(userID)
+		params.CustomerCreation = stripe.String("always")
+	}
+
+	// Create session using the correct SDK v84 API
+	session, err := p.stripeClient.V1CheckoutSessions.Create(ctx, params)
+	if err != nil {
+		p.metrics.RecordAPICall(providerName, "/checkout/sessions", "error")
+		p.metrics.RecordAPICallDuration(providerName, "/checkout/sessions", time.Since(startTime))
+		return "", fmt.Errorf("failed to create checkout session: %w", err)
+	}
+
+	p.metrics.RecordAPICall(providerName, "/checkout/sessions", "success")
+	p.metrics.RecordAPICallDuration(providerName, "/checkout/sessions", time.Since(startTime))
+
+	return session.URL, nil
+}
+
 // PortalURL creates a Stripe Customer Portal Session and returns the URL.
 // This allows users to manage their subscription, update payment methods, or cancel.
 func (p *Provider) PortalURL(ctx context.Context, userID, returnURL string) (string, error) {

@@ -36,6 +36,7 @@ type Storage struct {
 	usage          map[string]*goquota.Usage
 	refunds        map[string]*goquota.RefundRecord      // keyed by idempotency key
 	consumptions   map[string]*goquota.ConsumptionRecord // keyed by idempotency key
+	topUps         map[string]bool                       // keyed by idempotency key (for idempotency checks)
 	tokenBuckets   map[string]*tokenBucketState          // keyed by userID:resource
 	slidingWindows map[string]*slidingWindowState        // keyed by userID:resource
 }
@@ -47,6 +48,7 @@ func New() *Storage {
 		usage:          make(map[string]*goquota.Usage),
 		refunds:        make(map[string]*goquota.RefundRecord),
 		consumptions:   make(map[string]*goquota.ConsumptionRecord),
+		topUps:         make(map[string]bool),
 		tokenBuckets:   make(map[string]*tokenBucketState),
 		slidingWindows: make(map[string]*slidingWindowState),
 	}
@@ -484,7 +486,93 @@ func (s *Storage) Clear(_ context.Context) error {
 	s.usage = make(map[string]*goquota.Usage)
 	s.refunds = make(map[string]*goquota.RefundRecord)
 	s.consumptions = make(map[string]*goquota.ConsumptionRecord)
+	s.topUps = make(map[string]bool)
 	s.tokenBuckets = make(map[string]*tokenBucketState)
 	s.slidingWindows = make(map[string]*slidingWindowState)
+	return nil
+}
+
+// AddLimit implements goquota.Storage
+func (s *Storage) AddLimit(
+	_ context.Context, userID, resource string, amount int, period goquota.Period, idempotencyKey string,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 1. Check idempotency (if key provided)
+	if idempotencyKey != "" {
+		if s.topUps[idempotencyKey] {
+			return goquota.ErrIdempotencyKeyExists
+		}
+		// Mark as processed
+		s.topUps[idempotencyKey] = true
+	}
+
+	// 2. Get or create usage record
+	key := usageKey(userID, resource, period)
+	usage, ok := s.usage[key]
+	if !ok {
+		// Create new usage record
+		usage = &goquota.Usage{
+			UserID:    userID,
+			Resource:  resource,
+			Used:      0,
+			Limit:     amount,
+			Period:    period,
+			Tier:      "default",
+			UpdatedAt: time.Now().UTC(),
+		}
+		s.usage[key] = usage
+		return nil
+	}
+
+	// 3. Increment limit atomically
+	usage.Limit += amount
+	usage.UpdatedAt = time.Now().UTC()
+
+	return nil
+}
+
+// SubtractLimit implements goquota.Storage
+func (s *Storage) SubtractLimit(
+	_ context.Context, userID, resource string, amount int, period goquota.Period, idempotencyKey string,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 1. Check idempotency (if key provided)
+	if idempotencyKey != "" {
+		// Check if refund record exists
+		if _, exists := s.refunds[idempotencyKey]; exists {
+			return goquota.ErrIdempotencyKeyExists
+		}
+		// Create refund record for idempotency
+		s.refunds[idempotencyKey] = &goquota.RefundRecord{
+			RefundID:       idempotencyKey,
+			UserID:         userID,
+			Resource:       resource,
+			Amount:         amount,
+			Period:         period,
+			Timestamp:      time.Now().UTC(),
+			IdempotencyKey: idempotencyKey,
+		}
+	}
+
+	// 2. Get usage record
+	key := usageKey(userID, resource, period)
+	usage, ok := s.usage[key]
+	if !ok {
+		// No usage to refund - this is not an error
+		return nil
+	}
+
+	// 3. Decrement limit atomically with clamp to 0
+	newLimit := usage.Limit - amount
+	if newLimit < 0 {
+		newLimit = 0
+	}
+	usage.Limit = newLimit
+	usage.UpdatedAt = time.Now().UTC()
+
 	return nil
 }

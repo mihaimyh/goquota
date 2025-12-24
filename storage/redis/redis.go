@@ -521,7 +521,8 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 	}
 
 	ttl := int64(0)
-	if s.config.UsageTTL > 0 {
+	// For forever periods, never set TTL (no expiration)
+	if req.Period.Type != goquota.PeriodTypeForever && s.config.UsageTTL > 0 {
 		ttl = int64(s.config.UsageTTL.Seconds())
 	}
 
@@ -627,7 +628,8 @@ func (s *Storage) SetUsage(ctx context.Context, userID, resource string,
 	pipe.HSet(ctx, key, "used", usage.Used)
 	pipe.HSet(ctx, key, "data", string(usageData))
 
-	if s.config.UsageTTL > 0 {
+	// For forever periods, never set TTL (no expiration)
+	if period.Type != goquota.PeriodTypeForever && s.config.UsageTTL > 0 {
 		pipe.Expire(ctx, key, s.config.UsageTTL)
 	}
 
@@ -830,6 +832,125 @@ func (s *Storage) consumptionKey(idempotencyKey string) string {
 // rateLimitKey generates the Redis key for rate limiting
 func (s *Storage) rateLimitKey(userID, resource string) string {
 	return fmt.Sprintf("%sratelimit:%s:%s", s.config.KeyPrefix, userID, resource)
+}
+
+// topUpKey generates the Redis key for top-up idempotency records
+func (s *Storage) topUpKey(idempotencyKey string) string {
+	return fmt.Sprintf("%stopup:%s", s.config.KeyPrefix, idempotencyKey)
+}
+
+// AddLimit implements goquota.Storage
+func (s *Storage) AddLimit(
+	ctx context.Context, userID, resource string, amount int, period goquota.Period, idempotencyKey string,
+) error {
+	usageKey := s.usageKey(userID, resource, period)
+	topUpKey := ""
+	if idempotencyKey != "" {
+		topUpKey = s.topUpKey(idempotencyKey)
+	}
+
+	// Lua script: Check idempotency, then increment limit atomically
+	script := `
+		-- 1. Check idempotency (if key provided)
+		if #ARGV[1] > 0 then
+			local exists = redis.call('EXISTS', ARGV[1])
+			if exists == 1 then
+				return {0, 'idempotent'} -- Already processed
+			end
+		end
+		
+		-- 2. Increment limit atomically
+		local newLimit = redis.call('HINCRBY', KEYS[1], 'limit', ARGV[2])
+		
+		-- 3. Record idempotency key (if provided)
+		if #ARGV[1] > 0 then
+			redis.call('SET', ARGV[1], '1', 'EX', 86400) -- 24 hour TTL
+		end
+		
+		-- 4. Set TTL for usage key (if not forever period)
+		if tonumber(ARGV[3]) > 0 then
+			redis.call('EXPIRE', KEYS[1], ARGV[3])
+		end
+		
+		return {1, newLimit}
+	`
+
+	ttl := int64(0)
+	if period.Type != goquota.PeriodTypeForever && s.config.UsageTTL > 0 {
+		ttl = int64(s.config.UsageTTL.Seconds())
+	}
+
+	result, err := s.client.Eval(ctx, script, []string{usageKey}, topUpKey, amount, ttl).Result()
+	if err != nil {
+		return fmt.Errorf("failed to execute add limit script: %w", err)
+	}
+
+	res, ok := result.([]interface{})
+	if !ok || len(res) < 1 {
+		return fmt.Errorf("unexpected result type from add limit script")
+	}
+	status, ok := res[0].(int64)
+	if !ok {
+		return fmt.Errorf("unexpected status type from add limit script")
+	}
+	if status == 0 {
+		return goquota.ErrIdempotencyKeyExists
+	}
+
+	return nil
+}
+
+// SubtractLimit implements goquota.Storage
+func (s *Storage) SubtractLimit(
+	ctx context.Context, userID, resource string, amount int, period goquota.Period, idempotencyKey string,
+) error {
+	usageKey := s.usageKey(userID, resource, period)
+	refundKey := ""
+	if idempotencyKey != "" {
+		refundKey = s.refundKey(idempotencyKey)
+	}
+
+	// Lua script: Check idempotency, then decrement limit atomically
+	script := `
+		-- 1. Check idempotency (if key provided)
+		if #ARGV[1] > 0 then
+			local exists = redis.call('EXISTS', ARGV[1])
+			if exists == 1 then
+				return {0, 'idempotent'} -- Already processed
+			end
+		end
+		
+		-- 2. Decrement limit atomically with clamp to 0
+		local current = redis.call('HGET', KEYS[1], 'limit') or 0
+		local newLimit = math.max(0, tonumber(current) - tonumber(ARGV[2]))
+		redis.call('HSET', KEYS[1], 'limit', newLimit)
+		
+		-- 3. Record idempotency key (if provided)
+		if #ARGV[1] > 0 then
+			redis.call('SET', ARGV[1], '1', 'EX', 86400) -- 24 hour TTL
+		end
+		
+		return {1, newLimit}
+	`
+
+	result, err := s.client.Eval(ctx, script, []string{usageKey}, refundKey, amount).Result()
+	if err != nil {
+		return fmt.Errorf("failed to execute subtract limit script: %w", err)
+	}
+
+	res, ok := result.([]interface{})
+	if !ok || len(res) < 1 {
+		return fmt.Errorf("unexpected result type from subtract limit script")
+	}
+	status, ok := res[0].(int64)
+	if !ok {
+		return fmt.Errorf("unexpected status type from subtract limit script")
+	}
+	if status == 0 {
+		return goquota.ErrIdempotencyKeyExists
+	}
+
+	return nil
 }
 
 // CheckRateLimit implements goquota.Storage

@@ -183,6 +183,9 @@ func TestCircuitBreaker_StateChangeCallbackRace(t *testing.T) {
 		}
 	}
 
+	// Give a small delay to ensure all state changes and callbacks have completed
+	time.Sleep(10 * time.Millisecond)
+
 	// Verify callback was called (at least once)
 	mu.Lock()
 	count := callCount

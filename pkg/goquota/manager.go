@@ -240,6 +240,15 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 		end := start.Add(24 * time.Hour)
 		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
 
+	case PeriodTypeForever:
+		// Forever periods use a stable start time and sentinel end time
+		// The period key will be "forever" regardless of dates
+		now := time.Now().UTC()
+		start := startOfDayUTC(now)
+		// Use sentinel value for end (or NULL in storage)
+		end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+		period = Period{Start: start, End: end, Type: PeriodTypeForever}
+
 	default:
 		return nil, ErrInvalidPeriod
 	}
@@ -319,6 +328,18 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 	// If no usage yet, return zero usage with calculated limit
 	if usage == nil {
 		limit := m.getLimitForResource(resource, tier, periodType)
+		// For forever periods, check InitialForeverCredits if limit is 0
+		if periodType == PeriodTypeForever && limit == 0 {
+			tierConfig, ok := m.config.Tiers[tier]
+			if !ok {
+				tierConfig, ok = m.config.Tiers[m.config.DefaultTier]
+			}
+			if ok && tierConfig.InitialForeverCredits != nil {
+				if initialLimit, ok := tierConfig.InitialForeverCredits[resource]; ok {
+					limit = initialLimit
+				}
+			}
+		}
 		return &Usage{
 			UserID:   userID,
 			Resource: resource,
@@ -381,7 +402,6 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 	// Get entitlement to determine tier (uses cache)
 	ent, err := m.GetEntitlement(ctx, userID)
 	tier := m.config.DefaultTier
-	var period Period
 
 	// If GetEntitlement fails with a storage/circuit breaker error, return it immediately
 	// Only use default tier if entitlement is not found (ErrEntitlementNotFound)
@@ -393,7 +413,40 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		tier = ent.Tier
 	}
 
-	// Calculate period
+	// Handle cascading consumption for PeriodTypeAuto
+	if periodType == PeriodTypeAuto {
+		// Get consumption order from tier config
+		tierConfig, ok := m.config.Tiers[tier]
+		if !ok {
+			tierConfig, ok = m.config.Tiers[m.config.DefaultTier]
+		}
+
+		consumptionOrder := []PeriodType{PeriodTypeMonthly, PeriodTypeDaily}
+		if ok && len(tierConfig.ConsumptionOrder) > 0 {
+			consumptionOrder = tierConfig.ConsumptionOrder
+		}
+
+		// Try each period in order until one succeeds
+		var lastErr error
+		for _, pt := range consumptionOrder {
+			newUsed, err := m.Consume(ctx, userID, resource, amount, pt, opts...)
+			if err == nil {
+				return newUsed, nil
+			}
+			if err != ErrQuotaExceeded {
+				// Non-quota error (storage error, etc.) - return immediately
+				return 0, err
+			}
+			// Quota exceeded - try next period
+			lastErr = err
+		}
+
+		// All periods exhausted
+		return 0, lastErr
+	}
+
+	// Calculate period for explicit period type
+	var period Period
 	switch periodType {
 	case PeriodTypeMonthly:
 		var start, end time.Time
@@ -410,6 +463,14 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		start := startOfDayUTC(now)
 		end := start.Add(24 * time.Hour)
 		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
+
+	case PeriodTypeForever:
+		// Forever periods use a stable start time and sentinel end time
+		now := time.Now().UTC()
+		start := startOfDayUTC(now)
+		// Use sentinel value for end (or NULL in storage)
+		end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+		period = Period{Start: start, End: end, Type: PeriodTypeForever}
 
 	default:
 		return 0, ErrInvalidPeriod
@@ -439,6 +500,21 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 
 	// Get limit for tier
 	limit := m.getLimitForResource(resource, tier, periodType)
+	
+	// For forever periods, get actual limit from storage (dynamic credits)
+	if periodType == PeriodTypeForever {
+		usage, err := m.storage.GetUsage(ctx, userID, resource, period)
+		if err != nil {
+			return 0, fmt.Errorf("failed to get usage for forever period: %w", err)
+		}
+		if usage != nil && usage.Limit > 0 {
+			limit = usage.Limit
+		} else {
+			// No forever credits yet
+			return 0, ErrQuotaExceeded
+		}
+	}
+	
 	if limit <= 0 {
 		return 0, ErrQuotaExceeded // No quota available for this tier
 	}
@@ -738,6 +814,29 @@ func (m *Manager) SetEntitlement(ctx context.Context, ent *Entitlement) error {
 			Field{"userId", ent.UserID},
 			Field{"tier", ent.Tier},
 		)
+
+		// Apply InitialForeverCredits if configured for this tier
+		// Use deterministic idempotency key to prevent race conditions
+		tierConfig, ok := m.config.Tiers[ent.Tier]
+		if ok && tierConfig.InitialForeverCredits != nil {
+			for resource, amount := range tierConfig.InitialForeverCredits {
+				if amount > 0 {
+					// Use deterministic idempotency key: "initial_bonus_{userID}"
+					// This ensures bonus is applied exactly once, even with concurrent requests
+					idempotencyKey := fmt.Sprintf("initial_bonus_%s", ent.UserID)
+					topUpErr := m.TopUpLimit(ctx, ent.UserID, resource, amount, WithTopUpIdempotencyKey(idempotencyKey))
+					if topUpErr != nil && topUpErr != ErrIdempotencyKeyExists {
+						// Log error but don't fail entitlement update
+						m.logger.Warn("failed to apply initial forever credits",
+							Field{"userId", ent.UserID},
+							Field{"resource", resource},
+							Field{"amount", amount},
+							Field{"error", topUpErr},
+						)
+					}
+				}
+			}
+		}
 	} else {
 		m.logger.Error("failed to set entitlement for user",
 			Field{"userId", ent.UserID},
@@ -872,6 +971,14 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 		end := start.Add(24 * time.Hour)
 		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
 
+	case PeriodTypeForever:
+		// Forever periods use a stable start time and sentinel end time
+		now := time.Now().UTC()
+		start := startOfDayUTC(now)
+		// Use sentinel value for end (or NULL in storage)
+		end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+		period = Period{Start: start, End: end, Type: PeriodTypeForever}
+
 	default:
 		return ErrInvalidPeriod
 	}
@@ -907,6 +1014,117 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 	}
 
 	return err
+}
+
+// TopUpLimit atomically increments the limit for a resource with PeriodTypeForever
+// Used for credit top-ups. Supports idempotency to prevent duplicate processing.
+func (m *Manager) TopUpLimit(ctx context.Context, userID, resource string, amount int, opts ...TopUpOption) error {
+	if amount <= 0 {
+		return ErrInvalidAmount
+	}
+
+	// Parse options
+	topUpOpts := &TopUpOptions{}
+	for _, opt := range opts {
+		opt(topUpOpts)
+	}
+
+	// Create forever period
+	now := time.Now().UTC()
+	start := startOfDayUTC(now)
+	// Use sentinel value for end (or NULL in storage)
+	end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	period := Period{Start: start, End: end, Type: PeriodTypeForever}
+
+	// Call storage.AddLimit with idempotency key
+	err := m.storage.AddLimit(ctx, userID, resource, amount, period, topUpOpts.IdempotencyKey)
+	if err == ErrIdempotencyKeyExists {
+		// Idempotent operation - already processed, return success
+		m.logger.Info("duplicate top-up request ignored (idempotent)",
+			Field{"userId", userID},
+			Field{"resource", resource},
+			Field{"idempotencyKey", topUpOpts.IdempotencyKey},
+		)
+		return nil
+	}
+	if err != nil {
+		m.logger.Error("failed to top up limit",
+			Field{"userId", userID},
+			Field{"resource", resource},
+			Field{"amount", amount},
+			Field{"error", err},
+		)
+		return err
+	}
+
+	// Invalidate cache
+	usageKey := userID + ":" + resource + ":" + period.Key()
+	m.cache.InvalidateUsage(usageKey)
+
+	m.logger.Info("limit topped up successfully",
+		Field{"userId", userID},
+		Field{"resource", resource},
+		Field{"amount", amount},
+	)
+
+	return nil
+}
+
+// RefundCredits atomically decrements the limit for a resource with PeriodTypeForever
+// Used for credit refunds. Supports idempotency to prevent duplicate processing.
+func (m *Manager) RefundCredits(
+	ctx context.Context, userID, resource string, amount int, reason string, opts ...RefundCreditsOption,
+) error {
+	if amount <= 0 {
+		return ErrInvalidAmount
+	}
+
+	// Parse options
+	refundOpts := &RefundCreditsOptions{}
+	for _, opt := range opts {
+		opt(refundOpts)
+	}
+
+	// Create forever period
+	now := time.Now().UTC()
+	start := startOfDayUTC(now)
+	// Use sentinel value for end (or NULL in storage)
+	end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	period := Period{Start: start, End: end, Type: PeriodTypeForever}
+
+	// Call storage.SubtractLimit with idempotency key
+	err := m.storage.SubtractLimit(ctx, userID, resource, amount, period, refundOpts.IdempotencyKey)
+	if err == ErrIdempotencyKeyExists {
+		// Idempotent operation - already processed, return success
+		m.logger.Info("duplicate refund credits request ignored (idempotent)",
+			Field{"userId", userID},
+			Field{"resource", resource},
+			Field{"idempotencyKey", refundOpts.IdempotencyKey},
+		)
+		return nil
+	}
+	if err != nil {
+		m.logger.Error("failed to refund credits",
+			Field{"userId", userID},
+			Field{"resource", resource},
+			Field{"amount", amount},
+			Field{"error", err},
+		)
+		return err
+	}
+
+	// Invalidate cache
+	usageKey := userID + ":" + resource + ":" + period.Key()
+	m.cache.InvalidateUsage(usageKey)
+
+	m.logger.Info("credits refunded successfully",
+		Field{"userId", userID},
+		Field{"resource", resource},
+		Field{"amount", amount},
+		Field{"reason", reason},
+	)
+
+	return nil
 }
 
 // checkRateLimit checks if a request is allowed based on rate limiting configuration
@@ -963,6 +1181,12 @@ func (m *Manager) getLimitForResource(resource, tier string, periodType PeriodTy
 		if limit, ok := tierConfig.DailyQuotas[resource]; ok {
 			return limit
 		}
+	case PeriodTypeForever:
+		// Forever credits are dynamic (purchased), not from tier config
+		// Return 0 - the actual limit comes from storage (user's purchased credits)
+		// Exception: Check InitialForeverCredits if user has no forever credits yet
+		// This is handled in GetQuota when usage is nil
+		return 0
 	}
 
 	return 0

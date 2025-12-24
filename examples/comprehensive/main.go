@@ -222,7 +222,7 @@ func main() {
 					"default":            "free",
 				},
 				WebhookSecret: webhookSecret,
-				APIKey:        apiKey, // May be empty for webhook-only usage
+				APIKey:        apiKey,         // May be empty for webhook-only usage
 				Metrics:       billingMetrics, // Optional: enables Prometheus metrics for billing operations
 			})
 			if err != nil {
@@ -443,8 +443,8 @@ func main() {
 		// Register a helpful error endpoint for debugging
 		r.POST("/webhooks/revenuecat", func(c *gin.Context) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"error": "RevenueCat webhook not configured",
-				"message": "REVENUECAT_WEBHOOK_SECRET environment variable is not set",
+				"error":    "RevenueCat webhook not configured",
+				"message":  "REVENUECAT_WEBHOOK_SECRET environment variable is not set",
 				"endpoint": "/webhooks/revenuecat",
 			})
 		})

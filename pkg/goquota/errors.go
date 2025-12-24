@@ -35,6 +35,10 @@ var (
 
 	// ErrRateLimitExceeded is returned when rate limit is exceeded
 	ErrRateLimitExceeded = errors.New("rate limit exceeded")
+
+	// ErrIdempotencyKeyExists is returned when an idempotency key already exists
+	// indicating the operation was already processed
+	ErrIdempotencyKeyExists = errors.New("idempotency key already exists - operation already processed")
 )
 
 // RateLimitExceededError provides detailed information about a rate limit exceeded error
