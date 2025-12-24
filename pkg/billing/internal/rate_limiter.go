@@ -10,10 +10,13 @@ import (
 // RateLimiter provides simple in-memory rate limiting for webhook endpoints
 // Limits requests per IP address to prevent DDoS attacks
 type RateLimiter struct {
-	mu       sync.Mutex
-	requests map[string]*bucket
-	limit    int           // max requests per window
-	window   time.Duration // time window
+	mu            sync.Mutex
+	requests      map[string]*bucket
+	limit         int           // max requests per window
+	window        time.Duration // time window
+	requestCount  int           // counter for deterministic cleanup
+	cleanupEvery  int           // cleanup every N requests (default: 100)
+	cleanupAtSize int           // cleanup when map size exceeds this (default: 200)
 }
 
 type bucket struct {
@@ -24,9 +27,12 @@ type bucket struct {
 // NewRateLimiter creates a new rate limiter with the specified limit and window
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	return &RateLimiter{
-		requests: make(map[string]*bucket),
-		limit:    limit,
-		window:   window,
+		requests:      make(map[string]*bucket),
+		limit:         limit,
+		window:        window,
+		requestCount:  0,
+		cleanupEvery:  100, // Cleanup every 100 requests
+		cleanupAtSize: 200, // Cleanup when map size exceeds 200
 	}
 }
 
@@ -35,6 +41,17 @@ func (rl *RateLimiter) allow(ip string) bool {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+
+	// Deterministic cleanup: Run every N requests or when map gets too large
+	rl.requestCount++
+	shouldCleanup := rl.requestCount%rl.cleanupEvery == 0 || len(rl.requests) > rl.cleanupAtSize
+	if shouldCleanup {
+		rl.cleanupExpired(now)
+		// Reset counter after cleanup to avoid overflow
+		if rl.requestCount >= rl.cleanupEvery*10 {
+			rl.requestCount = 0
+		}
+	}
 
 	b, exists := rl.requests[ip]
 

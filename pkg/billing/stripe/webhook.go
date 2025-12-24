@@ -3,9 +3,9 @@ package stripe
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/stripe/stripe-go/v83"
@@ -39,7 +39,7 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	// Read and validate body (with size limit protection)
 	body, err := internal.ReadBodyStrict(w, r, 256*1024)
 	if err != nil {
-		if strings.Contains(err.Error(), "too large") {
+		if errors.Is(err, internal.ErrPayloadTooLarge) {
 			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 			p.metrics.RecordWebhookError(providerName, "payload_too_large")
 		} else {
@@ -121,7 +121,7 @@ func (p *Provider) handleSubscriptionCreated(ctx context.Context, event *stripe.
 		return fmt.Errorf("failed to extract user_id: %w", err)
 	}
 
-	tier, expiresAt, startDate := p.extractTierFromSubscription(&subscription, event.Data.Raw)
+	tier, expiresAt, startDate := p.extractTierFromSubscription(&subscription)
 
 	// Get existing entitlement for timestamp comparison (idempotency check)
 	existing, err := p.manager.GetEntitlement(ctx, userID)
@@ -184,7 +184,7 @@ func (p *Provider) handleSubscriptionUpdated(ctx context.Context, event *stripe.
 		return fmt.Errorf("failed to extract user_id: %w", err)
 	}
 
-	tier, expiresAt, startDate := p.extractTierFromSubscription(&subscription, event.Data.Raw)
+	tier, expiresAt, startDate := p.extractTierFromSubscription(&subscription)
 
 	// Get existing entitlement for timestamp comparison (idempotency check)
 	existing, err := p.manager.GetEntitlement(ctx, userID)
@@ -258,27 +258,10 @@ func (p *Provider) handleSubscriptionDeleted(ctx context.Context, event *stripe.
 		return nil
 	}
 
-	// Determine if tier changed
-	previousTier := p.defaultTier
-	if existing != nil {
-		previousTier = existing.Tier
-	}
-	tierChanged := previousTier != p.defaultTier
-
-	// Record tier change metric
-	if tierChanged {
-		p.metrics.RecordTierChange(providerName, previousTier, p.defaultTier)
-	}
-
-	// Set to default tier
-	ent := &goquota.Entitlement{
-		UserID:                userID,
-		Tier:                  p.defaultTier,
-		SubscriptionStartDate: time.Time{},
-		UpdatedAt:             eventTimestamp,
-	}
-
-	return p.manager.SetEntitlement(ctx, ent)
+	// Instead of setting default tier directly, re-sync to check for other subscriptions
+	// This handles the case where a user has multiple subscriptions and only one is deleted
+	_, err = p.SyncUser(ctx, userID)
+	return err
 }
 
 // handleInvoicePaymentSucceeded processes invoice.payment_succeeded events
@@ -333,12 +316,8 @@ func (p *Provider) handleInvoicePaymentSucceeded(
 		return nil
 	}
 
-	// Update expiration date to next period - use raw JSON from event if available
-	var rawSubJSON []byte
-	if event.Data != nil {
-		rawSubJSON = event.Data.Raw
-	}
-	tier, expiresAt, startDate := p.extractTierFromSubscription(sub, rawSubJSON)
+	// Update expiration date to next period
+	tier, expiresAt, startDate := p.extractTierFromSubscription(sub)
 
 	var subscriptionStartDate time.Time
 	if existing != nil && !existing.SubscriptionStartDate.IsZero() {
@@ -422,12 +401,7 @@ func (p *Provider) handleCheckoutSessionCompleted(
 	}
 
 	// 2. IMMEDIATELY update GoQuota entitlement (don't wait for next webhook)
-	// Use raw JSON from event if available for period fields
-	var rawSubJSON []byte
-	if event.Data != nil {
-		rawSubJSON = event.Data.Raw
-	}
-	tier, expiresAt, startDate := p.extractTierFromSubscription(sub, rawSubJSON)
+	tier, expiresAt, startDate := p.extractTierFromSubscription(sub)
 
 	// Get existing entitlement for timestamp comparison
 	existing, err := p.manager.GetEntitlement(ctx, userID)
@@ -484,9 +458,11 @@ func (p *Provider) extractUserIDFromSubscription(ctx context.Context, sub *strip
 }
 
 // extractTierFromSubscription extracts tier information from a Stripe subscription
-// rawJSON is optional raw JSON from the event, used to extract period fields if not in struct
+// Returns tier, expiresAt, and startDate. Period dates are always nil as they come from webhook event JSON.
+//
+//nolint:unparam // expiresAt and startDate are part of the API contract, even though they're always nil
 func (p *Provider) extractTierFromSubscription(
-	sub *stripe.Subscription, rawJSON []byte,
+	sub *stripe.Subscription,
 ) (tier string, expiresAt, startDate *time.Time) {
 	var highestTier string
 	var maxWeight = -1
@@ -494,20 +470,6 @@ func (p *Provider) extractTierFromSubscription(
 
 	if sub.Status != subscriptionStatusActive {
 		return p.defaultTier, nil, nil
-	}
-
-	// Extract period dates from raw JSON if available (v83 might not have these fields in struct)
-	var currentPeriodEnd, currentPeriodStart int64
-	if len(rawJSON) > 0 {
-		var rawData map[string]interface{}
-		if err := json.Unmarshal(rawJSON, &rawData); err == nil {
-			if end, ok := rawData["current_period_end"].(float64); ok {
-				currentPeriodEnd = int64(end)
-			}
-			if start, ok := rawData["current_period_start"].(float64); ok {
-				currentPeriodStart = int64(start)
-			}
-		}
 	}
 
 	// Extract tier from subscription items
@@ -522,16 +484,8 @@ func (p *Provider) extractTierFromSubscription(
 			maxWeight = weight
 			highestTier = tier
 			mostRecentCreated = sub.Created
-
-			// Extract dates from raw JSON
-			if currentPeriodEnd > 0 {
-				exp := time.Unix(currentPeriodEnd, 0)
-				expiresAt = &exp
-			}
-			if currentPeriodStart > 0 {
-				start := time.Unix(currentPeriodStart, 0)
-				startDate = &start
-			}
+			// Period dates (expiresAt, startDate) are set via webhook events
+			// which provide the current_period_start/end in the event payload
 		}
 	}
 

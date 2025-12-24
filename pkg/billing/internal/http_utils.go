@@ -2,11 +2,15 @@ package internal
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 )
+
+// ErrPayloadTooLarge is returned when the request body exceeds the size limit
+var ErrPayloadTooLarge = errors.New("payload too large")
 
 // ReadBodyStrict reads the request body and validates it's not empty.
 // Enforces a size limit to prevent memory exhaustion attacks (DoS protection).
@@ -23,7 +27,7 @@ func ReadBodyStrict(w http.ResponseWriter, r *http.Request, limit int64) ([]byte
 	if err != nil {
 		// Check if error is due to body size limit
 		if err.Error() == "http: request body too large" {
-			return nil, fmt.Errorf("payload too large (max %d bytes)", limit)
+			return nil, fmt.Errorf("%w (max %d bytes)", ErrPayloadTooLarge, limit)
 		}
 		return nil, err
 	}

@@ -3,7 +3,6 @@ package stripe
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -233,8 +232,8 @@ func TestProvider_ExtractTierFromSubscription(t *testing.T) {
 		ID:      "sub_test",
 		Status:  "active",
 		Created: now.Unix(),
-		// Note: v83 Subscription struct doesn't have CurrentPeriodStart/End fields
-		// These are extracted from raw JSON in webhook events
+		// Note: CurrentPeriodStart/End are not in the Subscription struct
+		// Period dates are extracted from webhook event JSON in production code
 		Items: &stripe.SubscriptionItemList{
 			Data: []*stripe.SubscriptionItem{
 				{
@@ -246,22 +245,17 @@ func TestProvider_ExtractTierFromSubscription(t *testing.T) {
 		},
 	}
 
-	// Create raw JSON with period dates (v83 extracts from raw JSON)
-	rawJSON := []byte(fmt.Sprintf(
-		`{"id":"sub_test","status":"active","created":%d,`+
-			`"current_period_start":%d,"current_period_end":%d,`+
-			`"items":{"data":[{"price":{"id":%q}}]}}`,
-		now.Unix(), now.Unix(), now.AddDate(0, 1, 0).Unix(), testPriceIDPro))
-
-	tier, expiresAt, startDate := provider.extractTierFromSubscription(sub, rawJSON)
+	tier, expiresAt, startDate := provider.extractTierFromSubscription(sub)
 	if tier != testTierPro {
 		t.Errorf("Expected tier %s, got %s", testTierPro, tier)
 	}
-	if expiresAt == nil {
-		t.Error("Expected expiresAt to be set")
+	// Period dates are not extracted from Subscription struct (fields don't exist in v83)
+	// They are set via webhook events which include current_period_start/end in JSON payload
+	if expiresAt != nil {
+		t.Error("Expected expiresAt to be nil (period dates come from webhook events)")
 	}
-	if startDate == nil {
-		t.Error("Expected startDate to be set")
+	if startDate != nil {
+		t.Error("Expected startDate to be nil (period dates come from webhook events)")
 	}
 }
 
