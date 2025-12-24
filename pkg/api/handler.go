@@ -62,12 +62,8 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Discover Resources (handle orphaned credits)
+	// ResourceFilter is applied inside discoverResources for performance
 	resources := h.discoverResources(ctx, userID)
-
-	// 4. Apply ResourceFilter if configured (AFTER discovery)
-	if h.config.ResourceFilter != nil {
-		resources = h.config.ResourceFilter(resources)
-	}
 
 	// 5. Build response for each resource (sequential fetching)
 	resourceUsage := make(map[string]ResourceUsage)
@@ -105,25 +101,37 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 // 2. Resources with quotas (discovered by querying) - for tier config resources
 // 3. Resources with forever credits - for orphaned credits
 //
+// Performance Optimization: ResourceFilter is applied BEFORE quota queries to reduce DB load.
+// If ResourceFilter is set, only filtered resources are queried (O(RequestedResources) vs O(TotalResources)).
+//
 // Note: If KnownResources is not provided, returns empty list (resources cannot be discovered
 // without a starting point since tier config is not accessible).
 func (h *Handler) discoverResources(ctx context.Context, userID string) []string {
 	resourceSet := make(map[string]bool)
 
-	// 1. Add KnownResources if configured (primary source)
+	// 1. Get candidate resources (apply ResourceFilter early for performance)
 	// Without KnownResources, we cannot efficiently discover resources since tier config is not accessible
 	if len(h.config.KnownResources) == 0 {
 		return []string{}
 	}
 
-	for _, resource := range h.config.KnownResources {
+	// Pre-filter: If ResourceFilter is set, only check those resources
+	// This reduces DB load from O(TotalResources) to O(RequestedResources)
+	candidates := h.config.KnownResources
+	if h.config.ResourceFilter != nil {
+		candidates = h.config.ResourceFilter(candidates)
+	}
+
+	// 2. Add filtered candidates to resource set
+	for _, resource := range candidates {
 		resourceSet[resource] = true
 	}
 
-	// 2. Query quotas for all known resources to discover active ones
+	// 3. Query quotas for filtered candidates to discover active ones
 	// This discovers:
 	// - Resources from tier config (monthly quotas)
 	// - Orphaned credits (forever credits not in current tier)
+	// Only queries resources that passed the filter (performance optimization)
 	allResourcesToCheck := make([]string, 0, len(resourceSet))
 	for resource := range resourceSet {
 		allResourcesToCheck = append(allResourcesToCheck, resource)
@@ -132,20 +140,8 @@ func (h *Handler) discoverResources(ctx context.Context, userID string) []string
 	// Query quotas to discover active resources
 	// Include resource if it has any quota (limit > 0, used > 0, or limit == -1)
 	for _, resource := range allResourcesToCheck {
-		// Check monthly quota (discovers tier config resources)
-		monthlyUsage, err := h.config.Manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
-		if err == nil && monthlyUsage != nil {
-			if monthlyUsage.Limit > 0 || monthlyUsage.Used > 0 || monthlyUsage.Limit == -1 {
-				resourceSet[resource] = true
-			}
-		}
-
-		// Check forever credits (discovers orphaned credits)
-		foreverUsage, err := h.config.Manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeForever)
-		if err == nil && foreverUsage != nil {
-			if foreverUsage.Limit > 0 || foreverUsage.Used > 0 {
-				resourceSet[resource] = true
-			}
+		if h.hasActiveQuota(ctx, userID, resource) {
+			resourceSet[resource] = true
 		}
 	}
 
@@ -156,6 +152,27 @@ func (h *Handler) discoverResources(ctx context.Context, userID string) []string
 	}
 
 	return resources
+}
+
+// hasActiveQuota checks if a resource has any active quota (monthly or forever)
+func (h *Handler) hasActiveQuota(ctx context.Context, userID, resource string) bool {
+	// Check monthly quota (discovers tier config resources)
+	monthlyUsage, err := h.config.Manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
+	if err == nil && monthlyUsage != nil {
+		if monthlyUsage.Limit > 0 || monthlyUsage.Used > 0 || monthlyUsage.Limit == -1 {
+			return true
+		}
+	}
+
+	// Check forever credits (discovers orphaned credits)
+	foreverUsage, err := h.config.Manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeForever)
+	if err == nil && foreverUsage != nil {
+		if foreverUsage.Limit > 0 || foreverUsage.Used > 0 {
+			return true
+		}
+	}
+
+	return false
 }
 
 // buildResourceUsage builds the ResourceUsage for a single resource.
