@@ -18,12 +18,15 @@ The `pkg/billing` package provides a unified interface for integrating billing p
 ## Overview
 
 The billing provider system automatically:
+
 - ✅ Processes webhook events from payment providers
 - ✅ Updates user entitlements in real-time
 - ✅ Handles idempotency (duplicate/out-of-order events)
 - ✅ Applies prorated quota adjustments for mid-cycle tier changes
 - ✅ Supports "Restore Purchases" functionality
 - ✅ Provides rate limiting and DoS protection
+- ✅ Generates checkout URLs for payment initiation
+- ✅ Generates portal URLs for subscription management
 
 ## Architecture
 
@@ -42,6 +45,13 @@ type Provider interface {
     // SyncUser forces a synchronization of the user's state from the provider
     // Returns the detected tier and any error
     SyncUser(ctx context.Context, userID string) (string, error)
+
+    // CheckoutURL generates a URL to redirect the user to payment
+    // The tier parameter is automatically resolved using TierMapping
+    CheckoutURL(ctx context.Context, userID, tier, successURL, cancelURL string) (string, error)
+
+    // PortalURL generates a URL for the user to manage their subscription
+    PortalURL(ctx context.Context, userID, returnURL string) (string, error)
 }
 ```
 
@@ -131,16 +141,69 @@ log.Fatal(http.ListenAndServe(":8080", nil))
 ```go
 func handleRestorePurchases(w http.ResponseWriter, r *http.Request) {
     userID := getUserID(r) // Your authentication logic
-    
+
     tier, err := provider.SyncUser(r.Context(), userID)
     if err != nil {
         http.Error(w, "Failed to sync purchases", http.StatusInternalServerError)
         return
     }
-    
+
     json.NewEncoder(w).Encode(map[string]string{
         "tier": tier,
     })
+}
+```
+
+### 5. Initiate Payment (Checkout)
+
+```go
+func handleUpgrade(w http.ResponseWriter, r *http.Request) {
+    // Enforce POST to prevent accidental triggers by crawlers/link pre-fetchers
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    userID := getUserID(r) // Your authentication logic
+    tier := r.URL.Query().Get("tier") // e.g., "pro", "premium"
+
+    // Generate checkout URL
+    checkoutURL, err := provider.CheckoutURL(
+        r.Context(),
+        userID,
+        tier,
+        "https://yourapp.com/success",
+        "https://yourapp.com/cancel",
+    )
+    if err != nil {
+        http.Error(w, "Failed to create checkout session", http.StatusInternalServerError)
+        return
+    }
+
+    // Redirect user to payment page
+    http.Redirect(w, r, checkoutURL, http.StatusSeeOther)
+}
+```
+
+### 6. Manage Subscription (Portal)
+
+```go
+func handleManageSubscription(w http.ResponseWriter, r *http.Request) {
+    userID := getUserID(r) // Your authentication logic
+
+    // Generate portal URL
+    portalURL, err := provider.PortalURL(
+        r.Context(),
+        userID,
+        "https://yourapp.com/account",
+    )
+    if err != nil {
+        http.Error(w, "Failed to create portal session", http.StatusInternalServerError)
+        return
+    }
+
+    // Redirect user to subscription management portal
+    http.Redirect(w, r, portalURL, http.StatusSeeOther)
 }
 ```
 
@@ -179,14 +242,14 @@ For complete documentation, see [RevenueCat Provider Documentation](revenuecat/R
 
 ### Config Fields
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `Manager` | `*goquota.Manager` | Yes | The goquota Manager instance |
-| `TierMapping` | `map[string]string` | Yes | Maps provider IDs to goquota tiers |
-| `WebhookSecret` | `string` | Yes | Webhook secret for verifying incoming webhook requests |
-| `APIKey` | `string` | Yes | API key for outbound API calls (e.g. SyncUser) |
-| `HTTPClient` | `*http.Client` | No | Custom HTTP client (default: 10s timeout) |
-| `EnableHMAC` | `bool` | No | Enable HMAC signature verification |
+| Field           | Type                | Required | Description                                            |
+| --------------- | ------------------- | -------- | ------------------------------------------------------ |
+| `Manager`       | `*goquota.Manager`  | Yes      | The goquota Manager instance                           |
+| `TierMapping`   | `map[string]string` | Yes      | Maps provider IDs to goquota tiers                     |
+| `WebhookSecret` | `string`            | Yes      | Webhook secret for verifying incoming webhook requests |
+| `APIKey`        | `string`            | Yes      | API key for outbound API calls (e.g. SyncUser)         |
+| `HTTPClient`    | `*http.Client`      | No       | Custom HTTP client (default: 10s timeout)              |
+| `EnableHMAC`    | `bool`              | No       | Enable HMAC signature verification                     |
 
 ### Tier Mapping Examples
 
@@ -217,6 +280,7 @@ TierMapping: map[string]string{
 ### 1. Configure RevenueCat Webhook
 
 In your RevenueCat dashboard:
+
 1. Go to **Project Settings** → **Webhooks**
 2. Add webhook URL: `https://your-domain.com/webhooks/revenuecat`
 3. Select events to receive (recommended: all events)
@@ -249,6 +313,7 @@ e.POST("/webhooks/revenuecat", echo.WrapHandler(provider.WebhookHandler()))
 ### 4. Security Headers
 
 The webhook handler automatically sets security headers:
+
 - `Cache-Control: no-store`
 - `X-Content-Type-Options: nosniff`
 
@@ -257,6 +322,7 @@ The webhook handler automatically sets security headers:
 Built-in rate limiting: **100 requests per minute per IP address**
 
 This prevents:
+
 - DDoS attacks
 - Webhook replay attacks
 - Accidental webhook spam
@@ -284,6 +350,7 @@ if err != nil {
 ### Use Cases
 
 1. **Restore Purchases**: When user taps "Restore Purchases"
+
    ```go
    func handleRestorePurchases(w http.ResponseWriter, r *http.Request) {
        userID := getUserID(r)
@@ -297,6 +364,7 @@ if err != nil {
    ```
 
 2. **Nightly Reconciliation**: Batch job to sync all users
+
    ```go
    func reconcileUsers(ctx context.Context, userIDs []string) {
        for _, userID := range userIDs {
@@ -475,6 +543,7 @@ func TestWebhookIdempotency(t *testing.T) {
 ### 6. Grace Periods
 
 RevenueCat may send events during grace periods (e.g., `BILLING_ISSUE`, `CANCELLATION`). The provider:
+
 - **Keeps tier active** if expiration is in the future
 - **Downgrades to default** if expiration is in the past
 
@@ -484,7 +553,11 @@ This ensures users retain access during grace periods but are downgraded after e
 
 The `billing.Provider` interface is designed to support multiple providers. Future implementations:
 
-### Stripe (Planned)
+## Stripe Implementation
+
+The Stripe provider is fully implemented with support for webhooks, user synchronization, checkout sessions, and subscription management portals.
+
+### Quick Start
 
 ```go
 import "github.com/mihaimyh/goquota/pkg/billing/stripe"
@@ -492,12 +565,177 @@ import "github.com/mihaimyh/goquota/pkg/billing/stripe"
 provider, err := stripe.NewProvider(billing.Config{
     Manager:       manager,
     TierMapping:   map[string]string{
-        "price_premium": "premium",
+        "price_1ABC123": "pro",      // Stripe Price ID → goquota tier
+        "price_1DEF456": "premium",
     },
     WebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
     APIKey:        os.Getenv("STRIPE_API_KEY"),
 })
 ```
+
+### Checkout Sessions
+
+Generate a checkout URL to initiate payment:
+
+```go
+func handleUpgrade(w http.ResponseWriter, r *http.Request) {
+    // Enforce POST to prevent accidental triggers by crawlers/link pre-fetchers
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    userID := getUserID(r)
+    tier := r.URL.Query().Get("tier") // e.g., "pro", "premium"
+
+    checkoutURL, err := provider.CheckoutURL(
+        r.Context(),
+        userID,
+        tier,
+        "https://yourapp.com/success",
+        "https://yourapp.com/cancel",
+    )
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+
+    http.Redirect(w, r, checkoutURL, http.StatusSeeOther)
+}
+```
+
+**How it works:**
+
+1. Tier name (e.g., "pro") is automatically resolved to Stripe Price ID using `TierMapping`
+2. Customer ID is resolved (fast path via `CustomerIDResolver` or slow path via Stripe Search API)
+3. Checkout session is created with `user_id` metadata for webhook processing
+4. User is redirected to Stripe Checkout page
+
+### Customer Portal
+
+Generate a portal URL for subscription management:
+
+```go
+func handleManageSubscription(w http.ResponseWriter, r *http.Request) {
+    userID := getUserID(r)
+
+    portalURL, err := provider.PortalURL(
+        r.Context(),
+        userID,
+        "https://yourapp.com/account",
+    )
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+
+    http.Redirect(w, r, portalURL, http.StatusSeeOther)
+}
+```
+
+**Portal features:**
+
+- Update payment method
+- Cancel subscription
+- View invoices
+- Change subscription plan (if configured in Stripe)
+
+### Complete Example
+
+```go
+package main
+
+import (
+    "log"
+    "net/http"
+    "os"
+
+    "github.com/mihaimyh/goquota/pkg/billing"
+    "github.com/mihaimyh/goquota/pkg/billing/stripe"
+    "github.com/mihaimyh/goquota/pkg/goquota"
+    "github.com/mihaimyh/goquota/storage/memory"
+)
+
+func main() {
+    // 1. Create goquota manager
+    manager, _ := goquota.NewManager(memory.New(), &goquota.Config{
+        DefaultTier: "free",
+        Tiers: map[string]goquota.TierConfig{
+            "free":    {Name: "free", MonthlyQuotas: map[string]int{"api_calls": 100}},
+            "pro":     {Name: "pro", MonthlyQuotas: map[string]int{"api_calls": 10000}},
+            "premium": {Name: "premium", MonthlyQuotas: map[string]int{"api_calls": 100000}},
+        },
+    })
+
+    // 2. Create Stripe provider
+    provider, _ := stripe.NewProvider(billing.Config{
+        Manager: manager,
+        TierMapping: map[string]string{
+            "price_1ABC123": "pro",      // Replace with your Stripe Price IDs
+            "price_1DEF456": "premium",
+        },
+        WebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+        APIKey:        os.Getenv("STRIPE_API_KEY"),
+    })
+
+    // 3. Register webhook
+    http.Handle("/webhooks/stripe", provider.WebhookHandler())
+
+    // 4. Upgrade endpoint
+    http.HandleFunc("/upgrade", func(w http.ResponseWriter, r *http.Request) {
+        userID := r.URL.Query().Get("user_id")
+        tier := r.URL.Query().Get("tier")
+
+        checkoutURL, err := provider.CheckoutURL(
+            r.Context(), userID, tier,
+            "https://yourapp.com/success",
+            "https://yourapp.com/cancel",
+        )
+        if err != nil {
+            http.Error(w, err.Error(), 500)
+            return
+        }
+        http.Redirect(w, r, checkoutURL, 303)
+    })
+
+    // 5. Manage subscription endpoint
+    http.HandleFunc("/manage", func(w http.ResponseWriter, r *http.Request) {
+        userID := r.URL.Query().Get("user_id")
+
+        portalURL, err := provider.PortalURL(
+            r.Context(), userID,
+            "https://yourapp.com/account",
+        )
+        if err != nil {
+            http.Error(w, err.Error(), 500)
+            return
+        }
+        http.Redirect(w, r, portalURL, 303)
+    })
+
+    log.Fatal(http.ListenAndServe(":8080", nil))
+}
+```
+
+### Important Notes
+
+**Tier Mapping:**
+
+- Map Stripe Price IDs to your internal tier names
+- If multiple prices map to the same tier (e.g., monthly/yearly), the first match is returned
+- Consider using distinct tier names (e.g., "pro_monthly", "pro_yearly") for clarity
+
+**Customer Resolution:**
+
+- Fast path: Provide `CustomerIDResolver` function for O(1) lookup
+- Slow path: Falls back to Stripe Search API (O(N), ~500ms)
+- For new customers, Stripe creates them automatically during checkout
+
+**Metadata:**
+
+- `user_id` is automatically injected into subscription metadata
+- This enables webhook handler to link subscriptions to users
+- Critical for proper entitlement updates
 
 ### PayPal (Planned)
 
@@ -542,7 +780,7 @@ import (
     "log"
     "net/http"
     "os"
-    
+
     "github.com/mihaimyh/goquota/pkg/billing"
     "github.com/mihaimyh/goquota/pkg/billing/revenuecat"
     "github.com/mihaimyh/goquota/pkg/goquota"
@@ -566,7 +804,7 @@ func main() {
         },
     }
     manager, _ := goquota.NewManager(storage, config)
-    
+
     // 2. Create billing provider
     provider, _ := revenuecat.NewProvider(billing.Config{
         Manager: manager,
@@ -577,10 +815,10 @@ func main() {
         WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
         APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
     })
-    
+
     // 3. Register webhook
     http.Handle("/webhooks/revenuecat", provider.WebhookHandler())
-    
+
     // 4. Register restore purchases endpoint
     http.HandleFunc("/restore-purchases", func(w http.ResponseWriter, r *http.Request) {
         userID := r.URL.Query().Get("user_id")
@@ -592,7 +830,7 @@ func main() {
         w.Header().Set("Content-Type", "application/json")
         json.NewEncoder(w).Encode(map[string]string{"tier": tier})
     })
-    
+
     // 5. Start server
     log.Fatal(http.ListenAndServe(":8080", nil))
 }
@@ -696,4 +934,3 @@ var (
 ## License
 
 This package is part of the `goquota` project and follows the same license.
-

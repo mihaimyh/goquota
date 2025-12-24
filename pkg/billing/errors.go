@@ -17,4 +17,13 @@ var (
 
 	// ErrProviderAPIError is returned when the provider's API returns an error
 	ErrProviderAPIError = errors.New("billing provider API error")
+
+	// ErrTierNotConfigured is returned when a tier is not found in TierMapping
+	ErrTierNotConfigured = errors.New("tier not configured in tier mapping")
+
+	// ErrCustomerNotFound is returned when a customer cannot be found in the provider
+	ErrCustomerNotFound = errors.New("customer not found in billing provider")
+
+	// ErrNotSupported is returned when a provider doesn't support an operation
+	ErrNotSupported = errors.New("operation not supported by this provider")
 )

@@ -129,6 +129,24 @@ func (p *Provider) GetDefaultTier() string {
 	return p.defaultTier
 }
 
+// CheckoutURL is not supported for RevenueCat.
+// RevenueCat uses client-side SDKs for purchases.
+func (p *Provider) CheckoutURL(_ context.Context, _, _, _, _ string) (string, error) {
+	return "", fmt.Errorf(
+		"%w: RevenueCat uses client-side SDKs for purchases. Use RevenueCat.presentPaywall() in your mobile app",
+		billing.ErrNotSupported,
+	)
+}
+
+// PortalURL is not supported for RevenueCat.
+// RevenueCat subscriptions are managed through App Store/Play Store settings.
+func (p *Provider) PortalURL(_ context.Context, _, _ string) (string, error) {
+	return "", fmt.Errorf(
+		"%w: RevenueCat subscriptions are managed through App Store/Play Store settings",
+		billing.ErrNotSupported,
+	)
+}
+
 // MapEntitlementToTier maps a RevenueCat entitlement ID to a goquota tier
 func (p *Provider) MapEntitlementToTier(entitlementID string) string {
 	if entitlementID == "" {
