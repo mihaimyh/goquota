@@ -2,6 +2,7 @@ package stripe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -23,8 +24,16 @@ func (p *Provider) CheckoutURL(ctx context.Context, userID, tier, successURL, ca
 	}
 
 	// 2. Resolve Customer ID (optional - Stripe can create customer during checkout)
-	// Error intentionally ignored - Stripe creates customer if not found
-	customerID, _ := p.resolveCustomerID(ctx, userID) //nolint:errcheck
+	// Only ignore "user not found" errors. Fail on real errors (DB down, network issues)
+	// to prevent creating duplicate customers in Stripe.
+	customerID, err := p.resolveCustomerID(ctx, userID)
+	if err != nil && !errors.Is(err, billing.ErrCustomerNotFound) && !errors.Is(err, billing.ErrUserNotFound) {
+		// Real error (DB down, network failure, etc.) - fail safe to prevent duplicate customers
+		p.metrics.RecordAPICall(providerName, "/checkout/sessions", "customer_resolution_failed")
+		return "", fmt.Errorf("failed to resolve customer: %w", err)
+	}
+	// If err == nil (customer found) OR err == ErrUserNotFound/ErrCustomerNotFound (not found),
+	// proceed. Stripe will create a new customer if customerID is empty.
 
 	// 3. Create Checkout Session
 	params := &stripe.CheckoutSessionCreateParams{

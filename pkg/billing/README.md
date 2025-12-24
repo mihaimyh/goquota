@@ -158,6 +158,12 @@ func handleRestorePurchases(w http.ResponseWriter, r *http.Request) {
 
 ```go
 func handleUpgrade(w http.ResponseWriter, r *http.Request) {
+    // Enforce POST to prevent accidental triggers by crawlers/link pre-fetchers
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
     userID := getUserID(r) // Your authentication logic
     tier := r.URL.Query().Get("tier") // e.g., "pro", "premium"
 
@@ -573,6 +579,12 @@ Generate a checkout URL to initiate payment:
 
 ```go
 func handleUpgrade(w http.ResponseWriter, r *http.Request) {
+    // Enforce POST to prevent accidental triggers by crawlers/link pre-fetchers
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
     userID := getUserID(r)
     tier := r.URL.Query().Get("tier") // e.g., "pro", "premium"
 
