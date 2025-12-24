@@ -60,6 +60,14 @@ func (m *mockStorage) GetConsumptionRecord(_ context.Context, _ string) (*Consum
 	return m.consumptionRecord, nil
 }
 
+func (m *mockStorage) AddLimit(_ context.Context, _, _ string, _ int, _ Period, _ string) error {
+	return nil
+}
+
+func (m *mockStorage) SubtractLimit(_ context.Context, _, _ string, _ int, _ Period, _ string) error {
+	return nil
+}
+
 //nolint:gocritic // Named return values would reduce readability here
 func (m *mockStorage) CheckRateLimit(_ context.Context, _ *RateLimitRequest) (bool, int, time.Time, error) {
 	return true, 100, time.Now().Add(time.Hour), nil

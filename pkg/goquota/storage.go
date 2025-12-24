@@ -51,6 +51,19 @@ type Storage interface {
 	// RecordRateLimitRequest records a rate limit request (for sliding window algorithm)
 	// This is called after CheckRateLimit when the request is allowed
 	RecordRateLimitRequest(ctx context.Context, req *RateLimitRequest) error
+
+	// AddLimit atomically increments the limit for a resource/period.
+	// Used for credit top-ups to prevent race conditions.
+	// If usage record doesn't exist, creates it with limit = amount.
+	// idempotencyKey: If provided, ensures operation is idempotent (checks inside transaction).
+	// Returns error if operation fails, or ErrIdempotencyKeyExists if already processed.
+	AddLimit(ctx context.Context, userID, resource string, amount int, period Period, idempotencyKey string) error
+
+	// SubtractLimit atomically decrements the limit for a resource/period.
+	// Used for credit refunds. Prevents negative limits (clamps to 0).
+	// idempotencyKey: If provided, ensures operation is idempotent (checks inside transaction).
+	// Returns error if operation fails, or ErrIdempotencyKeyExists if already processed.
+	SubtractLimit(ctx context.Context, userID, resource string, amount int, period Period, idempotencyKey string) error
 }
 
 // ConsumeRequest represents a quota consumption request

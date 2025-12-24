@@ -155,6 +155,14 @@ func (s *Storage) GetUsage(ctx context.Context, userID, resource string,
 		UpdatedAt: getTime(data, "updatedAt"),
 	}
 
+	// Handle optional periodEnd for forever periods
+	if periodEnd, ok := data["cycleEnd"].(time.Time); ok && !periodEnd.IsZero() {
+		usage.Period.End = periodEnd
+	} else if period.Type == goquota.PeriodTypeForever {
+		// For forever periods, set End to a far-future sentinel value
+		usage.Period.End = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	}
+
 	return usage, nil
 }
 
@@ -299,10 +307,14 @@ func (s *Storage) SetUsage(ctx context.Context, userID, resource string,
 		"used":       usage.Used,
 		"limit":      usage.Limit,
 		"cycleStart": period.Start,
-		"cycleEnd":   period.End,
 		"tier":       usage.Tier,
 		"resource":   resource,
 		"updatedAt":  usage.UpdatedAt,
+	}
+
+	// For forever periods, don't set cycleEnd (or set to null)
+	if period.Type != goquota.PeriodTypeForever {
+		data["cycleEnd"] = period.End
 	}
 
 	_, err := doc.Set(ctx, data, firestore.MergeAll)
@@ -746,6 +758,149 @@ func (s *Storage) RecordRateLimitRequest(_ context.Context, _ *goquota.RateLimit
 	// For token bucket, no additional recording is needed
 	// This method is a no-op for Firestore
 	return nil
+}
+
+// AddLimit implements goquota.Storage
+func (s *Storage) AddLimit(
+	ctx context.Context, userID, resource string, amount int, period goquota.Period, idempotencyKey string,
+) error {
+	doc := s.usageDoc(userID, resource, period)
+	topUpDoc := s.client.Collection("top_up_records").Doc(idempotencyKey)
+
+	return s.client.RunTransaction(ctx, func(_ context.Context, tx *firestore.Transaction) error {
+		// 1. Check idempotency INSIDE transaction (if key provided)
+		if idempotencyKey != "" {
+			snap, err := tx.Get(topUpDoc)
+			if err != nil && status.Code(err) != codes.NotFound {
+				return err
+			}
+			if snap.Exists() {
+				// Already processed - return idempotent error
+				return goquota.ErrIdempotencyKeyExists
+			}
+		}
+
+		// 2. Get current usage
+		snap, err := tx.Get(doc)
+		currentLimit := 0
+		currentUsed := 0
+
+		if err == nil && snap.Exists() {
+			data := snap.Data()
+			currentLimit = getInt(data, "limit")
+			currentUsed = getInt(data, "used")
+		}
+
+		newLimit := currentLimit + amount
+
+		// 3. Update usage with new limit
+		updateData := map[string]interface{}{
+			"limit":      newLimit,
+			"used":       currentUsed, // Preserve existing used
+			"cycleStart": period.Start,
+			"tier":       "default",
+			"resource":   resource,
+			"updatedAt":  time.Now().UTC(),
+		}
+
+		// For forever periods, don't set cycleEnd (or set to null)
+		if period.Type != goquota.PeriodTypeForever {
+			updateData["cycleEnd"] = period.End
+		}
+
+		err = tx.Set(doc, updateData, firestore.MergeAll)
+		if err != nil {
+			return err
+		}
+
+		// 4. Record idempotency key (if provided)
+		if idempotencyKey != "" {
+			topUpData := map[string]interface{}{
+				"userId":      userID,
+				"resource":    resource,
+				"amount":      amount,
+				"periodStart": period.Start,
+				"periodType":  string(period.Type),
+				"createdAt":   time.Now().UTC(),
+			}
+			if period.Type != goquota.PeriodTypeForever {
+				topUpData["periodEnd"] = period.End
+			}
+			return tx.Set(topUpDoc, topUpData)
+		}
+
+		return nil
+	})
+}
+
+// SubtractLimit implements goquota.Storage
+func (s *Storage) SubtractLimit(
+	ctx context.Context, userID, resource string, amount int, period goquota.Period, idempotencyKey string,
+) error {
+	doc := s.usageDoc(userID, resource, period)
+	refundDoc := s.client.Collection(s.refundsCollection).Doc(idempotencyKey)
+
+	return s.client.RunTransaction(ctx, func(_ context.Context, tx *firestore.Transaction) error {
+		// 1. Check idempotency INSIDE transaction (if key provided)
+		if idempotencyKey != "" {
+			snap, err := tx.Get(refundDoc)
+			if err != nil && status.Code(err) != codes.NotFound {
+				return err
+			}
+			if snap.Exists() {
+				// Already processed - return idempotent error
+				return goquota.ErrIdempotencyKeyExists
+			}
+		}
+
+		// 2. Get current usage
+		snap, err := tx.Get(doc)
+		if err != nil && status.Code(err) != codes.NotFound {
+			return err
+		}
+
+		currentLimit := 0
+		currentUsed := 0
+		if snap != nil && snap.Exists() {
+			data := snap.Data()
+			currentLimit = getInt(data, "limit")
+			currentUsed = getInt(data, "used")
+		}
+
+		newLimit := currentLimit - amount
+		if newLimit < 0 {
+			newLimit = 0
+		}
+
+		// 3. Update usage with new limit
+		err = tx.Set(doc, map[string]interface{}{
+			"limit":     newLimit,
+			"used":      currentUsed, // Preserve existing used
+			"updatedAt": time.Now().UTC(),
+		}, firestore.MergeAll)
+		if err != nil {
+			return err
+		}
+
+		// 4. Record idempotency key (if provided)
+		if idempotencyKey != "" {
+			refundData := map[string]interface{}{
+				"refundId":    idempotencyKey,
+				"userId":      userID,
+				"resource":    resource,
+				"amount":      amount,
+				"periodStart": period.Start,
+				"periodType":  string(period.Type),
+				"timestamp":   time.Now().UTC(),
+			}
+			if period.Type != goquota.PeriodTypeForever {
+				refundData["periodEnd"] = period.End
+			}
+			return tx.Set(refundDoc, refundData)
+		}
+
+		return nil
+	})
 }
 
 // rateLimitDoc returns the Firestore document reference for rate limiting

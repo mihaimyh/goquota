@@ -144,6 +144,14 @@ func (m *mockFallbackStorage) RecordRateLimitRequest(_ context.Context, _ *RateL
 	return nil
 }
 
+func (m *mockFallbackStorage) AddLimit(_ context.Context, _, _ string, _ int, _ Period, _ string) error {
+	return nil
+}
+
+func (m *mockFallbackStorage) SubtractLimit(_ context.Context, _, _ string, _ int, _ Period, _ string) error {
+	return nil
+}
+
 // mockMetrics is a mock metrics implementation for testing
 type mockMetrics struct {
 	fallbackUsageCount         int

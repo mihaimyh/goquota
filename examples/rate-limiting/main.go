@@ -145,7 +145,7 @@ func main() {
 			return r.Header.Get("X-User-ID")
 		},
 		GetResource: httpMiddleware.FixedResource("api_calls"),
-		GetAmount:    httpMiddleware.FixedAmount(1),
+		GetAmount:   httpMiddleware.FixedAmount(1),
 		PeriodType:  goquota.PeriodTypeMonthly,
 		OnQuotaExceeded: func(w http.ResponseWriter, r *http.Request, usage *goquota.Usage) {
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -165,4 +165,3 @@ func main() {
 		log.Fatal(err)
 	}
 }
-

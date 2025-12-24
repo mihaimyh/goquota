@@ -185,6 +185,7 @@ func (s *Storage) GetUsage(
 	ctx context.Context, userID, resource string, period goquota.Period,
 ) (*goquota.Usage, error) {
 	var usage goquota.Usage
+	var periodEnd *time.Time
 
 	err := s.pool.QueryRow(ctx,
 		`SELECT user_id, resource, usage_amount, limit_amount, period_start, period_end, period_type, tier, updated_at
@@ -196,7 +197,7 @@ func (s *Storage) GetUsage(
 		&usage.Used,
 		&usage.Limit,
 		&usage.Period.Start,
-		&usage.Period.End,
+		&periodEnd,
 		&usage.Period.Type,
 		&usage.Tier,
 		&usage.UpdatedAt,
@@ -207,6 +208,14 @@ func (s *Storage) GetUsage(
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get usage: %w", err)
+	}
+
+	// Handle NULL period_end for forever periods
+	if periodEnd != nil {
+		usage.Period.End = *periodEnd
+	} else {
+		// For forever periods, set End to a far-future sentinel value
+		usage.Period.End = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 	}
 
 	return &usage, nil
@@ -726,4 +735,104 @@ func (s *Storage) Cleanup(ctx context.Context) error {
 // Ping checks the PostgreSQL connection
 func (s *Storage) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
+}
+
+// AddLimit implements goquota.Storage
+func (s *Storage) AddLimit(
+	ctx context.Context, userID, resource string, amount int, period goquota.Period, idempotencyKey string,
+) error {
+	// Use transaction to ensure idempotency check and limit increment are atomic
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		//nolint:errcheck // Rollback error is safe to ignore if transaction was committed
+		_ = tx.Rollback(ctx)
+	}()
+
+	// 1. Check idempotency INSIDE transaction (if key provided)
+	if idempotencyKey != "" {
+		var existingID string
+		err := tx.QueryRow(ctx, `
+			INSERT INTO top_up_records (id, user_id, resource, amount, period_start, period_end, period_type, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+			ON CONFLICT (id) DO NOTHING
+			RETURNING id
+		`, idempotencyKey, userID, resource, amount, period.Start, period.End, string(period.Type)).Scan(&existingID)
+
+		if err == pgx.ErrNoRows {
+			// Idempotency key already exists - operation already processed
+			return goquota.ErrIdempotencyKeyExists
+		}
+		if err != nil {
+			return fmt.Errorf("failed to check idempotency: %w", err)
+		}
+		// existingID is empty means this is a new record - proceed
+	}
+
+	// 2. Apply limit increment atomically
+	_, err = tx.Exec(ctx, `
+		INSERT INTO quota_usage (
+			user_id, resource, period_start, period_end, period_type, usage_amount, limit_amount, tier, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, 0, $6, $7, NOW())
+		ON CONFLICT (user_id, resource, period_start) 
+		DO UPDATE SET limit_amount = quota_usage.limit_amount + $6, updated_at = NOW()
+	`, userID, resource, period.Start, period.End, string(period.Type), amount, "default")
+	if err != nil {
+		return fmt.Errorf("failed to increment limit: %w", err)
+	}
+
+	// 3. Commit transaction
+	return tx.Commit(ctx)
+}
+
+// SubtractLimit implements goquota.Storage
+func (s *Storage) SubtractLimit(
+	ctx context.Context, userID, resource string, amount int, period goquota.Period, idempotencyKey string,
+) error {
+	// Use transaction to ensure idempotency check and limit decrement are atomic
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		//nolint:errcheck // Rollback error is safe to ignore if transaction was committed
+		_ = tx.Rollback(ctx)
+	}()
+
+	// 1. Check idempotency INSIDE transaction (if key provided)
+	if idempotencyKey != "" {
+		var existingID string
+		err := tx.QueryRow(ctx, `
+			INSERT INTO refund_records (
+				refund_id, user_id, resource, amount, period_start, period_end, period_type, timestamp, expires_at, reason, metadata
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW() + INTERVAL '24 hours', '', NULL)
+			ON CONFLICT (user_id, refund_id) DO NOTHING
+			RETURNING refund_id
+		`, idempotencyKey, userID, resource, amount, period.Start, period.End, string(period.Type)).Scan(&existingID)
+
+		if err == pgx.ErrNoRows {
+			// Idempotency key already exists - operation already processed
+			return goquota.ErrIdempotencyKeyExists
+		}
+		if err != nil {
+			return fmt.Errorf("failed to check idempotency: %w", err)
+		}
+	}
+
+	// 2. Apply limit decrement atomically with clamp to 0
+	_, err = tx.Exec(ctx, `
+		UPDATE quota_usage 
+		SET limit_amount = GREATEST(0, limit_amount - $1), updated_at = NOW()
+		WHERE user_id = $2 AND resource = $3 AND period_start = $4
+	`, amount, userID, resource, period.Start)
+	if err != nil {
+		return fmt.Errorf("failed to decrement limit: %w", err)
+	}
+
+	// 3. Commit transaction
+	return tx.Commit(ctx)
 }

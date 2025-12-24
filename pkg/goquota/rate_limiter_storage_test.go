@@ -70,6 +70,14 @@ func (m *mockRateLimitStorage) RecordRateLimitRequest(ctx context.Context, req *
 	return nil
 }
 
+func (m *mockRateLimitStorage) AddLimit(_ context.Context, _, _ string, _ int, _ Period, _ string) error {
+	return nil
+}
+
+func (m *mockRateLimitStorage) SubtractLimit(_ context.Context, _, _ string, _ int, _ Period, _ string) error {
+	return nil
+}
+
 func TestStorageRateLimiter_Allow_TokenBucket_Allowed(t *testing.T) {
 	storage := &mockRateLimitStorage{
 		checkRateLimitFunc: func(_ context.Context, req *RateLimitRequest) (bool, int, time.Time, error) {
@@ -184,11 +192,15 @@ func TestStorageRateLimiter_Allow_UnknownAlgorithm(t *testing.T) {
 		Window:    time.Second,
 	}
 
-	// Should propagate error from storage
+	// Storage errors trigger graceful degradation - allow request to prevent blocking
+	// This is intentional behavior to prevent rate limiting from blocking legitimate requests
+	// during storage outages or configuration issues
 	allowed, info, err := limiter.Allow(context.Background(), "user1", "api_calls", config)
-	assert.Error(t, err)
-	assert.False(t, allowed)
-	assert.Nil(t, info)
+	assert.NoError(t, err) // Error is swallowed for graceful degradation
+	assert.True(t, allowed) // Request is allowed on storage error
+	assert.NotNil(t, info)  // Info is provided with default values
+	assert.Equal(t, 10, info.Remaining)
+	assert.Equal(t, 10, info.Limit)
 }
 
 func TestStorageRateLimiter_Allow_SlidingWindow_RecordsRequest(t *testing.T) {

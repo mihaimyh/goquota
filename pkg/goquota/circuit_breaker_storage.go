@@ -115,3 +115,19 @@ func (s *CircuitBreakerStorage) RecordRateLimitRequest(ctx context.Context, req 
 		return s.storage.RecordRateLimitRequest(ctx, req)
 	})
 }
+
+func (s *CircuitBreakerStorage) AddLimit(
+	ctx context.Context, userID, resource string, amount int, period Period, idempotencyKey string,
+) error {
+	return s.cb.Execute(ctx, func() error {
+		return s.storage.AddLimit(ctx, userID, resource, amount, period, idempotencyKey)
+	})
+}
+
+func (s *CircuitBreakerStorage) SubtractLimit(
+	ctx context.Context, userID, resource string, amount int, period Period, idempotencyKey string,
+) error {
+	return s.cb.Execute(ctx, func() error {
+		return s.storage.SubtractLimit(ctx, userID, resource, amount, period, idempotencyKey)
+	})
+}

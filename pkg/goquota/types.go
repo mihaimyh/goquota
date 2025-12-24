@@ -13,6 +13,10 @@ const (
 	PeriodTypeDaily PeriodType = "daily"
 	// PeriodTypeMonthly represents a monthly quota period (anniversary-based)
 	PeriodTypeMonthly PeriodType = "monthly"
+	// PeriodTypeForever represents a non-expiring quota period (pre-paid credits)
+	PeriodTypeForever PeriodType = "forever"
+	// PeriodTypeAuto triggers cascading consumption (uses ConsumptionOrder from TierConfig)
+	PeriodTypeAuto PeriodType = "auto"
 )
 
 // Period represents a quota period with start and end times
@@ -29,6 +33,8 @@ func (p Period) Key() string {
 		return p.Start.UTC().Format("2006-01-02")
 	case PeriodTypeMonthly:
 		return p.Start.UTC().Format("2006-01-02")
+	case PeriodTypeForever:
+		return "forever" // Stable key for forever periods (no date component)
 	default:
 		return p.Start.UTC().Format("2006-01-02")
 	}
@@ -72,6 +78,17 @@ type TierConfig struct {
 	// Rate limits enforce time-based request frequency (e.g., 10 requests/second)
 	// while quotas enforce total usage limits (e.g., 1000 requests/month)
 	RateLimits map[string]RateLimitConfig
+
+	// ConsumptionOrder defines the priority order for quota consumption when PeriodTypeAuto is used.
+	// Example: []PeriodType{PeriodTypeMonthly, PeriodTypeForever}
+	// Consumes from Monthly first, then falls back to Forever credits.
+	// If empty, defaults to [PeriodTypeMonthly, PeriodTypeDaily] for backward compatibility.
+	ConsumptionOrder []PeriodType
+
+	// InitialForeverCredits are sign-up bonuses applied only when user first gets this tier
+	// (if no forever credits exist yet). This is NOT a recurring quota - forever credits are
+	// dynamic (purchased via top-ups). Only applied once per user using deterministic idempotency key.
+	InitialForeverCredits map[string]int
 }
 
 // RateLimitConfig defines rate limiting configuration for a resource
@@ -287,4 +304,34 @@ type TryConsumeResult struct {
 
 	// NewUsed is the new total used amount (same as current if failed)
 	NewUsed int
+}
+
+// TopUpOption represents an option for the TopUpLimit operation
+type TopUpOption func(*TopUpOptions)
+
+// TopUpOptions holds options for the TopUpLimit operation
+type TopUpOptions struct {
+	IdempotencyKey string
+}
+
+// WithTopUpIdempotencyKey sets the idempotency key for a top-up operation
+func WithTopUpIdempotencyKey(key string) TopUpOption {
+	return func(opts *TopUpOptions) {
+		opts.IdempotencyKey = key
+	}
+}
+
+// RefundCreditsOption represents an option for the RefundCredits operation
+type RefundCreditsOption func(*RefundCreditsOptions)
+
+// RefundCreditsOptions holds options for the RefundCredits operation
+type RefundCreditsOptions struct {
+	IdempotencyKey string
+}
+
+// WithRefundIdempotencyKey sets the idempotency key for a refund credits operation
+func WithRefundIdempotencyKey(key string) RefundCreditsOption {
+	return func(opts *RefundCreditsOptions) {
+		opts.IdempotencyKey = key
+	}
 }

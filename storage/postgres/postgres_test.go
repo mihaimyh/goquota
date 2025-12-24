@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 package postgres
@@ -29,15 +30,15 @@ func setupTestStorage(t *testing.T) *Storage {
 	config := DefaultConfig()
 	config.ConnectionString = getTestConnectionString()
 	config.CleanupEnabled = false // Disable cleanup in tests
-	
+
 	storage, err := New(ctx, config)
 	if err != nil {
 		t.Skipf("Skipping test: failed to connect to PostgreSQL: %v", err)
 	}
-	
+
 	// Clean up test data
 	_, _ = storage.pool.Exec(ctx, "TRUNCATE TABLE entitlements, quota_usage, consumption_records, refund_records CASCADE")
-	
+
 	return storage
 }
 
@@ -45,13 +46,13 @@ func TestStorage_GetSetEntitlement(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	// Test getting non-existent entitlement
 	_, err := storage.GetEntitlement(ctx, "user1")
 	if err != goquota.ErrEntitlementNotFound {
 		t.Errorf("Expected ErrEntitlementNotFound, got %v", err)
 	}
-	
+
 	// Test setting entitlement
 	now := time.Now().UTC()
 	ent := &goquota.Entitlement{
@@ -60,18 +61,18 @@ func TestStorage_GetSetEntitlement(t *testing.T) {
 		SubscriptionStartDate: now,
 		UpdatedAt:             now,
 	}
-	
+
 	err = storage.SetEntitlement(ctx, ent)
 	if err != nil {
 		t.Fatalf("SetEntitlement failed: %v", err)
 	}
-	
+
 	// Test getting entitlement
 	retrieved, err := storage.GetEntitlement(ctx, "user1")
 	if err != nil {
 		t.Fatalf("GetEntitlement failed: %v", err)
 	}
-	
+
 	if retrieved.UserID != ent.UserID {
 		t.Errorf("UserID mismatch: got %s, want %s", retrieved.UserID, ent.UserID)
 	}
@@ -84,18 +85,18 @@ func TestStorage_GetUsage_NotFound(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
 	if err != nil {
 		t.Fatalf("GetUsage failed: %v", err)
 	}
-	
+
 	// Should return nil for non-existent usage
 	if usage != nil {
 		t.Errorf("Expected nil usage, got %+v", usage)
@@ -106,13 +107,13 @@ func TestStorage_ConsumeQuota_Success(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Consume quota
 	req := &goquota.ConsumeRequest{
 		UserID:   "user1",
@@ -122,7 +123,7 @@ func TestStorage_ConsumeQuota_Success(t *testing.T) {
 		Period:   period,
 		Limit:    100,
 	}
-	
+
 	used, err := storage.ConsumeQuota(ctx, req)
 	if err != nil {
 		t.Fatalf("ConsumeQuota failed: %v", err)
@@ -130,13 +131,13 @@ func TestStorage_ConsumeQuota_Success(t *testing.T) {
 	if used != 5 {
 		t.Errorf("Expected 5 used returned, got %d", used)
 	}
-	
+
 	// Verify usage
 	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
 	if err != nil {
 		t.Fatalf("GetUsage failed: %v", err)
 	}
-	
+
 	if usage.Used != 5 {
 		t.Errorf("Expected 5 used, got %d", usage.Used)
 	}
@@ -149,13 +150,13 @@ func TestStorage_ConsumeQuota_Exceeds(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Try to consume more than limit
 	req := &goquota.ConsumeRequest{
 		UserID:   "user1",
@@ -165,7 +166,7 @@ func TestStorage_ConsumeQuota_Exceeds(t *testing.T) {
 		Period:   period,
 		Limit:    100,
 	}
-	
+
 	used, err := storage.ConsumeQuota(ctx, req)
 	if err != goquota.ErrQuotaExceeded {
 		t.Errorf("Expected ErrQuotaExceeded, got %v", err)
@@ -179,40 +180,40 @@ func TestStorage_ConsumeQuota_Idempotency(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	req := &goquota.ConsumeRequest{
-		UserID:          "user1",
-		Resource:        "api_calls",
-		Amount:          10,
-		Tier:            "scholar",
-		Period:          period,
-		Limit:           100,
-		IdempotencyKey:  "test-key-123",
+		UserID:            "user1",
+		Resource:          "api_calls",
+		Amount:            10,
+		Tier:              "scholar",
+		Period:            period,
+		Limit:             100,
+		IdempotencyKey:    "test-key-123",
 		IdempotencyKeyTTL: 24 * time.Hour,
 	}
-	
+
 	// First consumption
 	used1, err := storage.ConsumeQuota(ctx, req)
 	if err != nil {
 		t.Fatalf("First ConsumeQuota failed: %v", err)
 	}
-	
+
 	// Second consumption with same idempotency key (should return cached result)
 	used2, err := storage.ConsumeQuota(ctx, req)
 	if err != nil {
 		t.Fatalf("Second ConsumeQuota failed: %v", err)
 	}
-	
+
 	if used1 != used2 {
 		t.Errorf("Idempotency failed: first=%d, second=%d", used1, used2)
 	}
-	
+
 	// Verify usage was only incremented once
 	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
 	if err != nil {
@@ -227,47 +228,47 @@ func TestStorage_ConsumeQuota_ScopedIdempotency(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// User1 consumes with key "key-123"
 	req1 := &goquota.ConsumeRequest{
-		UserID:          "user1",
-		Resource:        "api_calls",
-		Amount:          10,
-		Tier:            "scholar",
-		Period:          period,
-		Limit:           100,
-		IdempotencyKey:  "key-123",
+		UserID:            "user1",
+		Resource:          "api_calls",
+		Amount:            10,
+		Tier:              "scholar",
+		Period:            period,
+		Limit:             100,
+		IdempotencyKey:    "key-123",
 		IdempotencyKeyTTL: 24 * time.Hour,
 	}
-	
+
 	// User2 consumes with same key "key-123" (should work - scoped to user)
 	req2 := &goquota.ConsumeRequest{
-		UserID:          "user2",
-		Resource:        "api_calls",
-		Amount:          10,
-		Tier:            "scholar",
-		Period:          period,
-		Limit:           100,
-		IdempotencyKey:  "key-123", // Same key, different user
+		UserID:            "user2",
+		Resource:          "api_calls",
+		Amount:            10,
+		Tier:              "scholar",
+		Period:            period,
+		Limit:             100,
+		IdempotencyKey:    "key-123", // Same key, different user
 		IdempotencyKeyTTL: 24 * time.Hour,
 	}
-	
+
 	used1, err := storage.ConsumeQuota(ctx, req1)
 	if err != nil {
 		t.Fatalf("User1 ConsumeQuota failed: %v", err)
 	}
-	
+
 	used2, err := storage.ConsumeQuota(ctx, req2)
 	if err != nil {
 		t.Fatalf("User2 ConsumeQuota failed: %v", err)
 	}
-	
+
 	// Both should succeed (different users, same key is allowed)
 	if used1 != 10 || used2 != 10 {
 		t.Errorf("Scoped idempotency failed: user1=%d, user2=%d", used1, used2)
@@ -278,21 +279,21 @@ func TestStorage_ConsumeQuota_Concurrent(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Test concurrent consumption (tests UPSERT pattern and SELECT FOR UPDATE)
 	const numGoroutines = 10
 	const amountPerRequest = 1
 	const limit = 100
-	
+
 	results := make(chan int, numGoroutines)
 	errors := make(chan error, numGoroutines)
-	
+
 	for i := 0; i < numGoroutines; i++ {
 		go func(id int) {
 			req := &goquota.ConsumeRequest{
@@ -311,7 +312,7 @@ func TestStorage_ConsumeQuota_Concurrent(t *testing.T) {
 			results <- used
 		}(i)
 	}
-	
+
 	// Collect results
 	var totalUsed int
 	var errCount int
@@ -328,13 +329,13 @@ func TestStorage_ConsumeQuota_Concurrent(t *testing.T) {
 			t.Fatal("Timeout waiting for results")
 		}
 	}
-	
+
 	// Verify final usage
 	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
 	if err != nil {
 		t.Fatalf("GetUsage failed: %v", err)
 	}
-	
+
 	expectedUsed := numGoroutines * amountPerRequest
 	if usage.Used != expectedUsed {
 		t.Errorf("Expected %d used (concurrent), got %d", expectedUsed, usage.Used)
@@ -348,13 +349,13 @@ func TestStorage_RefundQuota(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// First consume some quota
 	consumeReq := &goquota.ConsumeRequest{
 		UserID:   "user1",
@@ -364,35 +365,35 @@ func TestStorage_RefundQuota(t *testing.T) {
 		Period:   period,
 		Limit:    100,
 	}
-	
+
 	_, err := storage.ConsumeQuota(ctx, consumeReq)
 	if err != nil {
 		t.Fatalf("ConsumeQuota failed: %v", err)
 	}
-	
+
 	// Refund some quota
 	refundReq := &goquota.RefundRequest{
-		UserID:         "user1",
-		Resource:       "api_calls",
-		Amount:         20,
-		PeriodType:     goquota.PeriodTypeDaily,
-		Period:         period,
-		IdempotencyKey: "refund-1",
+		UserID:            "user1",
+		Resource:          "api_calls",
+		Amount:            20,
+		PeriodType:        goquota.PeriodTypeDaily,
+		Period:            period,
+		IdempotencyKey:    "refund-1",
 		IdempotencyKeyTTL: 24 * time.Hour,
-		Reason:        "Test refund",
+		Reason:            "Test refund",
 	}
-	
+
 	err = storage.RefundQuota(ctx, refundReq)
 	if err != nil {
 		t.Fatalf("RefundQuota failed: %v", err)
 	}
-	
+
 	// Verify usage decreased
 	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
 	if err != nil {
 		t.Fatalf("GetUsage failed: %v", err)
 	}
-	
+
 	expectedUsed := 50 - 20
 	if usage.Used != expectedUsed {
 		t.Errorf("Expected %d used after refund, got %d", expectedUsed, usage.Used)
@@ -403,13 +404,13 @@ func TestStorage_RefundQuota_Idempotency(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Consume first
 	consumeReq := &goquota.ConsumeRequest{
 		UserID:   "user1",
@@ -420,30 +421,30 @@ func TestStorage_RefundQuota_Idempotency(t *testing.T) {
 		Limit:    100,
 	}
 	_, _ = storage.ConsumeQuota(ctx, consumeReq)
-	
+
 	// Refund with idempotency key
 	refundReq := &goquota.RefundRequest{
-		UserID:         "user1",
-		Resource:       "api_calls",
-		Amount:         10,
-		PeriodType:     goquota.PeriodTypeDaily,
-		Period:         period,
-		IdempotencyKey: "refund-key-123",
+		UserID:            "user1",
+		Resource:          "api_calls",
+		Amount:            10,
+		PeriodType:        goquota.PeriodTypeDaily,
+		Period:            period,
+		IdempotencyKey:    "refund-key-123",
 		IdempotencyKeyTTL: 24 * time.Hour,
 	}
-	
+
 	// First refund
 	err := storage.RefundQuota(ctx, refundReq)
 	if err != nil {
 		t.Fatalf("First RefundQuota failed: %v", err)
 	}
-	
+
 	// Second refund with same key (should be idempotent)
 	err = storage.RefundQuota(ctx, refundReq)
 	if err != nil {
 		t.Fatalf("Second RefundQuota failed: %v", err)
 	}
-	
+
 	// Verify usage was only decremented once
 	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
 	if err != nil {
@@ -459,13 +460,13 @@ func TestStorage_ApplyTierChange(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Create initial usage
 	consumeReq := &goquota.ConsumeRequest{
 		UserID:   "user1",
@@ -476,7 +477,7 @@ func TestStorage_ApplyTierChange(t *testing.T) {
 		Limit:    100,
 	}
 	_, _ = storage.ConsumeQuota(ctx, consumeReq)
-	
+
 	// Apply tier change
 	tierChangeReq := &goquota.TierChangeRequest{
 		UserID:      "user1",
@@ -488,12 +489,12 @@ func TestStorage_ApplyTierChange(t *testing.T) {
 		NewLimit:    200,
 		CurrentUsed: 50,
 	}
-	
+
 	err := storage.ApplyTierChange(ctx, tierChangeReq)
 	if err != nil {
 		t.Fatalf("ApplyTierChange failed: %v", err)
 	}
-	
+
 	// Verify limit updated
 	usage, err := storage.GetUsage(ctx, "user1", "api_calls", period)
 	if err != nil {
@@ -511,30 +512,30 @@ func TestStorage_GetConsumptionRecord(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Consume with idempotency key
 	req := &goquota.ConsumeRequest{
-		UserID:          "user1",
-		Resource:        "api_calls",
-		Amount:          10,
-		Tier:            "scholar",
-		Period:          period,
-		Limit:           100,
-		IdempotencyKey:  "test-consumption-key",
+		UserID:            "user1",
+		Resource:          "api_calls",
+		Amount:            10,
+		Tier:              "scholar",
+		Period:            period,
+		Limit:             100,
+		IdempotencyKey:    "test-consumption-key",
 		IdempotencyKeyTTL: 24 * time.Hour,
 	}
-	
+
 	_, err := storage.ConsumeQuota(ctx, req)
 	if err != nil {
 		t.Fatalf("ConsumeQuota failed: %v", err)
 	}
-	
+
 	// Get consumption record
 	record, err := storage.GetConsumptionRecord(ctx, "test-consumption-key")
 	if err != nil {
@@ -555,13 +556,13 @@ func TestStorage_GetRefundRecord(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Consume first
 	consumeReq := &goquota.ConsumeRequest{
 		UserID:   "user1",
@@ -572,24 +573,24 @@ func TestStorage_GetRefundRecord(t *testing.T) {
 		Limit:    100,
 	}
 	_, _ = storage.ConsumeQuota(ctx, consumeReq)
-	
+
 	// Refund with idempotency key
 	refundReq := &goquota.RefundRequest{
-		UserID:         "user1",
-		Resource:       "api_calls",
-		Amount:         10,
-		PeriodType:     goquota.PeriodTypeDaily,
-		Period:         period,
-		IdempotencyKey: "test-refund-key",
+		UserID:            "user1",
+		Resource:          "api_calls",
+		Amount:            10,
+		PeriodType:        goquota.PeriodTypeDaily,
+		Period:            period,
+		IdempotencyKey:    "test-refund-key",
 		IdempotencyKeyTTL: 24 * time.Hour,
-		Reason:         "Test refund",
+		Reason:            "Test refund",
 	}
-	
+
 	err := storage.RefundQuota(ctx, refundReq)
 	if err != nil {
 		t.Fatalf("RefundQuota failed: %v", err)
 	}
-	
+
 	// Get refund record
 	record, err := storage.GetRefundRecord(ctx, "test-refund-key")
 	if err != nil {
@@ -610,7 +611,7 @@ func TestStorage_RateLimiting_DelegatedToMemory(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	// Rate limiting should work via embedded memory.Storage
 	req := &goquota.RateLimitRequest{
 		UserID:    "user1",
@@ -621,7 +622,7 @@ func TestStorage_RateLimiting_DelegatedToMemory(t *testing.T) {
 		Burst:     20,
 		Now:       time.Now().UTC(),
 	}
-	
+
 	allowed, remaining, resetTime, err := storage.CheckRateLimit(ctx, req)
 	if err != nil {
 		t.Fatalf("CheckRateLimit failed: %v", err)
@@ -641,30 +642,30 @@ func TestStorage_Cleanup(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Create consumption record with short TTL
 	req := &goquota.ConsumeRequest{
-		UserID:          "user1",
-		Resource:        "api_calls",
-		Amount:          10,
-		Tier:            "scholar",
-		Period:          period,
-		Limit:           100,
-		IdempotencyKey:  "cleanup-test-key",
+		UserID:            "user1",
+		Resource:          "api_calls",
+		Amount:            10,
+		Tier:              "scholar",
+		Period:            period,
+		Limit:             100,
+		IdempotencyKey:    "cleanup-test-key",
 		IdempotencyKeyTTL: 1 * time.Second, // Very short TTL
 	}
-	
+
 	_, err := storage.ConsumeQuota(ctx, req)
 	if err != nil {
 		t.Fatalf("ConsumeQuota failed: %v", err)
 	}
-	
+
 	// Verify record exists
 	record, err := storage.GetConsumptionRecord(ctx, "cleanup-test-key")
 	if err != nil {
@@ -673,26 +674,26 @@ func TestStorage_Cleanup(t *testing.T) {
 	if record == nil {
 		t.Fatal("Expected consumption record to exist")
 	}
-	
+
 	// Wait for expiration
 	time.Sleep(2 * time.Second)
-	
+
 	// Run cleanup
 	err = storage.Cleanup(ctx)
 	if err != nil {
 		t.Fatalf("Cleanup failed: %v", err)
 	}
-	
+
 	// Record should be deleted (but we can't easily verify without direct DB query)
 	// The cleanup should complete without error
 }
 
 func TestStorage_Close(t *testing.T) {
 	storage := setupTestStorage(t)
-	
+
 	// Close should not panic
 	storage.Close()
-	
+
 	// Second close should be safe
 	storage.Close()
 }
@@ -701,7 +702,7 @@ func TestStorage_New_EmptyConnectionString(t *testing.T) {
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.ConnectionString = "" // Empty connection string
-	
+
 	_, err := New(ctx, config)
 	if err == nil {
 		t.Error("Expected error for empty connection string")
@@ -712,7 +713,7 @@ func TestStorage_New_InvalidConnectionString(t *testing.T) {
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.ConnectionString = "invalid://connection:string"
-	
+
 	_, err := New(ctx, config)
 	if err == nil {
 		t.Error("Expected error for invalid connection string")
@@ -728,13 +729,13 @@ func TestStorage_New_WithCustomConfig(t *testing.T) {
 	config.MaxConnLifetime = 2 * time.Hour
 	config.MaxConnIdleTime = 1 * time.Hour
 	config.CleanupEnabled = false
-	
+
 	storage, err := New(ctx, config)
 	if err != nil {
 		t.Skipf("Skipping test: failed to connect to PostgreSQL: %v", err)
 	}
 	defer storage.Close()
-	
+
 	// Verify it works
 	err = storage.Ping(ctx)
 	if err != nil {
@@ -746,7 +747,7 @@ func TestStorage_Ping(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	err := storage.Ping(ctx)
 	if err != nil {
 		t.Errorf("Ping failed: %v", err)
@@ -755,7 +756,7 @@ func TestStorage_Ping(t *testing.T) {
 
 func TestStorage_DefaultConfig(t *testing.T) {
 	config := DefaultConfig()
-	
+
 	if config.MaxConns != 10 {
 		t.Errorf("Expected MaxConns 10, got %d", config.MaxConns)
 	}
@@ -777,13 +778,13 @@ func TestStorage_ConsumeQuota_InvalidAmount(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Negative amount
 	req := &goquota.ConsumeRequest{
 		UserID:   "user1",
@@ -793,7 +794,7 @@ func TestStorage_ConsumeQuota_InvalidAmount(t *testing.T) {
 		Period:   period,
 		Limit:    100,
 	}
-	
+
 	_, err := storage.ConsumeQuota(ctx, req)
 	if err != goquota.ErrInvalidAmount {
 		t.Errorf("Expected ErrInvalidAmount, got %v", err)
@@ -804,13 +805,13 @@ func TestStorage_RefundQuota_InvalidAmount(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Negative amount
 	req := &goquota.RefundRequest{
 		UserID:     "user1",
@@ -819,7 +820,7 @@ func TestStorage_RefundQuota_InvalidAmount(t *testing.T) {
 		PeriodType: goquota.PeriodTypeDaily,
 		Period:     period,
 	}
-	
+
 	err := storage.RefundQuota(ctx, req)
 	if err != goquota.ErrInvalidAmount {
 		t.Errorf("Expected ErrInvalidAmount, got %v", err)
@@ -830,13 +831,13 @@ func TestStorage_SetEntitlement_Invalid(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	// Nil entitlement
 	err := storage.SetEntitlement(ctx, nil)
 	if err == nil {
 		t.Error("Expected error for nil entitlement")
 	}
-	
+
 	// Empty user ID
 	ent := &goquota.Entitlement{
 		UserID: "", // Invalid
@@ -852,13 +853,13 @@ func TestStorage_SetUsage_NilUsage(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	err := storage.SetUsage(ctx, "user1", "api_calls", nil, period)
 	if err == nil {
 		t.Error("Expected error for nil usage")
@@ -869,7 +870,7 @@ func TestStorage_GetConsumptionRecord_EmptyKey(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	record, err := storage.GetConsumptionRecord(ctx, "")
 	if err != nil {
 		t.Errorf("GetConsumptionRecord with empty key should not error, got %v", err)
@@ -883,7 +884,7 @@ func TestStorage_GetRefundRecord_EmptyKey(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	record, err := storage.GetRefundRecord(ctx, "")
 	if err != nil {
 		t.Errorf("GetRefundRecord with empty key should not error, got %v", err)
@@ -897,14 +898,14 @@ func TestStorage_RefundQuota_InvalidPeriodType(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	req := &goquota.RefundRequest{
 		UserID:     "user1",
 		Resource:   "api_calls",
 		Amount:     10,
 		PeriodType: goquota.PeriodType("invalid"), // Invalid period type
 	}
-	
+
 	err := storage.RefundQuota(ctx, req)
 	if err != goquota.ErrInvalidPeriod {
 		t.Errorf("Expected ErrInvalidPeriod, got %v", err)
@@ -917,25 +918,25 @@ func TestStorage_ConsumeQuota_RaceCondition_NewUser(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Test concurrent consumption for a brand new user (tests UPSERT race condition)
 	const numGoroutines = 50
 	const amountPerRequest = 1
 	const limit = 100
-	
+
 	results := make(chan int, numGoroutines)
 	errors := make(chan error, numGoroutines)
-	
+
 	// All goroutines start simultaneously
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines)
-	
+
 	for i := 0; i < numGoroutines; i++ {
 		go func() {
 			defer wg.Done()
@@ -955,11 +956,11 @@ func TestStorage_ConsumeQuota_RaceCondition_NewUser(t *testing.T) {
 			results <- used
 		}()
 	}
-	
+
 	wg.Wait()
 	close(results)
 	close(errors)
-	
+
 	// Collect results
 	var totalUsed int
 	var errCount int
@@ -969,13 +970,13 @@ func TestStorage_ConsumeQuota_RaceCondition_NewUser(t *testing.T) {
 	for range errors {
 		errCount++
 	}
-	
+
 	// Verify final usage
 	usage, err := storage.GetUsage(ctx, "new_user_race", "api_calls", period)
 	if err != nil {
 		t.Fatalf("GetUsage failed: %v", err)
 	}
-	
+
 	expectedUsed := numGoroutines * amountPerRequest
 	if usage.Used != expectedUsed {
 		t.Errorf("Expected %d used (race condition), got %d", expectedUsed, usage.Used)
@@ -994,23 +995,23 @@ func TestStorage_ConsumeQuota_RaceCondition_ExactLimit(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	const limit = 100
 	const numGoroutines = 100 // Exactly the limit
-	
+
 	// All goroutines try to consume 1 unit simultaneously
 	results := make(chan int, numGoroutines)
 	errors := make(chan error, numGoroutines)
-	
+
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines)
-	
+
 	for i := 0; i < numGoroutines; i++ {
 		go func() {
 			defer wg.Done()
@@ -1030,11 +1031,11 @@ func TestStorage_ConsumeQuota_RaceCondition_ExactLimit(t *testing.T) {
 			results <- used
 		}()
 	}
-	
+
 	wg.Wait()
 	close(results)
 	close(errors)
-	
+
 	// Collect results
 	successCount := 0
 	var lastUsed int
@@ -1042,7 +1043,7 @@ func TestStorage_ConsumeQuota_RaceCondition_ExactLimit(t *testing.T) {
 		successCount++
 		lastUsed = used
 	}
-	
+
 	errorCount := 0
 	for err := range errors {
 		errorCount++
@@ -1050,7 +1051,7 @@ func TestStorage_ConsumeQuota_RaceCondition_ExactLimit(t *testing.T) {
 			t.Errorf("Unexpected error: %v", err)
 		}
 	}
-	
+
 	// Verify: all should succeed (exactly at limit)
 	if successCount != numGoroutines {
 		t.Errorf("Expected all %d requests to succeed, got %d successes, %d errors",
@@ -1059,7 +1060,7 @@ func TestStorage_ConsumeQuota_RaceCondition_ExactLimit(t *testing.T) {
 	if lastUsed != limit {
 		t.Errorf("Expected final usage to be %d, got %d", limit, lastUsed)
 	}
-	
+
 	// Verify final usage
 	usage, err := storage.GetUsage(ctx, "user_exact_limit", "api_calls", period)
 	if err != nil {
@@ -1075,13 +1076,13 @@ func TestStorage_ConsumeRefund_RaceCondition(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Initial consumption
 	consumeReq := &goquota.ConsumeRequest{
 		UserID:   "user_consume_refund",
@@ -1095,15 +1096,15 @@ func TestStorage_ConsumeRefund_RaceCondition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initial ConsumeQuota failed: %v", err)
 	}
-	
+
 	const consumeGoroutines = 50
 	const refundGoroutines = 30
 	consumeResults := make(chan int, consumeGoroutines)
 	consumeErrors := make(chan error, consumeGoroutines)
 	refundErrors := make(chan error, refundGoroutines)
-	
+
 	var wg sync.WaitGroup
-	
+
 	// Concurrent consumes
 	for i := 0; i < consumeGoroutines; i++ {
 		wg.Add(1)
@@ -1125,7 +1126,7 @@ func TestStorage_ConsumeRefund_RaceCondition(t *testing.T) {
 			consumeResults <- used
 		}()
 	}
-	
+
 	// Concurrent refunds
 	for i := 0; i < refundGoroutines; i++ {
 		wg.Add(1)
@@ -1141,18 +1142,18 @@ func TestStorage_ConsumeRefund_RaceCondition(t *testing.T) {
 			refundErrors <- storage.RefundQuota(ctx, refundReq)
 		}()
 	}
-	
+
 	wg.Wait()
 	close(consumeResults)
 	close(consumeErrors)
 	close(refundErrors)
-	
+
 	// Count successes
 	consumeSuccess := 0
 	for range consumeResults {
 		consumeSuccess++
 	}
-	
+
 	consumeErrorsCount := 0
 	for err := range consumeErrors {
 		consumeErrorsCount++
@@ -1160,7 +1161,7 @@ func TestStorage_ConsumeRefund_RaceCondition(t *testing.T) {
 			t.Errorf("Unexpected consume error: %v", err)
 		}
 	}
-	
+
 	refundErrorsCount := 0
 	for err := range refundErrors {
 		refundErrorsCount++
@@ -1168,13 +1169,13 @@ func TestStorage_ConsumeRefund_RaceCondition(t *testing.T) {
 			t.Errorf("Unexpected refund error: %v", err)
 		}
 	}
-	
+
 	// Verify final usage: 100 (initial) + 50 (consumes) - 30 (refunds) = 120
 	usage, err := storage.GetUsage(ctx, "user_consume_refund", "api_calls", period)
 	if err != nil {
 		t.Fatalf("GetUsage failed: %v", err)
 	}
-	
+
 	expectedUsed := 100 + consumeSuccess - refundGoroutines
 	if usage.Used != expectedUsed {
 		t.Errorf("Expected %d used (100 + %d - %d), got %d",
@@ -1188,34 +1189,34 @@ func TestStorage_ConsumeQuota_RaceCondition_Idempotency(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	const numGoroutines = 20
 	const idempotencyKey = "race-idempotency-key"
-	
+
 	results := make(chan int, numGoroutines)
 	errors := make(chan error, numGoroutines)
-	
+
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines)
-	
+
 	// All goroutines use the same idempotency key simultaneously
 	for i := 0; i < numGoroutines; i++ {
 		go func() {
 			defer wg.Done()
 			req := &goquota.ConsumeRequest{
-				UserID:          "user_idempotency_race",
-				Resource:        "api_calls",
-				Amount:          10,
-				Tier:            "scholar",
-				Period:          period,
-				Limit:           1000,
-				IdempotencyKey:  idempotencyKey,
+				UserID:            "user_idempotency_race",
+				Resource:          "api_calls",
+				Amount:            10,
+				Tier:              "scholar",
+				Period:            period,
+				Limit:             1000,
+				IdempotencyKey:    idempotencyKey,
 				IdempotencyKeyTTL: 24 * time.Hour,
 			}
 			used, err := storage.ConsumeQuota(ctx, req)
@@ -1226,17 +1227,17 @@ func TestStorage_ConsumeQuota_RaceCondition_Idempotency(t *testing.T) {
 			results <- used
 		}()
 	}
-	
+
 	wg.Wait()
 	close(results)
 	close(errors)
-	
+
 	// Collect results - all should return the same value (idempotent)
 	var allResults []int
 	for used := range results {
 		allResults = append(allResults, used)
 	}
-	
+
 	// All results should be identical (idempotency)
 	if len(allResults) > 0 {
 		firstResult := allResults[0]
@@ -1246,7 +1247,7 @@ func TestStorage_ConsumeQuota_RaceCondition_Idempotency(t *testing.T) {
 			}
 		}
 	}
-	
+
 	// Verify usage was only incremented once
 	usage, err := storage.GetUsage(ctx, "user_idempotency_race", "api_calls", period)
 	if err != nil {
@@ -1263,13 +1264,13 @@ func TestStorage_RefundQuota_EdgeCase_NegativeUsage(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Consume some quota
 	consumeReq := &goquota.ConsumeRequest{
 		UserID:   "user_negative",
@@ -1283,7 +1284,7 @@ func TestStorage_RefundQuota_EdgeCase_NegativeUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConsumeQuota failed: %v", err)
 	}
-	
+
 	// Try to refund more than was consumed
 	refundReq := &goquota.RefundRequest{
 		UserID:     "user_negative",
@@ -1292,12 +1293,12 @@ func TestStorage_RefundQuota_EdgeCase_NegativeUsage(t *testing.T) {
 		PeriodType: goquota.PeriodTypeDaily,
 		Period:     period,
 	}
-	
+
 	err = storage.RefundQuota(ctx, refundReq)
 	if err != nil {
 		t.Fatalf("RefundQuota failed: %v", err)
 	}
-	
+
 	// Verify usage is floored at 0
 	usage, err := storage.GetUsage(ctx, "user_negative", "api_calls", period)
 	if err != nil {
@@ -1313,13 +1314,13 @@ func TestStorage_ConsumeQuota_EdgeCase_ZeroAmount(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Consume zero amount
 	req := &goquota.ConsumeRequest{
 		UserID:   "user_zero",
@@ -1329,7 +1330,7 @@ func TestStorage_ConsumeQuota_EdgeCase_ZeroAmount(t *testing.T) {
 		Period:   period,
 		Limit:    100,
 	}
-	
+
 	used, err := storage.ConsumeQuota(ctx, req)
 	if err != nil {
 		t.Fatalf("ConsumeQuota with zero amount failed: %v", err)
@@ -1337,7 +1338,7 @@ func TestStorage_ConsumeQuota_EdgeCase_ZeroAmount(t *testing.T) {
 	if used != 0 {
 		t.Errorf("Expected 0 used for zero amount, got %d", used)
 	}
-	
+
 	// Verify no usage record was created
 	usage, err := storage.GetUsage(ctx, "user_zero", "api_calls", period)
 	if err != nil {
@@ -1353,13 +1354,13 @@ func TestStorage_ConcurrentReadWrite(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	// Initial consumption
 	consumeReq := &goquota.ConsumeRequest{
 		UserID:   "user_read_write",
@@ -1373,14 +1374,14 @@ func TestStorage_ConcurrentReadWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initial ConsumeQuota failed: %v", err)
 	}
-	
+
 	const readers = 50
 	const writers = 30
 	readErrors := make(chan error, readers)
 	writeResults := make(chan int, writers)
-	
+
 	var wg sync.WaitGroup
-	
+
 	// Concurrent readers
 	for i := 0; i < readers; i++ {
 		wg.Add(1)
@@ -1390,7 +1391,7 @@ func TestStorage_ConcurrentReadWrite(t *testing.T) {
 			readErrors <- err
 		}()
 	}
-	
+
 	// Concurrent writers
 	for i := 0; i < writers; i++ {
 		wg.Add(1)
@@ -1412,11 +1413,11 @@ func TestStorage_ConcurrentReadWrite(t *testing.T) {
 			writeResults <- used
 		}()
 	}
-	
+
 	wg.Wait()
 	close(readErrors)
 	close(writeResults)
-	
+
 	// Check for read errors
 	readErrorCount := 0
 	for err := range readErrors {
@@ -1425,19 +1426,19 @@ func TestStorage_ConcurrentReadWrite(t *testing.T) {
 			t.Errorf("Read error: %v", err)
 		}
 	}
-	
+
 	// Count successful writes
 	writeSuccess := 0
 	for range writeResults {
 		writeSuccess++
 	}
-	
+
 	// Verify final usage: 100 (initial) + 30 (writes) = 130
 	usage, err := storage.GetUsage(ctx, "user_read_write", "api_calls", period)
 	if err != nil {
 		t.Fatalf("GetUsage failed: %v", err)
 	}
-	
+
 	expectedUsed := 100 + writeSuccess
 	if usage.Used != expectedUsed {
 		t.Errorf("Expected %d used (100 + %d), got %d", expectedUsed, writeSuccess, usage.Used)
@@ -1452,19 +1453,19 @@ func TestStorage_MultipleUsers_Concurrent(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.Close()
 	ctx := context.Background()
-	
+
 	period := goquota.Period{
 		Start: time.Now().UTC(),
 		End:   time.Now().UTC().Add(24 * time.Hour),
 		Type:  goquota.PeriodTypeDaily,
 	}
-	
+
 	const numUsers = 10
 	const requestsPerUser = 5
-	
+
 	var wg sync.WaitGroup
 	errors := make(chan error, numUsers*requestsPerUser)
-	
+
 	// Each user makes concurrent requests
 	for userID := 0; userID < numUsers; userID++ {
 		for reqID := 0; reqID < requestsPerUser; reqID++ {
@@ -1486,10 +1487,10 @@ func TestStorage_MultipleUsers_Concurrent(t *testing.T) {
 			}(userID, reqID)
 		}
 	}
-	
+
 	wg.Wait()
 	close(errors)
-	
+
 	// Check for errors
 	errorCount := 0
 	for err := range errors {
@@ -1498,7 +1499,7 @@ func TestStorage_MultipleUsers_Concurrent(t *testing.T) {
 			t.Errorf("Unexpected error: %v", err)
 		}
 	}
-	
+
 	// Verify each user's usage
 	for userID := 0; userID < numUsers; userID++ {
 		usage, err := storage.GetUsage(ctx, fmt.Sprintf("user_%d", userID), "api_calls", period)
@@ -1510,4 +1511,3 @@ func TestStorage_MultipleUsers_Concurrent(t *testing.T) {
 		}
 	}
 }
-

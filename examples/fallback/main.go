@@ -35,12 +35,12 @@ func main() {
 			UsageTTL:       30 * time.Second,
 		},
 		FallbackConfig: &goquota.FallbackConfig{
-			Enabled:                    true,
-			FallbackToCache:            true,
-			OptimisticAllowance:        true,
+			Enabled:                       true,
+			FallbackToCache:               true,
+			OptimisticAllowance:           true,
 			OptimisticAllowancePercentage: 10.0, // Allow up to 10% optimistically
-			SecondaryStorage:           secondaryStorage,
-			MaxStaleness:               5 * time.Minute,
+			SecondaryStorage:              secondaryStorage,
+			MaxStaleness:                  5 * time.Minute,
 		},
 	}
 
@@ -123,4 +123,3 @@ func main() {
 	fmt.Println("The system will gracefully degrade when storage is unavailable.")
 	fmt.Println("Example completed successfully.")
 }
-
