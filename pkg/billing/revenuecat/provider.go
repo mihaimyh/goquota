@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mihaimyh/goquota/pkg/billing"
+	"github.com/mihaimyh/goquota/pkg/billing/internal"
 	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
@@ -27,7 +28,7 @@ type Provider struct {
 	manager       *goquota.Manager
 	config        billing.Config
 	httpClient    *http.Client
-	rateLimiter   *rateLimiter
+	rateLimiter   *internal.RateLimiter
 	tierMapping   map[string]string
 	defaultTier   string
 	webhookSecret []byte
@@ -82,16 +83,9 @@ func NewProvider(config billing.Config) (*Provider, error) {
 	}
 
 	// Setup rate limiter
-	limiter := newRateLimiter(defaultRateLimitRequests, defaultRateLimitWindow)
-
-	// Start background cleanup to prevent unbounded growth of the IP map
-	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			limiter.Cleanup()
-		}
-	}()
+	limiter := internal.NewRateLimiter(defaultRateLimitRequests, defaultRateLimitWindow)
+	// Note: Cleanup is now handled lazily in the rate limiter's allow() method
+	// to avoid resource leaks from unstoppable goroutines
 
 	// Setup metrics (optional)
 	metrics := config.Metrics

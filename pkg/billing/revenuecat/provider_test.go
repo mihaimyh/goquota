@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mihaimyh/goquota/pkg/billing"
+	"github.com/mihaimyh/goquota/pkg/billing/internal"
 	"github.com/mihaimyh/goquota/pkg/goquota"
 	"github.com/mihaimyh/goquota/storage/memory"
 )
@@ -2065,33 +2066,51 @@ func TestProvider_Webhook_NoEntitlementsInEvent(t *testing.T) {
 // Rate Limiter Tests
 
 func TestRateLimiter_Allow(t *testing.T) {
-	rl := newRateLimiter(2, time.Minute) // 2 requests per minute
+	rl := internal.NewRateLimiter(2, time.Minute) // 2 requests per minute
 
-	ip := testIP
+	// Test through middleware since allow() is now private
+	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader("{}"))
+	req.RemoteAddr = testIP + ":1234"
 
 	// First request should be allowed
-	if !rl.allow(ip) {
+	w1 := httptest.NewRecorder()
+	handler.ServeHTTP(w1, req)
+	if w1.Code != http.StatusOK {
 		t.Error("Expected first request to be allowed")
 	}
 
 	// Second request should be allowed
-	if !rl.allow(ip) {
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req)
+	if w2.Code != http.StatusOK {
 		t.Error("Expected second request to be allowed")
 	}
 
 	// Third request should be rate limited
-	if rl.allow(ip) {
+	w3 := httptest.NewRecorder()
+	handler.ServeHTTP(w3, req)
+	if w3.Code != http.StatusTooManyRequests {
 		t.Error("Expected third request to be rate limited")
 	}
 }
 
 func TestRateLimiter_Cleanup(t *testing.T) {
-	rl := newRateLimiter(10, 100*time.Millisecond) // Very short window
+	rl := internal.NewRateLimiter(10, 100*time.Millisecond) // Very short window
 
-	ip := testIP
+	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader("{}"))
+	req.RemoteAddr = testIP + ":1234"
 
 	// Make a request
-	rl.allow(ip)
+	w1 := httptest.NewRecorder()
+	handler.ServeHTTP(w1, req)
 
 	// Wait for window to expire
 	time.Sleep(150 * time.Millisecond)
@@ -2100,20 +2119,33 @@ func TestRateLimiter_Cleanup(t *testing.T) {
 	rl.Cleanup()
 
 	// Should be able to make request again after cleanup
-	if !rl.allow(ip) {
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req)
+	if w2.Code != http.StatusOK {
 		t.Error("Expected request to be allowed after cleanup")
 	}
 }
 
 func TestRateLimiter_CleanupExpired(t *testing.T) {
-	rl := newRateLimiter(10, 100*time.Millisecond)
+	rl := internal.NewRateLimiter(10, 100*time.Millisecond)
+
+	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
 
 	ip1 := "192.168.1.1"
 	ip2 := "192.168.1.2"
 
 	// Make requests from both IPs
-	rl.allow(ip1)
-	rl.allow(ip2)
+	req1 := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader("{}"))
+	req1.RemoteAddr = ip1 + ":1234"
+	w1 := httptest.NewRecorder()
+	handler.ServeHTTP(w1, req1)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader("{}"))
+	req2.RemoteAddr = ip2 + ":1234"
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
 
 	// Wait for expiration
 	time.Sleep(150 * time.Millisecond)
@@ -2123,16 +2155,20 @@ func TestRateLimiter_CleanupExpired(t *testing.T) {
 
 	// Both should be cleaned up - verify by making new requests
 	// If cleaned up, they should be allowed again
-	if !rl.allow(ip1) {
+	w3 := httptest.NewRecorder()
+	handler.ServeHTTP(w3, req1)
+	if w3.Code != http.StatusOK {
 		t.Error("Expected ip1 to be allowed after cleanup")
 	}
-	if !rl.allow(ip2) {
+	w4 := httptest.NewRecorder()
+	handler.ServeHTTP(w4, req2)
+	if w4.Code != http.StatusOK {
 		t.Error("Expected ip2 to be allowed after cleanup")
 	}
 }
 
 func TestRateLimiter_Middleware(t *testing.T) {
-	rl := newRateLimiter(1, time.Minute) // 1 request per minute
+	rl := internal.NewRateLimiter(1, time.Minute) // 1 request per minute
 
 	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -2196,7 +2232,7 @@ func TestGetClientIP(t *testing.T) {
 			}
 			req.RemoteAddr = tt.remoteAddr
 
-			ip := getClientIP(req)
+			ip := internal.GetClientIP(req)
 			if !strings.HasPrefix(ip, tt.expectedPrefix) {
 				t.Errorf("Expected IP to start with %q, got %q", tt.expectedPrefix, ip)
 			}
