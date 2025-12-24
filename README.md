@@ -22,6 +22,7 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Observability** - Built-in Prometheus metrics and structured logging
 - **HTTP Middlewares** - Easy integration with standard `net/http` servers, Gin, Echo, and Fiber frameworks with rate limit headers
 - **Billing Provider Integration** - Unified interface for RevenueCat, Stripe, and other payment providers with automatic webhook processing
+- **Standardized Usage API** - Pre-built HTTP endpoints for exposing quota state to frontend applications with unified monthly + forever credits view
 
 ## Installation
 
@@ -636,6 +637,80 @@ tier, _ := provider.SyncUser(ctx, userID)
 ```
 
 See [pkg/billing/README.md](pkg/billing/README.md) for complete documentation.
+
+## Usage API
+
+The `pkg/api` package provides a standardized HTTP API for exposing user quota state to frontend applications. This transforms goquota from a backend library into a full-stack SaaS kit by providing ready-to-use endpoints that frontend developers can consume without understanding the underlying billing complexity.
+
+### Features
+
+- **Unified Quota View**: Combines monthly limits and forever credits into a single JSON response
+- **Orphaned Credits Detection**: Automatically discovers and displays purchased credits even when users downgrade tiers
+- **Unlimited Quota Handling**: Properly handles unlimited (-1) quotas
+- **Resource Filtering**: Optional resource filtering for performance optimization
+
+### Quick Example
+
+```go
+import (
+    "net/http"
+    "github.com/mihaimyh/goquota/pkg/api"
+)
+
+// Create API handler
+usageHandler, _ := api.NewHandler(api.Config{
+    Manager: manager,
+    GetUserID: api.FromHeader("X-User-ID"),
+    KnownResources: []string{"api_calls", "gpt4", "tts_chars"},
+})
+
+// Register route
+http.HandleFunc("/api/v1/me/usage", usageHandler.GetUsage)
+```
+
+### Response Format
+
+The API returns a standardized JSON response:
+
+```json
+{
+  "user_id": "user_123",
+  "tier": "pro",
+  "status": "active",
+  "resources": {
+    "api_calls": {
+      "limit": 1500,
+      "used": 150,
+      "remaining": 1350,
+      "reset_at": "2025-02-01T00:00:00Z",
+      "breakdown": [
+        {
+          "source": "monthly",
+          "limit": 1000,
+          "used": 150
+        },
+        {
+          "source": "forever",
+          "balance": 500,
+          "limit": 500,
+          "used": 0
+        }
+      ]
+    }
+  }
+}
+```
+
+The breakdown shows quota sources (monthly, forever) with their individual limits, usage, and balances, making it easy for frontend applications to display progress bars and usage details.
+
+### Key Benefits
+
+- **Frontend-Ready**: No need to understand hybrid billing complexity - just consume the JSON
+- **Orphaned Credits**: Users never lose visibility of purchased credits after tier downgrades
+- **Unlimited Support**: Correctly handles unlimited quotas (-1) in combined calculations
+- **Performance**: Sequential fetching optimized for typical 1-3 resource scenarios
+
+See [pkg/api/README.md](pkg/api/README.md) for complete documentation, including resource filtering, orphaned credits handling, and integration examples.
 
 ## Supported Frameworks
 
