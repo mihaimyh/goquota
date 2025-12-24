@@ -114,27 +114,23 @@ The provider automatically verifies webhook signatures using `stripe.ConstructEv
 
 ### SyncUser and Expiration Dates
 
-**Behavior**: When using `SyncUser()` (manual sync via Stripe API), the entitlement may show as **Active with No Expiration Date**.
+**Behavior**: When using `SyncUser()` (manual sync via Stripe API), the entitlement will include proper expiration dates.
 
-**Why This Happens**:
+**How This Works**:
 
-- The Stripe v83 SDK doesn't expose `current_period_end` as a struct field
-- `SyncUser` uses the Stripe API directly (not webhooks), so it doesn't have access to raw JSON
-- The function filters for `status='active'` subscriptions
-
-**Why This is OK**:
-
-- As long as Stripe reports the subscription as `active`, the user should have access
-- The next webhook event (e.g., `invoice.payment_succeeded`) will populate the expiration date
-- This is acceptable for production use
+- The Stripe v84 SDK exposes `current_period_end` and `current_period_start` on the `SubscriptionItem` struct
+- These fields were moved from the top-level `Subscription` to `SubscriptionItem` in Stripe API version 2025-03-31.basil
+- `SyncUser` now properly extracts these dates from subscription items
+- The function filters for `status='active'` subscriptions and sets expiration dates accordingly
 
 **Recommendation**:
 
-- Use webhooks as the primary source of truth
-- Use `SyncUser()` only for:
+- Use webhooks as the primary source of truth for real-time updates
+- Use `SyncUser()` for:
   - Initial user onboarding
   - Manual reconciliation
   - Debugging/support scenarios
+  - Recovering from missed webhook events
 
 ### Checkout Session Metadata Patching
 

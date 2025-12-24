@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stripe/stripe-go/v83"
+	"github.com/stripe/stripe-go/v84"
 
 	"github.com/mihaimyh/goquota/pkg/billing"
 	"github.com/mihaimyh/goquota/pkg/billing/internal"

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stripe/stripe-go/v83"
+	"github.com/stripe/stripe-go/v84"
 
 	"github.com/mihaimyh/goquota/pkg/billing"
 	"github.com/mihaimyh/goquota/pkg/goquota"
@@ -168,14 +168,14 @@ func (p *Provider) syncToDefaultTier(ctx context.Context, userID string, startTi
 }
 
 // resolveTierFromSubscriptions resolves tier from multiple subscriptions using tier weights
-//
-//nolint:unparam // expiresAt and startDate are nil for now but kept for API consistency
 func (p *Provider) resolveTierFromSubscriptions(
 	subscriptions []*stripe.Subscription,
 ) (tier string, expiresAt, startDate *time.Time) {
 	var highestTier string
 	var maxWeight = -1
 	var mostRecentCreated int64
+	var periodEnd *time.Time
+	var periodStart *time.Time
 
 	for _, sub := range subscriptions {
 		if sub.Status != subscriptionStatusActive {
@@ -195,13 +195,16 @@ func (p *Provider) resolveTierFromSubscriptions(
 				highestTier = tier
 				mostRecentCreated = sub.Created
 
-				// KNOWN BEHAVIOR: Period dates (expiresAt, startDate) are nil in SyncUser
-				// This is expected because:
-				// 1. Stripe v83 SDK doesn't expose current_period_end/start as struct fields
-				// 2. SyncUser uses API (not webhooks), so no raw JSON available
-				// 3. As long as status='active', user should have access
-				// 4. Next webhook (invoice.payment_succeeded) will populate expiration date
-				// This is acceptable for production - see CONFIGURATION.md for details
+				// In Stripe SDK v84+, CurrentPeriodEnd and CurrentPeriodStart are on SubscriptionItem
+				// (they were moved from Subscription to SubscriptionItem in API version 2025-03-31.basil)
+				if item.CurrentPeriodEnd > 0 {
+					t := time.Unix(item.CurrentPeriodEnd, 0).UTC()
+					periodEnd = &t
+				}
+				if item.CurrentPeriodStart > 0 {
+					t := time.Unix(item.CurrentPeriodStart, 0).UTC()
+					periodStart = &t
+				}
 			}
 		}
 	}
@@ -210,5 +213,5 @@ func (p *Provider) resolveTierFromSubscriptions(
 		return p.defaultTier, nil, nil
 	}
 
-	return highestTier, expiresAt, startDate
+	return highestTier, periodEnd, periodStart
 }
