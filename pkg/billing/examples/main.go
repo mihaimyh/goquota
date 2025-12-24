@@ -102,10 +102,10 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"user_id": userID,
-			"tier":    usage.Tier,
-			"used":    usage.Used,
-			"limit":   usage.Limit,
+			"user_id":   userID,
+			"tier":      usage.Tier,
+			"used":      usage.Used,
+			"limit":     usage.Limit,
 			"remaining": usage.Limit - usage.Used,
 		})
 	})
@@ -116,4 +116,3 @@ func main() {
 	log.Println("Restore purchases: http://localhost:8080/restore-purchases?user_id=USER_ID")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
-

@@ -15,6 +15,7 @@ require (
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.11.1
+	github.com/stripe/stripe-go/v83 v83.2.1
 	golang.org/x/sync v0.19.0
 	google.golang.org/grpc v1.74.2
 )

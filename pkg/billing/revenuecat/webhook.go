@@ -7,11 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/mihaimyh/goquota/pkg/billing/internal"
 )
 
 // webhookPayload represents the RevenueCat webhook payload structure
@@ -126,27 +126,8 @@ func (p *webhookPayload) lookupEntitlement(id string) *entitlement {
 // readBodyStrict reads the request body and validates it's not empty.
 // Enforces a 256KB limit to prevent memory exhaustion attacks (DoS protection).
 func readBodyStrict(w http.ResponseWriter, r *http.Request) ([]byte, error) {
-	// Limit payload to 256KB to prevent memory exhaustion attacks
-	// RevenueCat webhook payloads are typically <100KB, so 256KB is a safe upper bound
-	r.Body = http.MaxBytesReader(w, r.Body, 256*1024)
-
-	body, err := io.ReadAll(r.Body)
-	defer func() {
-		if closeErr := r.Body.Close(); closeErr != nil {
-			log.Printf("[WEBHOOK] provider=%s body_close=failed error=%v", providerName, closeErr)
-		}
-	}()
-	if err != nil {
-		// Check if error is due to body size limit
-		if err.Error() == "http: request body too large" {
-			return nil, fmt.Errorf("payload too large (max 256KB)")
-		}
-		return nil, err
-	}
-	if len(body) == 0 {
-		return nil, fmt.Errorf("empty body")
-	}
-	return body, nil
+	// Use internal package for consistent DoS protection
+	return internal.ReadBodyStrict(w, r, 256*1024)
 }
 
 // extractTokenOrSignature extracts the authentication token or signature from the request
