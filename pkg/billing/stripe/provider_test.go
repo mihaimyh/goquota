@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stripe/stripe-go/v83"
+	"github.com/stripe/stripe-go/v84"
 
 	"github.com/mihaimyh/goquota/pkg/billing"
 	"github.com/mihaimyh/goquota/pkg/goquota"
@@ -232,8 +232,7 @@ func TestProvider_ExtractTierFromSubscription(t *testing.T) {
 		ID:      "sub_test",
 		Status:  "active",
 		Created: now.Unix(),
-		// Note: CurrentPeriodStart/End are not in the Subscription struct
-		// Period dates are extracted from webhook event JSON in production code
+		// In v84+, CurrentPeriodEnd/Start are on SubscriptionItem, not Subscription
 		Items: &stripe.SubscriptionItemList{
 			Data: []*stripe.SubscriptionItem{
 				{
@@ -245,17 +244,16 @@ func TestProvider_ExtractTierFromSubscription(t *testing.T) {
 		},
 	}
 
-	tier, expiresAt, startDate := provider.extractTierFromSubscription(sub, nil)
+	tier, expiresAt, startDate := provider.extractTierFromSubscription(sub)
 	if tier != testTierPro {
 		t.Errorf("Expected tier %s, got %s", testTierPro, tier)
 	}
-	// Period dates are nil when no raw JSON is provided
-	// In production, webhook events provide raw JSON with current_period_start/end
+	// Period dates are nil when SubscriptionItem doesn't have CurrentPeriodEnd/Start set
 	if expiresAt != nil {
-		t.Error("Expected expiresAt to be nil (no raw JSON provided)")
+		t.Error("Expected expiresAt to be nil (no period dates on SubscriptionItem)")
 	}
 	if startDate != nil {
-		t.Error("Expected startDate to be nil (no raw JSON provided)")
+		t.Error("Expected startDate to be nil (no period dates on SubscriptionItem)")
 	}
 }
 

@@ -1,16 +1,30 @@
-# Stripe Go SDK v83 API Documentation
+# Stripe Go SDK v84 API Documentation
 
-This document describes how the Stripe Go SDK v83 is used in the `goquota` Stripe billing provider.
+This document describes how the Stripe Go SDK v84 is used in the `goquota` Stripe billing provider.
 
 ## Overview
 
-The Stripe provider uses **stripe-go v83.2.1**, which introduces a new client-based API pattern that replaces the global configuration approach used in earlier versions.
+The Stripe provider uses **stripe-go v84.1.0**, which introduces a breaking change in how billing period fields are accessed (moved from `Subscription` to `SubscriptionItem` in API version 2025-03-31.basil).
 
-## Key Changes from v76 to v83
+## Key Changes from v83 to v84
+
+### Breaking Change: CurrentPeriodEnd/Start Location
+
+**In v83 and earlier:**
+
+- `CurrentPeriodEnd` and `CurrentPeriodStart` were on the `Subscription` struct (but not exposed in Go SDK)
+- Required parsing raw JSON to access these fields
+
+**In v84 (API version 2025-03-31.basil):**
+
+- These fields were **moved** to the `SubscriptionItem` struct
+- Now properly exposed in the Go SDK as struct fields
+- Access pattern: `sub.Items.Data[i].CurrentPeriodEnd` instead of parsing JSON
 
 ### 1. Client-Based API (v82+)
 
 **Old Pattern (v76):**
+
 ```go
 import "github.com/stripe/stripe-go/v76"
 import "github.com/stripe/stripe-go/v76/customer"
@@ -22,6 +36,7 @@ subscription.Get("sub_123", nil)
 ```
 
 **New Pattern (v83):**
+
 ```go
 import "github.com/stripe/stripe-go/v83"
 
@@ -33,12 +48,14 @@ client.V1Subscriptions.Retrieve(ctx, "sub_123", nil)
 ### 2. Webhook Event Construction
 
 **Old Pattern:**
+
 ```go
 import "github.com/stripe/stripe-go/v76/webhook"
 event, err := webhook.ConstructEvent(payload, sig, secret)
 ```
 
 **New Pattern:**
+
 ```go
 import "github.com/stripe/stripe-go/v83"
 event, err := stripe.ConstructEvent(payload, sig, secret)
@@ -56,6 +73,7 @@ stripeClient := stripe.NewClient(apiKey)
 ```
 
 The client is stored in the `Provider` struct:
+
 ```go
 type Provider struct {
     // ...
@@ -90,6 +108,7 @@ func (p *Provider) searchCustomerByMetadata(ctx context.Context, userID string) 
 ```
 
 **Key Points:**
+
 - Uses `stripe.CustomerSearchParams` for query parameters
 - Returns an iterator that must be ranged over
 - Each iteration returns `(customer, error)` tuple
@@ -103,7 +122,7 @@ Used to fetch customer metadata when subscription metadata is missing:
 // pkg/billing/stripe/webhook.go
 func (p *Provider) extractUserIDFromSubscription(ctx context.Context, sub *stripe.Subscription) (string, error) {
     // ... check subscription metadata first ...
-    
+
     // Fallback to customer metadata
     if sub.Customer != nil {
         // New v83 API: client.V1Customers.Retrieve()
@@ -119,6 +138,7 @@ func (p *Provider) extractUserIDFromSubscription(ctx context.Context, sub *strip
 ```
 
 **Key Points:**
+
 - Uses `V1Customers.Retrieve(ctx, customerID, params)`
 - Returns `(*Customer, error)`
 - `params` can be `nil` or `&stripe.CustomerRetrieveParams{}` for expansion
@@ -152,6 +172,7 @@ func (p *Provider) syncCustomer(ctx context.Context, customerID, userID string, 
 ```
 
 **Key Points:**
+
 - Uses `stripe.SubscriptionListParams` with `Customer` and `Status` filters
 - Returns an iterator that must be ranged over
 - Each iteration returns `(subscription, error)` tuple
@@ -165,7 +186,7 @@ Used in webhook handlers to fetch full subscription details:
 // pkg/billing/stripe/webhook.go
 func (p *Provider) handleInvoicePaymentSucceeded(ctx context.Context, event *stripe.Event, eventTimestamp time.Time) error {
     // ... extract subscription ID from invoice ...
-    
+
     // New v83 API: client.V1Subscriptions.Retrieve()
     sub, err := p.stripeClient.V1Subscriptions.Retrieve(ctx, subscriptionID, nil)
     if err != nil {
@@ -176,6 +197,7 @@ func (p *Provider) handleInvoicePaymentSucceeded(ctx context.Context, event *str
 ```
 
 **Key Points:**
+
 - Uses `V1Subscriptions.Retrieve(ctx, subscriptionID, params)`
 - Returns `(*Subscription, error)`
 - Used when webhook events only contain subscription IDs, not full objects
@@ -188,7 +210,7 @@ Used in `checkout.session.completed` handler to patch missing metadata:
 // pkg/billing/stripe/webhook.go
 func (p *Provider) handleCheckoutSessionCompleted(ctx context.Context, event *stripe.Event, eventTimestamp time.Time) error {
     // ... extract subscription ID ...
-    
+
     sub, err := p.stripeClient.V1Subscriptions.Retrieve(ctx, subscriptionID, nil)
     if err != nil {
         return fmt.Errorf("failed to fetch subscription: %w", err)
@@ -208,6 +230,7 @@ func (p *Provider) handleCheckoutSessionCompleted(ctx context.Context, event *st
 ```
 
 **Key Points:**
+
 - Uses `V1Subscriptions.Update(ctx, subscriptionID, params)`
 - `params.AddMetadata(key, value)` adds metadata fields
 - Returns updated `(*Subscription, error)`
@@ -222,7 +245,7 @@ Webhook signature verification uses the direct package function:
 // pkg/billing/stripe/webhook.go
 func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
     // ... read body ...
-    
+
     // New v83 API: stripe.ConstructEvent() (not webhook.ConstructEvent)
     event, err := stripe.ConstructEvent(body, sig, string(p.webhookSecret))
     if err != nil {
@@ -234,6 +257,7 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 ```
 
 **Key Points:**
+
 - Uses `stripe.ConstructEvent(payload, signature, secret)` directly
 - No longer requires `webhook` subpackage import
 - Returns `(*Event, error)`
@@ -254,6 +278,7 @@ func (p *Provider) handleSubscriptionCreated(ctx context.Context, event *stripe.
 ```
 
 **Key Points:**
+
 - `event.Data.Raw` contains the raw JSON bytes
 - Must manually unmarshal into the appropriate struct type
 - This is the standard pattern for all webhook event handlers
@@ -280,7 +305,7 @@ func (p *Provider) extractTierFromSubscription(sub *stripe.Subscription, rawJSON
             }
         }
     }
-    
+
     // Use extracted values...
     if currentPeriodEnd > 0 {
         exp := time.Unix(currentPeriodEnd, 0)
@@ -291,6 +316,7 @@ func (p *Provider) extractTierFromSubscription(sub *stripe.Subscription, rawJSON
 ```
 
 **Why This Pattern:**
+
 - Stripe API v83 may not include these fields in the generated Go structs
 - Raw JSON from webhook events always contains these fields
 - This pattern ensures compatibility across API versions
@@ -325,6 +351,7 @@ func (p *Provider) handleInvoicePaymentSucceeded(ctx context.Context, event *str
 ```
 
 **Key Points:**
+
 - `Invoice.Subscription` may not be directly accessible in v83
 - Extract from raw JSON to handle both object and string formats
 - Then use `V1Subscriptions.Retrieve()` to get full subscription details
@@ -378,6 +405,7 @@ customer, err := p.stripeClient.V1Customers.Retrieve(ctx, customerID, nil)
 ```
 
 This enables:
+
 - Request cancellation
 - Timeout handling
 - Request tracing
@@ -455,6 +483,7 @@ If upgrading from v76:
 ## Summary
 
 The v83 API provides:
+
 - ✅ Better isolation (no global state)
 - ✅ Context support for cancellation/timeouts
 - ✅ More consistent API patterns
@@ -463,4 +492,3 @@ The v83 API provides:
 - ⚠️ Breaking changes from v76 require code updates
 
 This project successfully uses v83 with workarounds for period field extraction, ensuring full compatibility with Stripe's latest API.
-

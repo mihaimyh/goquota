@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/stripe/stripe-go/v83"
+	"github.com/stripe/stripe-go/v84"
 
 	"github.com/mihaimyh/goquota/pkg/billing/internal"
 	"github.com/mihaimyh/goquota/pkg/goquota"
@@ -121,7 +121,7 @@ func (p *Provider) handleSubscriptionCreated(ctx context.Context, event *stripe.
 		return fmt.Errorf("failed to extract user_id: %w", err)
 	}
 
-	tier, expiresAt, startDate := p.extractTierFromSubscription(&subscription, event.Data.Raw)
+	tier, expiresAt, startDate := p.extractTierFromSubscription(&subscription)
 
 	// Get existing entitlement for timestamp comparison (idempotency check)
 	existing, err := p.manager.GetEntitlement(ctx, userID)
@@ -184,7 +184,7 @@ func (p *Provider) handleSubscriptionUpdated(ctx context.Context, event *stripe.
 		return fmt.Errorf("failed to extract user_id: %w", err)
 	}
 
-	tier, expiresAt, startDate := p.extractTierFromSubscription(&subscription, event.Data.Raw)
+	tier, expiresAt, startDate := p.extractTierFromSubscription(&subscription)
 
 	// Get existing entitlement for timestamp comparison (idempotency check)
 	existing, err := p.manager.GetEntitlement(ctx, userID)
@@ -317,7 +317,7 @@ func (p *Provider) handleInvoicePaymentSucceeded(
 	}
 
 	// Update expiration date to next period
-	tier, expiresAt, startDate := p.extractTierFromSubscription(sub, nil)
+	tier, expiresAt, startDate := p.extractTierFromSubscription(sub)
 
 	var subscriptionStartDate time.Time
 	if existing != nil && !existing.SubscriptionStartDate.IsZero() {
@@ -401,7 +401,7 @@ func (p *Provider) handleCheckoutSessionCompleted(
 	}
 
 	// 2. IMMEDIATELY update GoQuota entitlement (don't wait for next webhook)
-	tier, expiresAt, startDate := p.extractTierFromSubscription(sub, nil)
+	tier, expiresAt, startDate := p.extractTierFromSubscription(sub)
 
 	// Get existing entitlement for timestamp comparison
 	existing, err := p.manager.GetEntitlement(ctx, userID)
@@ -458,32 +458,19 @@ func (p *Provider) extractUserIDFromSubscription(ctx context.Context, sub *strip
 }
 
 // extractTierFromSubscription extracts tier information from a Stripe subscription
-// Returns tier, expiresAt, and startDate. Period dates are extracted from raw JSON when available.
-//
-
+// Returns tier, expiresAt, and startDate.
+// In Stripe SDK v84+, CurrentPeriodEnd and CurrentPeriodStart are on SubscriptionItem.
 func (p *Provider) extractTierFromSubscription(
-	sub *stripe.Subscription, rawJSON []byte,
+	sub *stripe.Subscription,
 ) (tier string, expiresAt, startDate *time.Time) {
 	var highestTier string
 	var maxWeight = -1
 	var mostRecentCreated int64
+	var periodEnd *time.Time
+	var periodStart *time.Time
 
 	if sub.Status != subscriptionStatusActive {
 		return p.defaultTier, nil, nil
-	}
-
-	// Extract period dates from raw JSON if available
-	var currentPeriodEnd, currentPeriodStart int64
-	if len(rawJSON) > 0 {
-		var rawData map[string]interface{}
-		if err := json.Unmarshal(rawJSON, &rawData); err == nil {
-			if end, ok := rawData["current_period_end"].(float64); ok {
-				currentPeriodEnd = int64(end)
-			}
-			if start, ok := rawData["current_period_start"].(float64); ok {
-				currentPeriodStart = int64(start)
-			}
-		}
 	}
 
 	// Extract tier from subscription items
@@ -498,6 +485,17 @@ func (p *Provider) extractTierFromSubscription(
 			maxWeight = weight
 			highestTier = tier
 			mostRecentCreated = sub.Created
+
+			// In Stripe SDK v84+, CurrentPeriodEnd and CurrentPeriodStart are on SubscriptionItem
+			// (they were moved from Subscription to SubscriptionItem in API version 2025-03-31.basil)
+			if item.CurrentPeriodEnd > 0 {
+				t := time.Unix(item.CurrentPeriodEnd, 0).UTC()
+				periodEnd = &t
+			}
+			if item.CurrentPeriodStart > 0 {
+				t := time.Unix(item.CurrentPeriodStart, 0).UTC()
+				periodStart = &t
+			}
 		}
 	}
 
@@ -505,17 +503,7 @@ func (p *Provider) extractTierFromSubscription(
 		return p.defaultTier, nil, nil
 	}
 
-	// Set period dates if extracted from raw JSON
-	if currentPeriodEnd > 0 {
-		t := time.Unix(currentPeriodEnd, 0).UTC()
-		expiresAt = &t
-	}
-	if currentPeriodStart > 0 {
-		t := time.Unix(currentPeriodStart, 0).UTC()
-		startDate = &t
-	}
-
-	return highestTier, expiresAt, startDate
+	return highestTier, periodEnd, periodStart
 }
 
 // Helper functions
