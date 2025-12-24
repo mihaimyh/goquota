@@ -307,6 +307,223 @@ err := manager.Refund(ctx, &goquota.RefundRequest{
 })
 ```
 
+### Pre-Paid Credits (Non-Expiring Resources)
+
+`goquota` supports pre-paid credits that never expire until consumed, enabling hybrid billing models (subscriptions + credit packs) essential for AI/LLM SaaS applications.
+
+#### Overview
+
+Pre-paid credits are non-expiring quotas that persist until used. They're perfect for:
+- **Credit Packs**: "Buy 500 Image Generations for $10"
+- **Hybrid Billing**: Combine monthly subscriptions with one-time credit purchases
+- **Sign-up Bonuses**: Give new users free credits when they sign up
+
+#### Top-Up Credits
+
+Add credits to a user's account atomically with transactional idempotency:
+
+```go
+// Top up credits (e.g., user purchased 100 credits)
+err := manager.TopUpLimit(
+    ctx,
+    "user123",
+    "api_calls",
+    100, // Amount of credits to add
+    goquota.WithTopUpIdempotencyKey("payment_intent_abc123"), // Prevent duplicate processing
+)
+if err != nil {
+    // Handle error (e.g., invalid amount, storage error)
+}
+```
+
+**Idempotency**: The same idempotency key can be used multiple times safely (e.g., webhook retries). The credits are added exactly once.
+
+#### Refund Credits
+
+Refund pre-paid credits when a payment is refunded:
+
+```go
+// Refund credits (e.g., payment was refunded)
+err := manager.RefundCredits(
+    ctx,
+    "user123",
+    "api_calls",
+    50, // Amount of credits to refund
+    "Payment refunded",
+    goquota.WithRefundIdempotencyKey("refund_xyz789"), // Prevent duplicate processing
+)
+if err != nil {
+    // Handle error
+}
+```
+
+**Negative Limit Prevention**: The system automatically clamps limits to 0, preventing negative balances.
+
+#### Forever Period Consumption
+
+Consume from pre-paid credits using `PeriodTypeForever`:
+
+```go
+// Consume from forever credits
+newUsed, err := manager.Consume(
+    ctx,
+    "user123",
+    "api_calls",
+    10,
+    goquota.PeriodTypeForever, // Use forever credits
+)
+if err == goquota.ErrQuotaExceeded {
+    // User has no forever credits or insufficient balance
+}
+```
+
+#### Cascading Consumption (Hybrid Billing)
+
+Automatically try multiple quota types in order (e.g., monthly subscription first, then forever credits):
+
+```go
+config := goquota.Config{
+    Tiers: map[string]goquota.TierConfig{
+        "pro": {
+            MonthlyQuotas: map[string]int{
+                "api_calls": 1000, // Monthly subscription quota
+            },
+            // Define consumption order: try monthly first, then forever credits
+            ConsumptionOrder: []goquota.PeriodType{
+                goquota.PeriodTypeMonthly,
+                goquota.PeriodTypeForever,
+            },
+        },
+    },
+}
+
+manager, _ := goquota.NewManager(storage, &config)
+
+// Consume with auto-cascading: tries monthly first, falls back to forever credits
+newUsed, err := manager.Consume(
+    ctx,
+    "user123",
+    "api_calls",
+    50,
+    goquota.PeriodTypeAuto, // Automatic cascading consumption
+)
+```
+
+**How it works**:
+1. Tries to consume from `PeriodTypeMonthly` (subscription quota)
+2. If monthly quota is exhausted, automatically tries `PeriodTypeForever` (pre-paid credits)
+3. Returns `ErrQuotaExceeded` only if both are exhausted
+
+This enables seamless hybrid billing without manual fallback logic in your application code.
+
+#### Initial Forever Credits (Sign-up Bonuses)
+
+Give new users free credits when they first get a tier:
+
+```go
+config := goquota.Config{
+    Tiers: map[string]goquota.TierConfig{
+        "pro": {
+            MonthlyQuotas: map[string]int{
+                "api_calls": 1000,
+            },
+            // Give 25 free credits when user first gets this tier
+            InitialForeverCredits: map[string]int{
+                "api_calls": 25,
+            },
+        },
+    },
+}
+
+// When you set the entitlement, initial credits are automatically applied
+err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+    UserID:                "user123",
+    Tier:                  "pro",
+    SubscriptionStartDate: time.Now().UTC(),
+    UpdatedAt:             time.Now().UTC(),
+})
+// InitialForeverCredits are applied automatically (idempotent, safe for concurrent calls)
+```
+
+**Race Condition Safe**: Uses deterministic idempotency keys to ensure credits are applied exactly once, even with concurrent sign-up requests.
+
+#### Stripe Integration for One-Time Payments
+
+The Stripe billing provider supports one-time credit purchases:
+
+```go
+import (
+    "github.com/mihaimyh/goquota/pkg/billing/stripe"
+)
+
+// Create Stripe provider
+stripeProvider, _ := stripe.NewProvider(billing.Config{
+    Manager: manager,
+    Secret:  os.Getenv("STRIPE_WEBHOOK_SECRET"),
+    // ... other config
+})
+
+// Create checkout URL for one-time payment (credit pack)
+checkoutURL, err := stripeProvider.CheckoutURLForPayment(
+    ctx,
+    "user123",           // User ID
+    "api_calls",         // Resource
+    1000,                // Amount in cents (e.g., $10.00 = 1000 cents)
+    "https://app.com/success", // Success URL
+    "https://app.com/cancel",  // Cancel URL
+)
+
+// Redirect user to checkoutURL
+```
+
+**Webhook Processing**: The Stripe provider automatically:
+- Processes `checkout.session.completed` events for one-time payments
+- Calls `TopUpLimit()` with the payment amount
+- Uses `payment_intent.id` as the idempotency key (prevents duplicate processing)
+- Processes `payment_intent.refunded` events and calls `RefundCredits()`
+
+**Credit Conversion**: By default, the system assumes 1 cent = 1 credit. For custom conversion rates (e.g., $10 for 500 credits), you can:
+- Store the conversion rate in checkout session metadata
+- Calculate credits in your webhook handler before calling `TopUpLimit()`
+
+#### Example: Hybrid Billing Setup
+
+```go
+config := goquota.Config{
+    Tiers: map[string]goquota.TierConfig{
+        "pro": {
+            MonthlyQuotas: map[string]int{
+                "api_calls": 1000, // Monthly subscription quota
+            },
+            InitialForeverCredits: map[string]int{
+                "api_calls": 25, // Sign-up bonus
+            },
+            ConsumptionOrder: []goquota.PeriodType{
+                goquota.PeriodTypeMonthly, // Try subscription first
+                goquota.PeriodTypeForever, // Fallback to credits
+            },
+        },
+    },
+}
+
+manager, _ := goquota.NewManager(storage, &config)
+
+// User has subscription + purchased credits
+// Consumption automatically uses subscription first, then credits
+newUsed, err := manager.Consume(ctx, "user123", "api_calls", 50, goquota.PeriodTypeAuto)
+```
+
+#### Storage Considerations
+
+**PostgreSQL**: Forever periods use `NULL` for `period_end`. Run the migration:
+```bash
+psql -d goquota -f storage/postgres/migrations/002_forever_periods.sql
+```
+
+**Redis**: Forever periods have no TTL (they persist indefinitely until consumed).
+
+**Firestore**: Forever periods have optional `periodEnd` field (omitted for forever credits).
+
 ### Soft Limits & Warnings
 
 Receive notifications when a user is nearing their limit.
