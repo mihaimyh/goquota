@@ -84,15 +84,8 @@ func NewProvider(config billing.Config) (*Provider, error) {
 
 	// Setup rate limiter
 	limiter := internal.NewRateLimiter(defaultRateLimitRequests, defaultRateLimitWindow)
-
-	// Start background cleanup to prevent unbounded growth of the IP map
-	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			limiter.Cleanup()
-		}
-	}()
+	// Note: Cleanup is now handled lazily in the rate limiter's allow() method
+	// to avoid resource leaks from unstoppable goroutines
 
 	// Setup metrics (optional)
 	metrics := config.Metrics

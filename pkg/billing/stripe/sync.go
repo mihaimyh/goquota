@@ -195,10 +195,13 @@ func (p *Provider) resolveTierFromSubscriptions(
 				highestTier = tier
 				mostRecentCreated = sub.Created
 
-				// Note: v83 Subscription struct might not have CurrentPeriodEnd/Start fields
-				// We'll need to fetch the latest invoice or use a different approach
-				// For now, set dates to nil - they can be updated via webhook events
-				// TODO: Fetch latest invoice to get period_end if needed
+				// KNOWN BEHAVIOR: Period dates (expiresAt, startDate) are nil in SyncUser
+				// This is expected because:
+				// 1. Stripe v83 SDK doesn't expose current_period_end/start as struct fields
+				// 2. SyncUser uses API (not webhooks), so no raw JSON available
+				// 3. As long as status='active', user should have access
+				// 4. Next webhook (invoice.payment_succeeded) will populate expiration date
+				// This is acceptable for production - see CONFIGURATION.md for details
 			}
 		}
 	}

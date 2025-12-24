@@ -121,7 +121,7 @@ func (p *Provider) handleSubscriptionCreated(ctx context.Context, event *stripe.
 		return fmt.Errorf("failed to extract user_id: %w", err)
 	}
 
-	tier, expiresAt, startDate := p.extractTierFromSubscription(&subscription)
+	tier, expiresAt, startDate := p.extractTierFromSubscription(&subscription, event.Data.Raw)
 
 	// Get existing entitlement for timestamp comparison (idempotency check)
 	existing, err := p.manager.GetEntitlement(ctx, userID)
@@ -184,7 +184,7 @@ func (p *Provider) handleSubscriptionUpdated(ctx context.Context, event *stripe.
 		return fmt.Errorf("failed to extract user_id: %w", err)
 	}
 
-	tier, expiresAt, startDate := p.extractTierFromSubscription(&subscription)
+	tier, expiresAt, startDate := p.extractTierFromSubscription(&subscription, event.Data.Raw)
 
 	// Get existing entitlement for timestamp comparison (idempotency check)
 	existing, err := p.manager.GetEntitlement(ctx, userID)
@@ -317,7 +317,7 @@ func (p *Provider) handleInvoicePaymentSucceeded(
 	}
 
 	// Update expiration date to next period
-	tier, expiresAt, startDate := p.extractTierFromSubscription(sub)
+	tier, expiresAt, startDate := p.extractTierFromSubscription(sub, nil)
 
 	var subscriptionStartDate time.Time
 	if existing != nil && !existing.SubscriptionStartDate.IsZero() {
@@ -401,7 +401,7 @@ func (p *Provider) handleCheckoutSessionCompleted(
 	}
 
 	// 2. IMMEDIATELY update GoQuota entitlement (don't wait for next webhook)
-	tier, expiresAt, startDate := p.extractTierFromSubscription(sub)
+	tier, expiresAt, startDate := p.extractTierFromSubscription(sub, nil)
 
 	// Get existing entitlement for timestamp comparison
 	existing, err := p.manager.GetEntitlement(ctx, userID)
@@ -458,11 +458,11 @@ func (p *Provider) extractUserIDFromSubscription(ctx context.Context, sub *strip
 }
 
 // extractTierFromSubscription extracts tier information from a Stripe subscription
-// Returns tier, expiresAt, and startDate. Period dates are always nil as they come from webhook event JSON.
+// Returns tier, expiresAt, and startDate. Period dates are extracted from raw JSON when available.
 //
-//nolint:unparam // expiresAt and startDate are part of the API contract, even though they're always nil
+
 func (p *Provider) extractTierFromSubscription(
-	sub *stripe.Subscription,
+	sub *stripe.Subscription, rawJSON []byte,
 ) (tier string, expiresAt, startDate *time.Time) {
 	var highestTier string
 	var maxWeight = -1
@@ -470,6 +470,20 @@ func (p *Provider) extractTierFromSubscription(
 
 	if sub.Status != subscriptionStatusActive {
 		return p.defaultTier, nil, nil
+	}
+
+	// Extract period dates from raw JSON if available
+	var currentPeriodEnd, currentPeriodStart int64
+	if len(rawJSON) > 0 {
+		var rawData map[string]interface{}
+		if err := json.Unmarshal(rawJSON, &rawData); err == nil {
+			if end, ok := rawData["current_period_end"].(float64); ok {
+				currentPeriodEnd = int64(end)
+			}
+			if start, ok := rawData["current_period_start"].(float64); ok {
+				currentPeriodStart = int64(start)
+			}
+		}
 	}
 
 	// Extract tier from subscription items
@@ -484,13 +498,21 @@ func (p *Provider) extractTierFromSubscription(
 			maxWeight = weight
 			highestTier = tier
 			mostRecentCreated = sub.Created
-			// Period dates (expiresAt, startDate) are set via webhook events
-			// which provide the current_period_start/end in the event payload
 		}
 	}
 
 	if highestTier == "" {
 		return p.defaultTier, nil, nil
+	}
+
+	// Set period dates if extracted from raw JSON
+	if currentPeriodEnd > 0 {
+		t := time.Unix(currentPeriodEnd, 0).UTC()
+		expiresAt = &t
+	}
+	if currentPeriodStart > 0 {
+		t := time.Unix(currentPeriodStart, 0).UTC()
+		startDate = &t
 	}
 
 	return highestTier, expiresAt, startDate

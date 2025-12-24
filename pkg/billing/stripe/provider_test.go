@@ -245,17 +245,17 @@ func TestProvider_ExtractTierFromSubscription(t *testing.T) {
 		},
 	}
 
-	tier, expiresAt, startDate := provider.extractTierFromSubscription(sub)
+	tier, expiresAt, startDate := provider.extractTierFromSubscription(sub, nil)
 	if tier != testTierPro {
 		t.Errorf("Expected tier %s, got %s", testTierPro, tier)
 	}
-	// Period dates are not extracted from Subscription struct (fields don't exist in v83)
-	// They are set via webhook events which include current_period_start/end in JSON payload
+	// Period dates are nil when no raw JSON is provided
+	// In production, webhook events provide raw JSON with current_period_start/end
 	if expiresAt != nil {
-		t.Error("Expected expiresAt to be nil (period dates come from webhook events)")
+		t.Error("Expected expiresAt to be nil (no raw JSON provided)")
 	}
 	if startDate != nil {
-		t.Error("Expected startDate to be nil (period dates come from webhook events)")
+		t.Error("Expected startDate to be nil (no raw JSON provided)")
 	}
 }
 
