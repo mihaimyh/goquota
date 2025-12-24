@@ -121,7 +121,7 @@ func TestProvider_MapEntitlementToTier(t *testing.T) {
 		entitlementID string
 		expectedTier  string
 	}{
-		{"scholar_monthly", testTierScholar},
+		{testEntitlementID, testTierScholar},
 		{"SCHOLAR_MONTHLY", testTierScholar}, // Case insensitive
 		{"fluent_monthly", testTierFluent},
 		{"unknown_entitlement", testTierExplorer}, // Default tier
@@ -2274,9 +2274,10 @@ func TestProvider_Webhook_RateLimitExceeded(t *testing.T) {
 
 		provider.WebhookHandler().ServeHTTP(w, req)
 
-		if w.Code == http.StatusOK {
+		switch w.Code {
+		case http.StatusOK:
 			successCount++
-		} else if w.Code == http.StatusTooManyRequests {
+		case http.StatusTooManyRequests:
 			rateLimitedCount++
 		}
 	}

@@ -51,7 +51,12 @@ func NewProvider(config billing.Config) (*Provider, error) {
 	}
 
 	// Setup secrets / API keys
-	webhookSecret := []byte(strings.TrimSpace(config.WebhookSecret))
+	webhookSecretStr := strings.TrimSpace(config.WebhookSecret)
+	if strings.HasPrefix(strings.ToLower(webhookSecretStr), "bearer ") {
+		webhookSecretStr = strings.TrimSpace(webhookSecretStr[len("bearer "):])
+	}
+	webhookSecret := []byte(webhookSecretStr)
+
 	apiKey := strings.TrimSpace(config.APIKey)
 
 	// Allow API key to be provided as a Bearer token and strip the prefix.
