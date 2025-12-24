@@ -183,7 +183,9 @@ func TestManager_RefundCredits_NegativeLimitPrevention(t *testing.T) {
 	}
 
 	// Try to refund more than available
-	err = manager.RefundCredits(ctx, "user1", "api_calls", 100, "over_refund", goquota.WithRefundIdempotencyKey("refund_1"))
+	err = manager.RefundCredits(
+		ctx, "user1", "api_calls", 100, "over_refund",
+		goquota.WithRefundIdempotencyKey("refund_1"))
 	if err != nil {
 		t.Fatalf("RefundCredits should succeed (clamp to 0), got error: %v", err)
 	}
@@ -585,7 +587,10 @@ func TestManager_TopUpAndConsume_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			_, err := manager.Consume(ctx, "user1", "api_calls", consumeAmount, goquota.PeriodTypeForever, goquota.WithIdempotencyKey("consume_"+string(rune(id))))
+			idempotencyKey := "consume_" + string(rune(id))
+			_, err := manager.Consume(
+				ctx, "user1", "api_calls", consumeAmount,
+				goquota.PeriodTypeForever, goquota.WithIdempotencyKey(idempotencyKey))
 			if err != nil {
 				errors <- err
 			}
@@ -613,4 +618,3 @@ func TestManager_TopUpAndConsume_Concurrent(t *testing.T) {
 		t.Errorf("Expected limit 100, got %d", usage.Limit)
 	}
 }
-

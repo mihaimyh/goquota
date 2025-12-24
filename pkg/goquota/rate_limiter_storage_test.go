@@ -196,7 +196,7 @@ func TestStorageRateLimiter_Allow_UnknownAlgorithm(t *testing.T) {
 	// This is intentional behavior to prevent rate limiting from blocking legitimate requests
 	// during storage outages or configuration issues
 	allowed, info, err := limiter.Allow(context.Background(), "user1", "api_calls", config)
-	assert.NoError(t, err) // Error is swallowed for graceful degradation
+	assert.NoError(t, err)  // Error is swallowed for graceful degradation
 	assert.True(t, allowed) // Request is allowed on storage error
 	assert.NotNil(t, info)  // Info is provided with default values
 	assert.Equal(t, 10, info.Remaining)

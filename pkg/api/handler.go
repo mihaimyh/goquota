@@ -18,6 +18,7 @@ const (
 	sourceMonthly = "monthly"
 	sourceForever = "forever"
 	maxUserIDLen  = 255
+	statusError   = "error"
 )
 
 // Handler provides HTTP endpoints for quota inspection
@@ -27,59 +28,136 @@ type Handler struct {
 
 // GetUsage returns a standardized JSON response of the user's current quota standing
 func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
 	ctx := r.Context()
+	var errorType string
+	status := "success"
 
-	// 1. Extract User ID
-	userID := h.config.GetUserID(r)
-	if userID == "" {
-		h.handleError(w, r, fmt.Errorf("user ID not found"), http.StatusUnauthorized)
-		return
-	}
+	// Record metrics on exit
+	defer func() {
+		if h.config.Metrics != nil {
+			duration := time.Since(startTime)
+			h.config.Metrics.RecordUsageAPIRequestDuration(duration)
+			h.config.Metrics.RecordUsageAPIRequest(status, errorType)
+		}
+	}()
 
-	// Validate user ID format (basic validation)
-	if userID == "" || len(userID) > maxUserIDLen {
-		h.handleError(w, r, fmt.Errorf("invalid user ID format"), http.StatusBadRequest)
+	// 1. Extract and validate User ID
+	userID, ok := h.validateUserID(w, r, &status, &errorType)
+	if !ok {
 		return
 	}
 
 	// 2. Get Entitlement (Tier)
-	ent, err := h.config.Manager.GetEntitlement(ctx, userID)
-	tier := tierDefault // Will be determined from entitlement or GetQuota will use default tier
-	status := statusDefault
-
-	if err == nil && ent != nil {
-		tier = ent.Tier
-		// Determine status
-		if ent.ExpiresAt != nil && ent.ExpiresAt.Before(time.Now().UTC()) {
-			status = statusExpired
-		} else {
-			status = statusActive
-		}
-	} else if err != nil && err != goquota.ErrEntitlementNotFound {
-		// Real error (storage, etc.)
-		h.handleError(w, r, fmt.Errorf("failed to get entitlement: %w", err), http.StatusInternalServerError)
+	ent, tier, ok := h.getEntitlementAndTier(ctx, userID, &status, &errorType, w, r)
+	if !ok {
 		return
 	}
 
-	// 3. Discover Resources (handle orphaned credits)
-	// ResourceFilter is applied inside discoverResources for performance
+	// 3. Discover Resources and record metrics
+	resources := h.discoverResourcesWithMetrics(ctx, userID)
+
+	// 4. Build response for each resource
+	resourceUsage := h.buildResourceUsageMap(ctx, userID, resources, tier, ent, &errorType)
+
+	// 5. Send response
+	h.sendUsageResponse(w, userID, tier, status, resourceUsage, &status, &errorType)
+}
+
+// validateUserID extracts and validates the user ID from the request
+func (h *Handler) validateUserID(w http.ResponseWriter, r *http.Request, status, errorType *string) (string, bool) {
+	userID := h.config.GetUserID(r)
+	if userID == "" {
+		*status = statusError
+		*errorType = "auth_error"
+		h.handleError(w, r, fmt.Errorf("user ID not found"), http.StatusUnauthorized)
+		return "", false
+	}
+
+	if len(userID) > maxUserIDLen {
+		*status = statusError
+		*errorType = "validation_error"
+		h.handleError(w, r, fmt.Errorf("invalid user ID format"), http.StatusBadRequest)
+		return "", false
+	}
+
+	return userID, true
+}
+
+// getEntitlementAndTier retrieves entitlement and determines tier/status
+func (h *Handler) getEntitlementAndTier(
+	ctx context.Context, userID string, status, errorType *string,
+	w http.ResponseWriter, r *http.Request,
+) (*goquota.Entitlement, string, bool) {
+	ent, err := h.config.Manager.GetEntitlement(ctx, userID)
+	tier := tierDefault
+	*status = statusDefault
+
+	if err == nil && ent != nil {
+		tier = ent.Tier
+		if ent.ExpiresAt != nil && ent.ExpiresAt.Before(time.Now().UTC()) {
+			*status = statusExpired
+		} else {
+			*status = statusActive
+		}
+	} else if err != nil && err != goquota.ErrEntitlementNotFound {
+		*status = statusError
+		*errorType = "storage_error"
+		h.handleError(w, r, fmt.Errorf("failed to get entitlement: %w", err), http.StatusInternalServerError)
+		return nil, "", false
+	}
+
+	return ent, tier, true
+}
+
+// discoverResourcesWithMetrics discovers resources and records metrics
+func (h *Handler) discoverResourcesWithMetrics(ctx context.Context, userID string) []string {
+	totalResources := len(h.config.KnownResources)
 	resources := h.discoverResources(ctx, userID)
 
-	// 5. Build response for each resource (sequential fetching)
+	if h.config.Metrics != nil && totalResources > 0 {
+		filteredCount := len(resources)
+		if h.config.ResourceFilter != nil {
+			savedCount := totalResources - filteredCount
+			if savedCount > 0 {
+				h.config.Metrics.RecordResourceFilterQueriesSaved(savedCount)
+			}
+			ratio := float64(filteredCount) / float64(totalResources)
+			h.config.Metrics.RecordResourceFilterEffectivenessRatio(ratio)
+			h.config.Metrics.RecordUsageAPIResourceFilterEffectiveness(filteredCount, totalResources)
+		}
+		h.config.Metrics.RecordUsageAPIResourcesDiscovered(len(resources))
+	}
+
+	return resources
+}
+
+// buildResourceUsageMap builds the resource usage map
+func (h *Handler) buildResourceUsageMap(
+	ctx context.Context, userID string, resources []string,
+	tier string, ent *goquota.Entitlement, errorType *string,
+) map[string]ResourceUsage {
 	resourceUsage := make(map[string]ResourceUsage)
 	for _, resource := range resources {
 		usage, err := h.buildResourceUsage(ctx, userID, resource, tier, ent)
 		if err != nil {
-			// Log error but continue with other resources
-			// Don't fail entire request if one resource fails
+			if h.config.Metrics != nil && *errorType == "" {
+				*errorType = "partial_error"
+			}
 			continue
 		}
 		if usage != nil {
 			resourceUsage[resource] = *usage
 		}
 	}
+	return resourceUsage
+}
 
-	// 6. Construct and send response
+// sendUsageResponse sends the usage response
+func (h *Handler) sendUsageResponse(
+	w http.ResponseWriter, userID, tier, status string,
+	resourceUsage map[string]ResourceUsage, finalStatus, errorType *string,
+) {
 	response := UsageResponse{
 		UserID:    userID,
 		Tier:      tier,
@@ -90,8 +168,10 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		// Log encoding error but response already sent
-		return
+		if h.config.Metrics != nil {
+			*finalStatus = statusError
+			*errorType = "encoding_error"
+		}
 	}
 }
 

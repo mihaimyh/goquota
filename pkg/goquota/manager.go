@@ -355,6 +355,12 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 		usage.Limit = m.getLimitForResource(resource, tier, periodType)
 	}
 
+	// Record forever credits balance when getting forever quota
+	if periodType == PeriodTypeForever && usage.Limit > 0 {
+		balance := max(usage.Limit-usage.Used, 0)
+		m.metrics.RecordForeverCreditsBalance(resource, tier, balance)
+	}
+
 	return usage, nil
 }
 
@@ -395,6 +401,7 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 				Field{"resource", resource},
 				Field{"idempotencyKey", consumeOpts.IdempotencyKey},
 			)
+			m.metrics.RecordIdempotencyHit("consume")
 			return existing.NewUsed, nil
 		}
 	}
@@ -500,7 +507,7 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 
 	// Get limit for tier
 	limit := m.getLimitForResource(resource, tier, periodType)
-	
+
 	// For forever periods, get actual limit from storage (dynamic credits)
 	if periodType == PeriodTypeForever {
 		usage, err := m.storage.GetUsage(ctx, userID, resource, period)
@@ -509,12 +516,18 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		}
 		if usage != nil && usage.Limit > 0 {
 			limit = usage.Limit
+			// Record forever credits balance
+			balance := usage.Limit - usage.Used
+			if balance < 0 {
+				balance = 0
+			}
+			m.metrics.RecordForeverCreditsBalance(resource, tier, balance)
 		} else {
 			// No forever credits yet
 			return 0, ErrQuotaExceeded
 		}
 	}
-	
+
 	if limit <= 0 {
 		return 0, ErrQuotaExceeded // No quota available for this tier
 	}
@@ -558,6 +571,10 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 					usageKey := userID + ":" + resource + ":" + period.Key()
 					m.cache.InvalidateUsage(usageKey)
 					m.metrics.RecordConsumption(userID, resource, tier, amount, true)
+					if periodType == PeriodTypeForever {
+						m.metrics.RecordForeverCreditsConsumption(resource, tier, true)
+						m.metrics.RecordForeverCreditsConsumptionAmount(resource, tier, amount)
+					}
 
 					// Check for warnings
 					m.checkWarnings(ctx, userID, resource, tier, limit, optimisticNewUsed, amount, period)
@@ -569,6 +586,9 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 
 		// Fallback unavailable or optimistic consumption not allowed - return original error
 		m.metrics.RecordConsumption(userID, resource, tier, amount, false)
+		if periodType == PeriodTypeForever {
+			m.metrics.RecordForeverCreditsConsumption(resource, tier, false)
+		}
 		m.logger.Error("failed to consume quota",
 			Field{"userId", userID},
 			Field{"resource", resource},
@@ -583,16 +603,36 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		m.cache.InvalidateUsage(usageKey)
 		m.metrics.RecordConsumption(userID, resource, tier, amount, true)
 
+		// Record forever credits specific metrics
+		if periodType == PeriodTypeForever {
+			m.metrics.RecordForeverCreditsConsumption(resource, tier, true)
+			m.metrics.RecordForeverCreditsConsumptionAmount(resource, tier, amount)
+			// Check for hybrid billing (user has both monthly and forever)
+			monthlyUsage, err := m.storage.GetUsage(ctx, userID, resource, Period{
+				Start: period.Start,
+				End:   period.End,
+				Type:  PeriodTypeMonthly,
+			})
+			if err == nil && monthlyUsage != nil && (monthlyUsage.Limit > 0 || monthlyUsage.Used > 0) {
+				m.metrics.RecordHybridBillingUser(userID)
+			}
+		}
+
 		// Check for warnings
 		m.checkWarnings(ctx, userID, resource, tier, limit, newUsed, amount, period)
 	} else {
 		m.metrics.RecordConsumption(userID, resource, tier, amount, false)
+		if periodType == PeriodTypeForever {
+			m.metrics.RecordForeverCreditsConsumption(resource, tier, false)
+		}
 		if err == ErrQuotaExceeded {
 			m.logger.Warn("quota exceeded for user",
 				Field{"userId", userID},
 				Field{"resource", resource},
 				Field{"tier", tier},
 			)
+			// Record quota exhaustion
+			m.metrics.RecordQuotaExhaustion(resource, tier, periodType)
 		}
 	}
 
@@ -945,6 +985,7 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 				Field{"resource", req.Resource},
 				Field{"idempotencyKey", req.IdempotencyKey},
 			)
+			m.metrics.RecordIdempotencyHit("refund")
 			return nil
 		}
 	}
@@ -997,6 +1038,14 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 		// Invalidate usage cache on successful refund
 		usageKey := req.UserID + ":" + req.Resource + ":" + period.Key()
 		m.cache.InvalidateUsage(usageKey)
+
+		// Record refund metrics
+		reason := req.Reason
+		if reason == "" {
+			reason = "unknown"
+		}
+		m.metrics.RecordQuotaRefund(req.Resource, reason)
+		m.metrics.RecordQuotaRefundAmount(req.Resource, req.Amount)
 
 		m.logger.Info("quota refunded successfully",
 			Field{"userId", req.UserID},
@@ -1212,6 +1261,23 @@ func (m *Manager) checkWarnings(ctx context.Context, userID, resource, tier stri
 				Period:    period,
 				Tier:      tier,
 				UpdatedAt: time.Now().UTC(),
+			}
+
+			// Record warning metric
+			m.metrics.RecordQuotaWarning(resource, tier, threshold)
+
+			// Determine threshold range for users approaching limit
+			usagePercent := float64(currentUsed) / float64(limit)
+			var thresholdRange string
+			if usagePercent >= 0.9 {
+				thresholdRange = "90-100%"
+			} else if usagePercent >= 0.8 {
+				thresholdRange = "80-90%"
+			} else if usagePercent >= 0.5 {
+				thresholdRange = "50-80%"
+			}
+			if thresholdRange != "" {
+				m.metrics.RecordUsersApproachingLimit(resource, tier, thresholdRange)
 			}
 
 			// Call global handler

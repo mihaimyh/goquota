@@ -19,6 +19,13 @@ type Metrics struct {
 	tierChangesTotal          *prometheus.CounterVec
 	apiCallsTotal             *prometheus.CounterVec
 	apiCallDuration           *prometheus.HistogramVec
+
+	// Checkout and portal metrics
+	checkoutSessionsCreatedTotal   *prometheus.CounterVec
+	checkoutSessionsCompletedTotal *prometheus.CounterVec
+	portalSessionsCreatedTotal     *prometheus.CounterVec
+	creditPackPurchasesTotal       *prometheus.CounterVec
+	revenueEstimate                *prometheus.CounterVec
 }
 
 // NewMetrics creates a new Prometheus metrics implementation for billing providers.
@@ -84,6 +91,42 @@ func NewMetrics(reg prometheus.Registerer, namespace string) *Metrics {
 			Help:      "Duration of API calls to billing providers in seconds.",
 			Buckets:   prometheus.DefBuckets,
 		}, []string{"provider", "endpoint"}),
+
+		// Checkout and portal metrics
+		checkoutSessionsCreatedTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "billing",
+			Name:      "checkout_sessions_created_total",
+			Help:      "Total number of checkout sessions created.",
+		}, []string{"provider", "tier", "type"}),
+
+		checkoutSessionsCompletedTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "billing",
+			Name:      "checkout_sessions_completed_total",
+			Help:      "Total number of checkout sessions completed.",
+		}, []string{"provider", "tier", "type"}),
+
+		portalSessionsCreatedTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "billing",
+			Name:      "portal_sessions_created_total",
+			Help:      "Total number of portal sessions created.",
+		}, []string{"provider"}),
+
+		creditPackPurchasesTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "billing",
+			Name:      "credit_pack_purchases_total",
+			Help:      "Total number of credit pack purchases.",
+		}, []string{"provider", "resource", "amount_range"}),
+
+		revenueEstimate: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "billing",
+			Name:      "revenue_estimate_total",
+			Help:      "Estimated revenue (approximate).",
+		}, []string{"provider", "tier", "type"}),
 	}
 }
 
@@ -117,6 +160,27 @@ func (m *Metrics) RecordAPICall(provider, endpoint, status string) {
 
 func (m *Metrics) RecordAPICallDuration(provider, endpoint string, duration time.Duration) {
 	m.apiCallDuration.WithLabelValues(provider, endpoint).Observe(duration.Seconds())
+}
+
+// Checkout and portal metrics
+func (m *Metrics) RecordCheckoutSessionCreated(provider, tier, sessionType string) {
+	m.checkoutSessionsCreatedTotal.WithLabelValues(provider, tier, sessionType).Inc()
+}
+
+func (m *Metrics) RecordCheckoutSessionCompleted(provider, tier, sessionType string) {
+	m.checkoutSessionsCompletedTotal.WithLabelValues(provider, tier, sessionType).Inc()
+}
+
+func (m *Metrics) RecordPortalSessionCreated(provider string) {
+	m.portalSessionsCreatedTotal.WithLabelValues(provider).Inc()
+}
+
+func (m *Metrics) RecordCreditPackPurchase(provider, resource, amountRange string) {
+	m.creditPackPurchasesTotal.WithLabelValues(provider, resource, amountRange).Inc()
+}
+
+func (m *Metrics) RecordRevenueEstimate(provider, tier, revenueType string, amount float64) {
+	m.revenueEstimate.WithLabelValues(provider, tier, revenueType).Add(amount)
 }
 
 // DefaultMetrics returns a Metrics implementation using the default Prometheus registerer.

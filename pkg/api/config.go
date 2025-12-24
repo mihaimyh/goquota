@@ -29,6 +29,10 @@ type Config struct {
 	// OnError handles errors (auth, internal, etc.)
 	// If nil, uses default error handling
 	OnError func(http.ResponseWriter, *http.Request, error)
+
+	// Metrics is optional metrics recorder for Usage API operations
+	// If nil, metrics are not recorded
+	Metrics goquota.Metrics
 }
 
 // Validate checks that the configuration is valid

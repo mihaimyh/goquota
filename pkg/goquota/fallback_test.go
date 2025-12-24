@@ -186,6 +186,24 @@ func (m *mockMetrics) RecordFallbackHit(strategy string) {
 
 func (m *mockMetrics) RecordRateLimitCheck(_, _ string, _ bool, _ time.Duration) {}
 func (m *mockMetrics) RecordRateLimitExceeded(_, _ string)                       {}
+func (m *mockMetrics) RecordUsageAPIRequest(_, _ string)                         {}
+func (m *mockMetrics) RecordUsageAPIRequestDuration(_ time.Duration)             {}
+func (m *mockMetrics) RecordUsageAPIResourcesDiscovered(_ int)                   {}
+func (m *mockMetrics) RecordUsageAPIResourceFilterEffectiveness(_, _ int)        {}
+func (m *mockMetrics) RecordForeverCreditsBalance(_, _ string, _ int)            {}
+func (m *mockMetrics) RecordForeverCreditsConsumption(_, _ string, _ bool)       {}
+func (m *mockMetrics) RecordForeverCreditsConsumptionAmount(_, _ string, _ int)  {}
+func (m *mockMetrics) RecordOrphanedForeverCredits(_, _ string)                  {}
+func (m *mockMetrics) RecordHybridBillingUser(_ string)                          {}
+func (m *mockMetrics) RecordQuotaWarning(_, _ string, _ float64)                 {}
+func (m *mockMetrics) RecordQuotaExhaustion(_, _ string, _ PeriodType)           {}
+func (m *mockMetrics) RecordQuotaRefund(_, _ string)                             {}
+func (m *mockMetrics) RecordQuotaRefundAmount(_ string, _ int)                   {}
+func (m *mockMetrics) RecordIdempotencyHit(_ string)                             {}
+func (m *mockMetrics) RecordActiveUserByTier(_ string)                           {}
+func (m *mockMetrics) RecordUsersApproachingLimit(_, _, _ string)                {}
+func (m *mockMetrics) RecordResourceFilterQueriesSaved(_ int)                    {}
+func (m *mockMetrics) RecordResourceFilterEffectivenessRatio(_ float64)          {}
 
 // mockLogger is a mock logger implementation for testing
 type mockLogger struct{}

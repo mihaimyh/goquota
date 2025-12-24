@@ -288,12 +288,12 @@ func TestStorage_AddLimit_PreservesUsed(t *testing.T) {
 
 	// Create usage with some consumed
 	usage := &goquota.Usage{
-		UserID:   "user1",
-		Resource: "api_calls",
-		Used:     30,
-		Limit:    100,
-		Period:   period,
-		Tier:     "default",
+		UserID:    "user1",
+		Resource:  "api_calls",
+		Used:      30,
+		Limit:     100,
+		Period:    period,
+		Tier:      "default",
 		UpdatedAt: time.Now().UTC(),
 	}
 	err := storage.SetUsage(ctx, "user1", "api_calls", usage, period)
@@ -332,12 +332,12 @@ func TestStorage_SubtractLimit_PreservesUsed(t *testing.T) {
 
 	// Create usage with some consumed
 	usage := &goquota.Usage{
-		UserID:   "user1",
-		Resource: "api_calls",
-		Used:     30,
-		Limit:    100,
-		Period:   period,
-		Tier:     "default",
+		UserID:    "user1",
+		Resource:  "api_calls",
+		Used:      30,
+		Limit:     100,
+		Period:    period,
+		Tier:      "default",
 		UpdatedAt: time.Now().UTC(),
 	}
 	err := storage.SetUsage(ctx, "user1", "api_calls", usage, period)
@@ -363,4 +363,3 @@ func TestStorage_SubtractLimit_PreservesUsed(t *testing.T) {
 		t.Errorf("Expected used 30 (preserved), got %d", updatedUsage.Used)
 	}
 }
-

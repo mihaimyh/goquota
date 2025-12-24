@@ -379,7 +379,25 @@ func (p *Provider) handleCheckoutSessionCompleted(
 	// Check if this is a payment (one-time) or subscription checkout
 	if session.Mode == stripe.CheckoutSessionModePayment {
 		// Handle one-time payment (credit top-up)
-		return p.handlePaymentCheckout(ctx, &session, eventTimestamp)
+		err := p.handlePaymentCheckout(ctx, &session, eventTimestamp)
+		if err == nil {
+			// Record checkout session completed for payment
+			tier := "unknown"
+			if session.Metadata != nil {
+				// Try to get tier from metadata if available
+				if t, ok := session.Metadata["tier"]; ok {
+					tier = t
+				}
+			}
+			p.metrics.RecordCheckoutSessionCompleted(providerName, tier, "payment")
+
+			// Record revenue estimate (amount in cents, convert to dollars)
+			if session.AmountTotal > 0 {
+				revenueAmount := float64(session.AmountTotal) / 100.0
+				p.metrics.RecordRevenueEstimate(providerName, tier, "one-time", revenueAmount)
+			}
+		}
+		return err
 	}
 
 	subscriptionID := ""
@@ -439,7 +457,24 @@ func (p *Provider) handleCheckoutSessionCompleted(
 		UpdatedAt:             eventTimestamp,
 	}
 
-	return p.manager.SetEntitlement(ctx, ent)
+	err = p.manager.SetEntitlement(ctx, ent)
+	if err == nil {
+		// Record checkout session completed for subscription
+		p.metrics.RecordCheckoutSessionCompleted(providerName, tier, "subscription")
+
+		// Record revenue estimate (get amount from subscription)
+		// Estimate monthly revenue from subscription amount
+		if sub.Items != nil && len(sub.Items.Data) > 0 {
+			item := sub.Items.Data[0]
+			if item.Price != nil && item.Price.UnitAmount > 0 {
+				// Amount is in cents per billing period, convert to dollars
+				revenueAmount := float64(item.Price.UnitAmount) / 100.0
+				p.metrics.RecordRevenueEstimate(providerName, tier, "subscription", revenueAmount)
+			}
+		}
+	}
+
+	return err
 }
 
 // extractUserIDFromSubscription extracts user_id from subscription or customer metadata
@@ -567,7 +602,31 @@ func (p *Provider) handlePaymentCheckout(
 		return fmt.Errorf("failed to top up limit: %w", err)
 	}
 
+	// Record credit pack purchase (amount is in cents, convert to credits)
+	// For metrics, use amount range
+	amountRange := getAmountRangeFromCents(session.AmountTotal)
+	p.metrics.RecordCreditPackPurchase(providerName, resource, amountRange)
+
 	return nil
+}
+
+// getAmountRangeFromCents converts an amount in cents to a range string for metrics
+func getAmountRangeFromCents(amountCents int64) string {
+	amount := float64(amountCents) / 100.0 // Convert cents to dollars
+	switch {
+	case amount < 10:
+		return amountRange0_10
+	case amount < 50:
+		return amountRange10_50
+	case amount < 100:
+		return amountRange50_100
+	case amount < 500:
+		return amountRange100_500
+	case amount < 1000:
+		return amountRange500_1000
+	default:
+		return amountRange1000Plus
+	}
 }
 
 // handlePaymentIntentRefunded processes payment_intent.refunded events

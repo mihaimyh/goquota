@@ -34,6 +34,18 @@ type Metrics interface {
 
 	// RecordAPICallDuration records how long an API call took.
 	RecordAPICallDuration(provider, endpoint string, duration time.Duration)
+
+	// Checkout and portal metrics
+	// RecordCheckoutSessionCreated records a checkout session creation
+	RecordCheckoutSessionCreated(provider, tier, sessionType string)
+	// RecordCheckoutSessionCompleted records a completed checkout session
+	RecordCheckoutSessionCompleted(provider, tier, sessionType string)
+	// RecordPortalSessionCreated records a portal session creation
+	RecordPortalSessionCreated(provider string)
+	// RecordCreditPackPurchase records a credit pack purchase
+	RecordCreditPackPurchase(provider, resource string, amountRange string)
+	// RecordRevenueEstimate records estimated revenue
+	RecordRevenueEstimate(provider, tier, revenueType string, amount float64)
 }
 
 // NoopMetrics is a no-op implementation of the Metrics interface.
@@ -47,3 +59,8 @@ func (n *NoopMetrics) RecordUserSyncDuration(_ string, _ time.Duration)         
 func (n *NoopMetrics) RecordTierChange(_, _, _ string)                              {}
 func (n *NoopMetrics) RecordAPICall(_, _, _ string)                                 {}
 func (n *NoopMetrics) RecordAPICallDuration(_, _ string, _ time.Duration)           {}
+func (n *NoopMetrics) RecordCheckoutSessionCreated(_, _, _ string)                  {}
+func (n *NoopMetrics) RecordCheckoutSessionCompleted(_, _, _ string)                {}
+func (n *NoopMetrics) RecordPortalSessionCreated(_ string)                          {}
+func (n *NoopMetrics) RecordCreditPackPurchase(_, _, _ string)                      {}
+func (n *NoopMetrics) RecordRevenueEstimate(_, _, _ string, _ float64)              {}

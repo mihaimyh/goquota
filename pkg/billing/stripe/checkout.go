@@ -74,6 +74,9 @@ func (p *Provider) CheckoutURL(ctx context.Context, userID, tier, successURL, ca
 	p.metrics.RecordAPICall(providerName, "/checkout/sessions", "success")
 	p.metrics.RecordAPICallDuration(providerName, "/checkout/sessions", time.Since(startTime))
 
+	// Record checkout session created metric
+	p.metrics.RecordCheckoutSessionCreated(providerName, tier, "subscription")
+
 	return session.URL, nil
 }
 
@@ -136,7 +139,42 @@ func (p *Provider) CheckoutURLForPayment(
 	p.metrics.RecordAPICall(providerName, "/checkout/sessions", "success")
 	p.metrics.RecordAPICallDuration(providerName, "/checkout/sessions", time.Since(startTime))
 
+	// Record checkout session created metric for payment (credit pack)
+	p.metrics.RecordCheckoutSessionCreated(providerName, "unknown", "payment")
+
+	// Determine amount range for credit pack purchase metric
+	amountRange := getAmountRange(amount)
+	p.metrics.RecordCreditPackPurchase(providerName, resource, amountRange)
+
 	return session.URL, nil
+}
+
+const (
+	amountRange0_10     = "0-10"
+	amountRange10_50    = "10-50"
+	amountRange50_100   = "50-100"
+	amountRange100_500  = "100-500"
+	amountRange500_1000 = "500-1000"
+	amountRange1000Plus = "1000+"
+)
+
+// getAmountRange converts an amount in cents to a range string for metrics
+func getAmountRange(amountCents int64) string {
+	amount := float64(amountCents) / 100.0 // Convert cents to dollars
+	switch {
+	case amount < 10:
+		return amountRange0_10
+	case amount < 50:
+		return amountRange10_50
+	case amount < 100:
+		return amountRange50_100
+	case amount < 500:
+		return amountRange100_500
+	case amount < 1000:
+		return amountRange500_1000
+	default:
+		return amountRange1000Plus
+	}
 }
 
 // PortalURL creates a Stripe Customer Portal Session and returns the URL.
@@ -166,6 +204,9 @@ func (p *Provider) PortalURL(ctx context.Context, userID, returnURL string) (str
 
 	p.metrics.RecordAPICall(providerName, "/billing_portal/sessions", "success")
 	p.metrics.RecordAPICallDuration(providerName, "/billing_portal/sessions", time.Since(startTime))
+
+	// Record portal session created metric
+	p.metrics.RecordPortalSessionCreated(providerName)
 
 	return session.URL, nil
 }
