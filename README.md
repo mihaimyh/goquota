@@ -22,6 +22,7 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Observability** - Built-in Prometheus metrics and structured logging
 - **HTTP Middlewares** - Easy integration with standard `net/http` servers, Gin, Echo, and Fiber frameworks with rate limit headers
 - **Billing Provider Integration** - Unified interface for RevenueCat, Stripe, and other payment providers with automatic webhook processing
+- **Standardized Usage API** - Pre-built HTTP endpoints for exposing quota state to frontend applications with unified monthly + forever credits view
 
 ## Installation
 
