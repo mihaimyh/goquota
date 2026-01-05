@@ -479,6 +479,147 @@ The billing provider uses **timestamp-based idempotency** to handle duplicate an
 // → Processed, UpdatedAt = 2000
 ```
 
+## Webhook Callbacks
+
+Execute custom side effects after successful webhook processing, such as syncing Firebase Auth claims, sending notifications, or updating external systems.
+
+### Overview
+
+Callbacks are invoked in the following sequence:
+
+1. Webhook signature is verified
+2. Entitlement is updated in the database (**committed**)
+3. **Callback is invoked** (if configured)
+4. HTTP 200 response is sent to the webhook provider
+
+**Key Characteristics:**
+
+- Callbacks execute **after** database commit but **before** HTTP 200 response
+- If a callback returns an error, the webhook handler returns HTTP 500, triggering provider retry
+- Callbacks use **best-effort** semantics due to idempotency constraints (see warning below)
+
+> **⚠️ IMPORTANT: Best-Effort Execution**
+>
+> Due to `goquota`'s timestamp-based idempotency, if a callback fails _after_ the entitlement is committed to the database, subsequent webhook retries will be skipped by the idempotency check. The callback will **not** re-execute on retry.
+>
+> **Recommendation**: Implement your own idempotency in callbacks or use asynchronous reconciliation for critical side effects (e.g., poll the database periodically to sync Firebase Auth claims).
+
+### Basic Usage
+
+```go
+import (
+    "context"
+    "fmt"
+
+    "github.com/mihaimyh/goquota/pkg/billing"
+    "github.com/mihaimyh/goquota/pkg/billing/stripe"
+)
+
+// Configure provider with webhook callback
+stripeProvider, err := stripe.NewProvider(stripe.Config{
+    Config: billing.Config{
+        Manager: manager,
+        TierMapping: map[string]string{
+            "price_abc123": "pro",
+        },
+        // Webhook callback for custom side effects
+        WebhookCallback: func(ctx context.Context, event billing.WebhookEvent) error {
+            fmt.Printf("User %s tier changed: %s → %s\n",
+                event.UserID, event.PreviousTier, event.NewTier)
+            return nil
+        },
+    },
+    StripeAPIKey:        os.Getenv("STRIPE_API_KEY"),
+    StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+})
+```
+
+### WebhookEvent Structure
+
+```go
+type WebhookEvent struct {
+    UserID         string                 // User identifier
+    PreviousTier   string                 // Tier before the change
+    NewTier        string                 // Tier after the change
+    Provider       string                 // Provider name ("stripe", "revenuecat")
+    EventType      string                 // Provider-specific event type
+    EventTimestamp time.Time              // When the event occurred
+    ExpiresAt      *time.Time             // Subscription expiration (nil for lifetime)
+    Metadata       map[string]interface{} // Provider-specific metadata
+}
+```
+
+### Provider-Specific Metadata
+
+**Stripe** - Includes subscription metadata:
+
+```go
+if metadata, ok := event.Metadata["subscription_metadata"].(map[string]string); ok {
+    fmt.Printf("Stripe metadata: %+v\n", metadata)
+}
+```
+
+**RevenueCat** - Includes product and entitlement IDs:
+
+```go
+productID := event.Metadata["product_id"]
+entitlementID := event.Metadata["entitlement_id"]
+```
+
+### Firebase Auth Integration Example
+
+```go
+import (
+    firebase "firebase.google.com/go/v4"
+    "firebase.google.com/go/v4/auth"
+)
+
+// Initialize Firebase Admin SDK
+app, _ := firebase.NewApp(ctx, nil)
+authClient, _ := app.Auth(ctx)
+
+// Configure provider with Firebase sync callback
+stripeProvider, _ := stripe.NewProvider(stripe.Config{
+    Config: billing.Config{
+        Manager: manager,
+        TierMapping: map[string]string{"price_pro_monthly": "pro"},
+        WebhookCallback: func(ctx context.Context, event billing.WebhookEvent) error {
+            // Sync tier to Firebase Auth custom claims
+            claims := map[string]interface{}{"tier": event.NewTier}
+            if event.ExpiresAt != nil {
+                claims["subscription_expires_at"] = event.ExpiresAt.Unix()
+            }
+
+            if err := authClient.SetCustomUserClaims(ctx, event.UserID, claims); err != nil {
+                log.Printf("Failed to sync Firebase claims: %v", err)
+                return nil // Don't fail webhook (use async reconciliation)
+            }
+            return nil
+        },
+    },
+    StripeAPIKey:        os.Getenv("STRIPE_API_KEY"),
+    StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+})
+```
+
+### Best Practices
+
+1. **Implement Idempotency**: Use event metadata to create idempotency keys for external API calls
+2. **Use Async Reconciliation**: For critical operations, implement background jobs that sync database state
+3. **Log Failures**: Always log callback failures for debugging
+4. **Graceful Degradation**: Return `nil` for non-critical failures to prevent webhook retries
+5. **Timeout Protection**: Use context timeouts to prevent slow callbacks from blocking webhooks
+
+### Testing
+
+See [stripe/webhook_callback_test.go](stripe/webhook_callback_test.go) and [revenuecat/webhook_callback_test.go](revenuecat/webhook_callback_test.go) for comprehensive test examples covering:
+
+- Successful callback invocation
+- Error handling and HTTP 500 responses
+- Tier change tracking
+- Metadata validation
+- **Idempotency behavior** (critical)
+
 ## Best Practices
 
 ### 1. Tier Mapping

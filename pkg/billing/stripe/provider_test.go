@@ -179,8 +179,6 @@ func TestProvider_GetTierWeight(t *testing.T) {
 }
 
 func TestProvider_NewProvider_InvalidConfig(t *testing.T) {
-	manager := mockManager(t)
-
 	// Test missing manager
 	_, err := NewProvider(Config{
 		Config: billing.Config{
@@ -193,17 +191,8 @@ func TestProvider_NewProvider_InvalidConfig(t *testing.T) {
 		t.Error("Expected error for missing manager")
 	}
 
-	// Test missing API key
-	_, err = NewProvider(Config{
-		Config: billing.Config{
-			Manager: manager,
-		},
-		StripeAPIKey:        "",
-		StripeWebhookSecret: testStripeWebhookSecret,
-	})
-	if err == nil {
-		t.Error("Expected error for missing API key")
-	}
+	// Note: API key is optional (only required for SyncUser operations)
+	// Webhook-only usage doesn't require an API key
 }
 
 func TestProvider_ExtractTierFromSubscription(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/stripe/stripe-go/v84"
 
+	"github.com/mihaimyh/goquota/pkg/billing"
 	"github.com/mihaimyh/goquota/pkg/billing/internal"
 	"github.com/mihaimyh/goquota/pkg/goquota"
 )
@@ -171,7 +172,18 @@ func (p *Provider) handleSubscriptionCreated(ctx context.Context, event *stripe.
 		ent.ExpiresAt = expiresAt
 	}
 
-	return p.manager.SetEntitlement(ctx, ent)
+	if err := p.manager.SetEntitlement(ctx, ent); err != nil {
+		return err
+	}
+
+	// Invoke webhook callback if configured
+	metadata := make(map[string]interface{})
+	if subscription.Metadata != nil {
+		metadata["subscription_metadata"] = subscription.Metadata
+	}
+	return p.invokeWebhookCallback(
+		ctx, userID, previousTier, tier, string(event.Type), eventTimestamp, expiresAt, metadata,
+	)
 }
 
 // handleSubscriptionUpdated processes customer.subscription.updated events
@@ -234,7 +246,18 @@ func (p *Provider) handleSubscriptionUpdated(ctx context.Context, event *stripe.
 		ent.ExpiresAt = expiresAt
 	}
 
-	return p.manager.SetEntitlement(ctx, ent)
+	if err := p.manager.SetEntitlement(ctx, ent); err != nil {
+		return err
+	}
+
+	// Invoke webhook callback if configured
+	metadata := make(map[string]interface{})
+	if subscription.Metadata != nil {
+		metadata["subscription_metadata"] = subscription.Metadata
+	}
+	return p.invokeWebhookCallback(
+		ctx, userID, previousTier, tier, string(event.Type), eventTimestamp, expiresAt, metadata,
+	)
 }
 
 // handleSubscriptionDeleted processes customer.subscription.deleted events
@@ -344,7 +367,24 @@ func (p *Provider) handleInvoicePaymentSucceeded(
 		ent.ExpiresAt = expiresAt
 	}
 
-	return p.manager.SetEntitlement(ctx, ent)
+	// Determine previous tier for callback
+	previousTier := p.defaultTier
+	if existing != nil {
+		previousTier = existing.Tier
+	}
+
+	if err := p.manager.SetEntitlement(ctx, ent); err != nil {
+		return err
+	}
+
+	// Invoke webhook callback if configured
+	metadata := make(map[string]interface{})
+	if sub.Metadata != nil {
+		metadata["subscription_metadata"] = sub.Metadata
+	}
+	return p.invokeWebhookCallback(
+		ctx, userID, previousTier, tier, string(event.Type), eventTimestamp, expiresAt, metadata,
+	)
 }
 
 // handleInvoicePaymentFailed processes invoice.payment_failed events
@@ -474,6 +514,12 @@ func (p *Provider) handleCheckoutSessionCompleted(
 		UpdatedAt:             eventTimestamp,
 	}
 
+	// Determine previous tier for callback (extracted earlier at line 450)
+	previousTier := p.defaultTier
+	if existing != nil {
+		previousTier = existing.Tier
+	}
+
 	err = p.manager.SetEntitlement(ctx, ent)
 	if err == nil {
 		// Record checkout session completed for subscription
@@ -488,6 +534,20 @@ func (p *Provider) handleCheckoutSessionCompleted(
 				revenueAmount := float64(item.Price.UnitAmount) / 100.0
 				p.metrics.RecordRevenueEstimate(providerName, tier, "subscription", revenueAmount)
 			}
+		}
+
+		// Invoke webhook callback if configured
+		metadata := make(map[string]interface{})
+		if sub.Metadata != nil {
+			metadata["subscription_metadata"] = sub.Metadata
+		}
+		if session.Metadata != nil {
+			metadata["session_metadata"] = session.Metadata
+		}
+		if callbackErr := p.invokeWebhookCallback(
+			ctx, userID, previousTier, tier, string(event.Type), eventTimestamp, expiresAt, metadata,
+		); callbackErr != nil {
+			return callbackErr
 		}
 	}
 
@@ -707,4 +767,34 @@ func (p *Provider) handlePaymentIntentRefunded(
 
 func startOfDayUTC(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// invokeWebhookCallback calls the configured webhook callback if present
+func (p *Provider) invokeWebhookCallback(
+	ctx context.Context,
+	userID, previousTier, newTier, eventType string,
+	eventTimestamp time.Time,
+	expiresAt *time.Time,
+	metadata map[string]interface{},
+) error {
+	if p.webhookCallback == nil {
+		return nil
+	}
+
+	if metadata == nil {
+		metadata = make(map[string]interface{})
+	}
+
+	event := billing.WebhookEvent{
+		UserID:         userID,
+		PreviousTier:   previousTier,
+		NewTier:        newTier,
+		Provider:       providerName,
+		EventType:      eventType,
+		EventTimestamp: eventTimestamp,
+		ExpiresAt:      expiresAt,
+		Metadata:       metadata,
+	}
+
+	return p.webhookCallback(ctx, event)
 }

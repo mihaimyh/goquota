@@ -71,6 +71,7 @@ type Provider struct {
 	stripeClient       *stripe.Client
 	customerIDResolver func(context.Context, string) (string, error)
 	metrics            billing.Metrics
+	webhookCallback    func(context.Context, billing.WebhookEvent) error
 }
 
 // validateProviderConfig validates the provider configuration
@@ -200,6 +201,7 @@ func NewProvider(config Config) (*Provider, error) {
 		stripeClient:       stripeClient,
 		customerIDResolver: config.CustomerIDResolver,
 		metrics:            metrics,
+		webhookCallback:    config.WebhookCallback,
 	}, nil
 }
 

@@ -25,16 +25,17 @@ const (
 
 // Provider implements the billing.Provider interface for RevenueCat
 type Provider struct {
-	manager       *goquota.Manager
-	config        billing.Config
-	httpClient    *http.Client
-	rateLimiter   *internal.RateLimiter
-	tierMapping   map[string]string
-	defaultTier   string
-	webhookSecret []byte
-	apiKey        string
-	acceptHMAC    bool
-	metrics       billing.Metrics
+	manager         *goquota.Manager
+	config          billing.Config
+	httpClient      *http.Client
+	rateLimiter     *internal.RateLimiter
+	tierMapping     map[string]string
+	defaultTier     string
+	webhookSecret   []byte
+	apiKey          string
+	acceptHMAC      bool
+	metrics         billing.Metrics
+	webhookCallback func(context.Context, billing.WebhookEvent) error
 }
 
 // NewProvider creates a new RevenueCat billing provider
@@ -94,16 +95,17 @@ func NewProvider(config billing.Config) (*Provider, error) {
 	}
 
 	return &Provider{
-		manager:       config.Manager,
-		config:        config,
-		httpClient:    httpClient,
-		rateLimiter:   limiter,
-		tierMapping:   tierMapping,
-		defaultTier:   defaultTier,
-		webhookSecret: webhookSecret,
-		apiKey:        apiKey,
-		acceptHMAC:    config.EnableHMAC,
-		metrics:       metrics,
+		manager:         config.Manager,
+		config:          config,
+		httpClient:      httpClient,
+		rateLimiter:     limiter,
+		tierMapping:     tierMapping,
+		defaultTier:     defaultTier,
+		webhookSecret:   webhookSecret,
+		apiKey:          apiKey,
+		acceptHMAC:      config.EnableHMAC,
+		metrics:         metrics,
+		webhookCallback: config.WebhookCallback,
 	}, nil
 }
 
@@ -274,8 +276,9 @@ func (p *Provider) processWebhookEvent(ctx context.Context, payload *webhookPayl
 	eventTimestamp := parseEventTimestamp(payload.getEventTimestamp())
 
 	// Extract tier information from payload
-	tier, expiresAt, _, _ := p.extractTierFromPayload(payload)
+	tier, expiresAt, productID, entitlementID := p.extractTierFromPayload(payload)
 	effectiveTier := tier
+	eventType := strings.TrimSpace(payload.Event.Type)
 
 	// Check if entitlement has expired
 	if expiresAt != nil && expiresAt.Before(time.Now()) {
@@ -337,6 +340,18 @@ func (p *Provider) processWebhookEvent(ctx context.Context, payload *webhookPayl
 		return err
 	}
 
+	// Invoke webhook callback if configured
+	metadata := map[string]interface{}{
+		"product_id":     productID,
+		"entitlement_id": entitlementID,
+		"event_type":     payload.Event.Type,
+	}
+	if err := p.invokeWebhookCallback(
+		ctx, userID, previousTier, effectiveTier, eventType, eventTimestamp, expiresAt, metadata,
+	); err != nil {
+		return err
+	}
+
 	// Apply tier change if needed (with prorated quota adjustment)
 	if tierChanged {
 		// Apply tier change for all resources (or a specific resource if configured)
@@ -365,4 +380,34 @@ func setSecurityHeaders(w http.ResponseWriter) {
 
 func startOfDayUTC(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// invokeWebhookCallback calls the configured webhook callback if present
+func (p *Provider) invokeWebhookCallback(
+	ctx context.Context,
+	userID, previousTier, newTier, eventType string,
+	eventTimestamp time.Time,
+	expiresAt *time.Time,
+	metadata map[string]interface{},
+) error {
+	if p.webhookCallback == nil {
+		return nil
+	}
+
+	if metadata == nil {
+		metadata = make(map[string]interface{})
+	}
+
+	event := billing.WebhookEvent{
+		UserID:         userID,
+		PreviousTier:   previousTier,
+		NewTier:        newTier,
+		Provider:       providerName,
+		EventType:      eventType,
+		EventTimestamp: eventTimestamp,
+		ExpiresAt:      expiresAt,
+		Metadata:       metadata,
+	}
+
+	return p.webhookCallback(ctx, event)
 }

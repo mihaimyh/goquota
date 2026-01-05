@@ -236,6 +236,30 @@ func main() {
 				WebhookSecret: webhookSecret,
 				APIKey:        apiKey,         // May be empty for webhook-only usage
 				Metrics:       billingMetrics, // Optional: enables Prometheus metrics for billing operations
+				// Webhook callback for custom side effects (e.g., Firebase Auth claim syncing)
+				WebhookCallback: func(ctx context.Context, event billing.WebhookEvent) error {
+					// Example: Sync tier changes to Firebase Auth custom claims
+					// This is called AFTER the entitlement is updated in the database
+					// but BEFORE the HTTP 200 response is sent to the webhook provider
+					logger.Info("Webhook callback invoked",
+						goquota.Field{Key: "user_id", Value: event.UserID},
+						goquota.Field{Key: "previous_tier", Value: event.PreviousTier},
+						goquota.Field{Key: "new_tier", Value: event.NewTier},
+						goquota.Field{Key: "provider", Value: event.Provider},
+						goquota.Field{Key: "event_type", Value: event.EventType},
+					)
+
+					// In a real application, you would sync to Firebase Auth here:
+					// authClient.SetCustomUserClaims(ctx, event.UserID, map[string]interface{}{
+					//     "tier": event.NewTier,
+					//     "subscription_expires_at": event.ExpiresAt,
+					// })
+
+					// For this example, just log the event
+					fmt.Printf("     [CALLBACK] User %s tier changed: %s → %s\n",
+						event.UserID, event.PreviousTier, event.NewTier)
+					return nil
+				},
 			})
 			if err != nil {
 				fmt.Printf("   ⚠ Failed to create RevenueCat provider: %v\n", err)
@@ -311,6 +335,26 @@ func main() {
 						"default": "free",
 					},
 					Metrics: stripeBillingMetrics, // Optional: enables Prometheus metrics for billing operations
+					// Webhook callback for custom side effects (e.g., Firebase Auth claim syncing)
+					WebhookCallback: func(ctx context.Context, event billing.WebhookEvent) error {
+						// Example: Sync tier changes to Firebase Auth custom claims
+						logger.Info("Webhook callback invoked",
+							goquota.Field{Key: "user_id", Value: event.UserID},
+							goquota.Field{Key: "previous_tier", Value: event.PreviousTier},
+							goquota.Field{Key: "new_tier", Value: event.NewTier},
+							goquota.Field{Key: "provider", Value: event.Provider},
+							goquota.Field{Key: "event_type", Value: event.EventType},
+						)
+
+						// Access Stripe-specific metadata
+						if metadata, ok := event.Metadata["subscription_metadata"].(map[string]string); ok {
+							logger.Info("Stripe subscription metadata", goquota.Field{Key: "metadata", Value: metadata})
+						}
+
+						fmt.Printf("     [CALLBACK] User %s tier changed: %s → %s (Stripe)\n",
+							event.UserID, event.PreviousTier, event.NewTier)
+						return nil
+					},
 				},
 				StripeAPIKey:        stripeAPIKey,
 				StripeWebhookSecret: stripeWebhookSecret, // May be empty for API-only usage

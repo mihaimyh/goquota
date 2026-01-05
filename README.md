@@ -99,13 +99,13 @@ func main() {
     if err == goquota.ErrQuotaExceeded {
         // Handle quota exceeded
     }
-    
+
     // Consume with idempotency key (prevents double-charging on retries)
     newUsed, err = manager.Consume(
-        ctx, 
-        "user123", 
-        "api_calls", 
-        1, 
+        ctx,
+        "user123",
+        "api_calls",
+        1,
         goquota.PeriodTypeMonthly,
         goquota.WithIdempotencyKey("unique-request-id-123"),
     )
@@ -155,6 +155,7 @@ storage, _ := firestoreStorage.New(client, firestoreStorage.Config{
 **⚠️ Firestore Infrastructure Requirements:**
 
 1. **TTL Policy Configuration (Required)**
+
    - The library adds an `expiresAt` field to consumption and refund documents for automatic cleanup
    - **You must configure a Time-to-Live (TTL) policy** in Google Cloud Console or via Terraform for the `consumptions` and `refunds` collections targeting the `expiresAt` field
    - Without TTL policies, documents will accumulate indefinitely despite the field presence
@@ -185,7 +186,7 @@ Ideal for applications already using PostgreSQL. Provides ACID transactions with
 import (
     "context"
     "time"
-    
+
     postgresStorage "github.com/mihaimyh/goquota/storage/postgres"
 )
 
@@ -205,11 +206,13 @@ defer storage.Close() // Important: closes connection pool and cleanup goroutine
 
 **Database Setup:**
 Run the migration to create required tables:
+
 ```bash
 psql -d goquota -f storage/postgres/migrations/001_initial_schema.sql
 ```
 
 **Important Notes:**
+
 - **Quotas**: Stored in PostgreSQL with global synchronization across instances
 - **Rate Limits**: Handled in-memory (local per instance) for performance. In a cluster of N instances, effective rate limit is `N × ConfiguredRate`
 - **Idempotency Keys**: Scoped per user, allowing safe reuse across different users
@@ -232,6 +235,7 @@ storage := memory.New()
 Enforce time-based request frequency limits in addition to quota limits. Rate limiting prevents API abuse and protects backend services.
 
 **Token Bucket Algorithm** - Allows burst traffic with configurable refill rate:
+
 ```go
 RateLimits: map[string]goquota.RateLimitConfig{
     "api_calls": {
@@ -244,6 +248,7 @@ RateLimits: map[string]goquota.RateLimitConfig{
 ```
 
 **Sliding Window Algorithm** - More precise rate limiting:
+
 ```go
 RateLimits: map[string]goquota.RateLimitConfig{
     "api_calls": {
@@ -257,6 +262,7 @@ RateLimits: map[string]goquota.RateLimitConfig{
 Rate limits are checked **before** quota consumption, so rate-limited requests don't consume quota. When a rate limit is exceeded, the system returns `ErrRateLimitExceeded` with reset time information.
 
 **HTTP Middleware Integration** - Rate limit headers are automatically added:
+
 - `X-RateLimit-Limit`: Total rate limit
 - `X-RateLimit-Remaining`: Remaining requests in current window
 - `X-RateLimit-Reset`: Unix timestamp when the limit resets
@@ -273,10 +279,10 @@ Prevent double-charging when clients retry failed requests by providing idempote
 ```go
 // First request with idempotency key
 newUsed, err := manager.Consume(
-    ctx, 
-    "user123", 
-    "api_calls", 
-    1, 
+    ctx,
+    "user123",
+    "api_calls",
+    1,
     goquota.PeriodTypeMonthly,
     goquota.WithIdempotencyKey("req_abc123"), // Unique key for this operation
 )
@@ -286,10 +292,10 @@ if err != nil {
 
 // Retry with same idempotency key - returns cached result, no double-charge
 newUsed, err = manager.Consume(
-    ctx, 
-    "user123", 
-    "api_calls", 
-    1, 
+    ctx,
+    "user123",
+    "api_calls",
+    1,
     goquota.PeriodTypeMonthly,
     goquota.WithIdempotencyKey("req_abc123"), // Same key
 )
@@ -321,6 +327,7 @@ err := manager.Refund(ctx, &goquota.RefundRequest{
 #### Overview
 
 Pre-paid credits are non-expiring quotas that persist until used. They're perfect for:
+
 - **Credit Packs**: "Buy 500 Image Generations for $10"
 - **Hybrid Billing**: Combine monthly subscriptions with one-time credit purchases
 - **Sign-up Bonuses**: Give new users free credits when they sign up
@@ -417,6 +424,7 @@ newUsed, err := manager.Consume(
 ```
 
 **How it works**:
+
 1. Tries to consume from `PeriodTypeMonthly` (subscription quota)
 2. If monthly quota is exhausted, automatically tries `PeriodTypeForever` (pre-paid credits)
 3. Returns `ErrQuotaExceeded` only if both are exhausted
@@ -484,12 +492,14 @@ checkoutURL, err := stripeProvider.CheckoutURLForPayment(
 ```
 
 **Webhook Processing**: The Stripe provider automatically:
+
 - Processes `checkout.session.completed` events for one-time payments
 - Calls `TopUpLimit()` with the payment amount
 - Uses `payment_intent.id` as the idempotency key (prevents duplicate processing)
 - Processes `payment_intent.refunded` events and calls `RefundCredits()`
 
 **Credit Conversion**: By default, the system assumes 1 cent = 1 credit. For custom conversion rates (e.g., $10 for 500 credits), you can:
+
 - Store the conversion rate in checkout session metadata
 - Calculate credits in your webhook handler before calling `TopUpLimit()`
 
@@ -523,6 +533,7 @@ newUsed, err := manager.Consume(ctx, "user123", "api_calls", 50, goquota.PeriodT
 #### Storage Considerations
 
 **PostgreSQL**: Forever periods use `NULL` for `period_end`. Run the migration:
+
 ```bash
 psql -d goquota -f storage/postgres/migrations/002_forever_periods.sql
 ```
@@ -549,6 +560,7 @@ manager.SetWarningCallback(func(ctx context.Context, userID, resource string, pc
 `goquota` provides administrative methods for incident response and customer support operations.
 
 **Set Usage** - Manually set quota usage (for corrections or resets):
+
 ```go
 // Reset user's monthly usage to zero
 err := manager.SetUsage(ctx, "user123", "api_calls", goquota.PeriodTypeMonthly, 0)
@@ -558,6 +570,7 @@ err = manager.SetUsage(ctx, "user123", "api_calls", goquota.PeriodTypeMonthly, 5
 ```
 
 **Grant One-Time Credits** - Give temporary credits without changing the plan:
+
 ```go
 // Compensate for service outage
 err := manager.GrantOneTimeCredit(ctx, "user123", "api_calls", 1000)
@@ -566,6 +579,7 @@ err := manager.GrantOneTimeCredit(ctx, "user123", "api_calls", 1000)
 ```
 
 **Reset Usage** - Quick reset to zero:
+
 ```go
 // Reset monthly usage
 err := manager.ResetUsage(ctx, "user123", "api_calls", goquota.PeriodTypeMonthly)
@@ -599,18 +613,20 @@ if err == goquota.ErrQuotaExceeded {
 ```
 
 **Use Cases:**
+
 - Gradual rollout: Enable for 10% of users, monitor, then expand
 - A/B testing: Compare quota enforcement strategies
 - Configuration validation: Test new limits before applying
 
 **Per-Request Flexibility:**
+
 ```go
 // Production enforcement for free tier
 manager.Consume(ctx, userID, resource, amount, goquota.PeriodTypeMonthly)
 
 // Shadow mode for enterprise (migration period)
 if tier == "enterprise" {
-    manager.Consume(ctx, userID, resource, amount, goquota.PeriodTypeMonthly, 
+    manager.Consume(ctx, userID, resource, amount, goquota.PeriodTypeMonthly,
         goquota.WithDryRun(true))
 }
 ```
@@ -620,6 +636,7 @@ if tier == "enterprise" {
 Get detailed usage information without extra storage calls, reducing Redis load by 50% for notification-heavy workloads.
 
 **ConsumeWithResult** - Returns detailed usage breakdown:
+
 ```go
 result, err := manager.ConsumeWithResult(
     ctx,
@@ -634,9 +651,9 @@ if err != nil {
 }
 
 // Access detailed info without additional GetUsage() call
-fmt.Printf("Used: %d/%d (%.1f%% - %d remaining)\n", 
-    result.NewUsed, 
-    result.Limit, 
+fmt.Printf("Used: %d/%d (%.1f%% - %d remaining)\n",
+    result.NewUsed,
+    result.Limit,
     result.Percentage,
     result.Remaining,
 )
@@ -648,6 +665,7 @@ if result.Percentage >= 80.0 {
 ```
 
 **GetUsageAfterConsume** - Convenience wrapper:
+
 ```go
 usage, err := manager.GetUsageAfterConsume(
     ctx,
@@ -665,6 +683,7 @@ usage, err := manager.GetUsageAfterConsume(
 Track all quota changes for compliance, debugging, and customer support.
 
 **Automatic Logging** - Configure an audit logger:
+
 ```go
 // Implement the AuditLogger interface or use a provided implementation
 type CustomAuditLogger struct {
@@ -672,7 +691,7 @@ type CustomAuditLogger struct {
 }
 
 func (l *CustomAuditLogger) LogAuditEntry(ctx context.Context, entry *goquota.AuditLogEntry) error {
-    _, err := l.db.ExecContext(ctx, 
+    _, err := l.db.ExecContext(ctx,
         "INSERT INTO audit_logs (user_id, resource, action, amount, timestamp, actor, reason) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         entry.UserID, entry.Resource, entry.Action, entry.Amount, entry.Timestamp, entry.Actor, entry.Reason,
     )
@@ -689,6 +708,7 @@ manager.SetAuditLogger(auditLogger)
 ```
 
 **Query Audit History:**
+
 ```go
 // Get all quota changes for a user
 logs, err := manager.GetAuditLogs(ctx, goquota.AuditLogFilter{
@@ -716,6 +736,7 @@ for _, log := range logs {
 ```
 
 **Logged Actions:**
+
 - Quota consumption (with idempotency key)
 - Refunds (with reason)
 - Admin operations (SetUsage, GrantOneTimeCredit, ResetUsage)
@@ -726,6 +747,7 @@ for _, log := range logs {
 Prevent quota double-spending at reset boundaries in distributed systems using storage server time instead of application server time.
 
 **TimeSource Interface** - Automatically used when available:
+
 ```go
 // All storage backends implement TimeSource
 type TimeSource interface {
@@ -739,11 +761,13 @@ type TimeSource interface {
 ```
 
 **Why It Matters:**
+
 - Prevents "time travel" attacks from clock drift
 - Ensures consistent period calculations across instances
 - Critical for accurate billing at month/day boundaries
 
 **No Configuration Required** - Works automatically:
+
 ```go
 // Manager automatically uses storage server time if available
 manager, err := goquota.NewManager(storage, &config)
@@ -753,6 +777,7 @@ manager, err := goquota.NewManager(storage, &config)
 ```
 
 **Fallback Behavior:**
+
 - If storage doesn't implement TimeSource: falls back to `time.Now().UTC()`
 - If storage.Now() fails: falls back to `time.Now().UTC()` with error logging
 
@@ -761,6 +786,7 @@ manager, err := goquota.NewManager(storage, &config)
 Fail fast on startup with comprehensive configuration validation.
 
 **Automatic Validation** - Runs on `NewManager()`:
+
 ```go
 config := goquota.Config{
     DefaultTier: "free",
@@ -788,6 +814,7 @@ if err != nil {
 ```
 
 **What's Validated:**
+
 - ✅ Default tier exists
 - ✅ No negative quota values
 - ✅ Valid rate limit algorithms
@@ -828,6 +855,7 @@ manager, _ := goquota.NewManager(primaryStorage, &config)
 ```
 
 **Available Strategies:**
+
 - **Cache Fallback**: Falls back to cached data when storage fails (validates staleness)
 - **Optimistic Allowance**: Allows quota consumption optimistically up to a configurable percentage
 - **Secondary Storage**: Falls back to a secondary storage backend (works with any Storage implementation)
@@ -836,6 +864,7 @@ Fallback strategies are tried in order when storage failures occur, enabling con
 
 **⚠️ Multi-Instance Deployment Warning:**
 When deploying multiple instances of your application with fallback strategies enabled, be aware that:
+
 - **Cache Fallback** uses per-instance in-memory caches. Each instance maintains its own cache, which can lead to temporary inconsistencies across instances during storage outages.
 - **Optimistic Allowance** tracks consumption per-instance. In a deployment with N instances, the total optimistic consumption across all instances could theoretically approach N × configured percentage (e.g., 5 instances × 10% = 50% of quota). Monitor `goquota_optimistic_consumption_total` metrics across all instances to track total optimistic usage.
 - **Recommended Practices:**
@@ -979,11 +1008,69 @@ See [pkg/api/README.md](pkg/api/README.md) for complete documentation, including
 - **Standard `net/http`** - Built-in Go HTTP server
 
 All middleware implementations provide:
+
 - Automatic quota and rate limit enforcement
 - Standard rate limit headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, `Retry-After`)
 - Customizable error responses via callbacks
 - Dynamic cost calculation based on request properties
 - Framework-specific extractors for user ID, resource, and amount
+
+## Billing Provider Webhooks
+
+### Webhook Callbacks
+
+Execute custom side effects after successful webhook processing, such as syncing Firebase Auth claims or sending notifications.
+
+```go
+import (
+    "github.com/mihaimyh/goquota/pkg/billing"
+    "github.com/mihaimyh/goquota/pkg/billing/stripe"
+)
+
+// Configure provider with webhook callback
+stripeProvider, _ := stripe.NewProvider(stripe.Config{
+    Config: billing.Config{
+        Manager: manager,
+        TierMapping: map[string]string{"price_abc123": "pro"},
+        // Webhook callback for custom side effects
+        WebhookCallback: func(ctx context.Context, event billing.WebhookEvent) error {
+            // Example: Sync tier to Firebase Auth custom claims
+            return authClient.SetCustomUserClaims(ctx, event.UserID, map[string]interface{}{
+                "tier": event.NewTier,
+                "subscription_expires_at": event.ExpiresAt,
+            })
+        },
+    },
+    StripeAPIKey:        os.Getenv("STRIPE_API_KEY"),
+    StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+})
+```
+
+**Callback Execution Flow:**
+
+1. Webhook signature is verified
+2. Entitlement is updated in the database (**committed**)
+3. **Callback is invoked** (if configured)
+4. HTTP 200 response is sent to the webhook provider
+
+> **⚠️ Best-Effort Semantics**: Due to timestamp-based idempotency, if a callback fails _after_ the entitlement is committed, webhook retries will be skipped. Implement your own idempotency or use async reconciliation for critical operations.
+
+**WebhookEvent Structure:**
+
+```go
+type WebhookEvent struct {
+    UserID         string                 // User identifier
+    PreviousTier   string                 // Tier before the change
+    NewTier        string                 // Tier after the change
+    Provider       string                 // "stripe" or "revenuecat"
+    EventType      string                 // Provider-specific event type
+    EventTimestamp time.Time              // When the event occurred
+    ExpiresAt      *time.Time             // Subscription expiration
+    Metadata       map[string]interface{} // Provider-specific metadata
+}
+```
+
+See [pkg/billing/README.md](pkg/billing/README.md) for complete documentation including Firebase Auth integration examples and best practices.
 
 ## HTTP Middleware
 
@@ -1052,6 +1139,7 @@ api.GET("/data", func(c *gin.Context) {
 ```
 
 **Framework-Specific Extractors:**
+
 - `FromContext(key)` - Extract from Gin context (recommended for auth middleware integration)
 - `FromHeader(headerName)` - Extract from HTTP header
 - `FromParam(paramName)` - Extract from route parameter
@@ -1148,12 +1236,14 @@ api.GET("/data", func(c echo.Context) error {
 ```
 
 **Echo-Specific Extractors:**
+
 - `FromContext(key)` - Extract from Echo context (recommended for auth middleware integration)
 - `FromHeader(headerName)` - Extract from HTTP header
 - `FromParam(paramName)` - Extract from route parameter
 - `FromQuery(queryName)` - Extract from query parameter
 
 **Custom Error Responses:**
+
 ```go
 api.Use(echoMiddleware.Middleware(echoMiddleware.Config{
     Manager:     manager,
@@ -1220,12 +1310,14 @@ api.Get("/data", func(c *fiber.Ctx) error {
 ```
 
 **Fiber-Specific Extractors:**
+
 - `FromLocals(key)` - Extract from Fiber locals (recommended for auth middleware integration)
 - `FromHeader(headerName)` - Extract from HTTP header
 - `FromParams(paramName)` - Extract from route parameter
 - `FromQuery(queryName)` - Extract from query parameter
 
 **Custom Error Responses:**
+
 ```go
 api.Use(fiberMiddleware.Middleware(fiberMiddleware.Config{
     Manager:     manager,
