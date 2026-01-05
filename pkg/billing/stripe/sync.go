@@ -66,10 +66,12 @@ func (p *Provider) searchCustomerByMetadata(ctx context.Context, userID string) 
 
 // syncCustomer synchronizes a customer's subscriptions and updates entitlement
 func (p *Provider) syncCustomer(ctx context.Context, customerID, userID string, startTime time.Time) (string, error) {
-	// Fetch active subscriptions for this customer
+	// Fetch subscriptions for this customer (active, trialing, or past_due)
+	// Note: We fetch all subscriptions and filter by valid statuses
+	// Stripe API doesn't support filtering by multiple statuses in a single query
 	params := &stripe.SubscriptionListParams{}
 	params.Customer = stripe.String(customerID)
-	params.Status = stripe.String(subscriptionStatusActive)
+	// Don't filter by status - we'll filter in code to support multiple valid statuses
 
 	var subscriptions []*stripe.Subscription
 
@@ -81,7 +83,8 @@ func (p *Provider) syncCustomer(ctx context.Context, customerID, userID string, 
 			p.metrics.RecordUserSyncDuration(providerName, time.Since(startTime))
 			return p.defaultTier, fmt.Errorf("failed to list subscriptions: %w", err)
 		}
-		if sub.Status == subscriptionStatusActive {
+		// Include subscriptions with valid statuses (active, trialing, past_due)
+		if isSubscriptionStatusValidForAccess(string(sub.Status)) {
 			subscriptions = append(subscriptions, sub)
 		}
 	}
@@ -178,7 +181,8 @@ func (p *Provider) resolveTierFromSubscriptions(
 	var periodStart *time.Time
 
 	for _, sub := range subscriptions {
-		if sub.Status != subscriptionStatusActive {
+		// Only process subscriptions with valid statuses (already filtered, but double-check)
+		if !isSubscriptionStatusValidForAccess(string(sub.Status)) {
 			continue
 		}
 

@@ -65,6 +65,11 @@ services:
       # Set these environment variables on the host before running docker-compose
       - REVENUECAT_WEBHOOK_SECRET=${REVENUECAT_WEBHOOK_SECRET:-}
       - REVENUECAT_SECRET_API_KEY=${REVENUECAT_SECRET_API_KEY:-}
+      # Stripe billing integration (optional, can be enabled alongside RevenueCat)
+      # Set these environment variables on the host before running docker-compose
+      # Use test mode keys (starting with sk_test_ and whsec_test_) for testing
+      - STRIPE_API_KEY=${STRIPE_API_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
     depends_on:
       redis:
         condition: service_healthy

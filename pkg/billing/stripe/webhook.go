@@ -296,6 +296,11 @@ func (p *Provider) handleInvoicePaymentSucceeded(
 		return nil
 	}
 
+	// API key is required for invoice payment processing
+	if p.stripeClient == nil {
+		return fmt.Errorf("STRIPE_API_KEY required for invoice payment processing")
+	}
+
 	// Fetch subscription to get full details (using new client API)
 	sub, err := p.stripeClient.V1Subscriptions.Retrieve(ctx, subscriptionID, nil)
 	if err != nil {
@@ -379,25 +384,32 @@ func (p *Provider) handleCheckoutSessionCompleted(
 	// Check if this is a payment (one-time) or subscription checkout
 	if session.Mode == stripe.CheckoutSessionModePayment {
 		// Handle one-time payment (credit top-up)
-		err := p.handlePaymentCheckout(ctx, &session, eventTimestamp)
-		if err == nil {
-			// Record checkout session completed for payment
-			tier := "unknown"
-			if session.Metadata != nil {
-				// Try to get tier from metadata if available
-				if t, ok := session.Metadata["tier"]; ok {
-					tier = t
+		// Only process if it has the required metadata for credit top-ups
+		// If not, it's likely a different type of payment and we should ignore it gracefully
+		if session.Metadata != nil && session.Metadata["resource"] != "" {
+			err := p.handlePaymentCheckout(ctx, &session, eventTimestamp)
+			if err == nil {
+				// Record checkout session completed for payment
+				tier := "unknown"
+				if session.Metadata != nil {
+					// Try to get tier from metadata if available
+					if t, ok := session.Metadata["tier"]; ok {
+						tier = t
+					}
+				}
+				p.metrics.RecordCheckoutSessionCompleted(providerName, tier, "payment")
+
+				// Record revenue estimate (amount in cents, convert to dollars)
+				if session.AmountTotal > 0 {
+					revenueAmount := float64(session.AmountTotal) / 100.0
+					p.metrics.RecordRevenueEstimate(providerName, tier, "one-time", revenueAmount)
 				}
 			}
-			p.metrics.RecordCheckoutSessionCompleted(providerName, tier, "payment")
-
-			// Record revenue estimate (amount in cents, convert to dollars)
-			if session.AmountTotal > 0 {
-				revenueAmount := float64(session.AmountTotal) / 100.0
-				p.metrics.RecordRevenueEstimate(providerName, tier, "one-time", revenueAmount)
-			}
+			return err
 		}
-		return err
+		// Payment checkout without credit top-up metadata - ignore gracefully
+		// This is not an error, just a checkout we don't need to process
+		return nil
 	}
 
 	subscriptionID := ""
@@ -407,6 +419,11 @@ func (p *Provider) handleCheckoutSessionCompleted(
 	if subscriptionID == "" {
 		// Not a subscription checkout - ignore
 		return nil
+	}
+
+	// API key is required for subscription checkout processing
+	if p.stripeClient == nil {
+		return fmt.Errorf("STRIPE_API_KEY required for subscription checkout processing")
 	}
 
 	// 1. Patch Stripe subscription metadata (if needed)
@@ -486,8 +503,8 @@ func (p *Provider) extractUserIDFromSubscription(ctx context.Context, sub *strip
 		}
 	}
 
-	// 2. Fallback to customer metadata
-	if sub.Customer != nil {
+	// 2. Fallback to customer metadata (requires API key)
+	if sub.Customer != nil && p.stripeClient != nil {
 		cust, err := p.stripeClient.V1Customers.Retrieve(ctx, sub.Customer.ID, nil)
 		if err == nil && cust.Metadata != nil {
 			if userID, ok := cust.Metadata["user_id"]; ok && userID != "" {
@@ -512,7 +529,7 @@ func (p *Provider) extractTierFromSubscription(
 	var periodEnd *time.Time
 	var periodStart *time.Time
 
-	if sub.Status != subscriptionStatusActive {
+	if !isSubscriptionStatusValidForAccess(string(sub.Status)) {
 		return p.defaultTier, nil, nil
 	}
 

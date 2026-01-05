@@ -14,15 +14,29 @@ import (
 )
 
 const (
-	providerName             = "stripe"
-	defaultHTTPTimeout       = 10 * time.Second
-	defaultRateLimitWindow   = time.Minute
-	defaultRateLimitRequests = 100
-	defaultTierName          = "explorer"
-	defaultTierKeyWildcard   = "*"
-	defaultTierKeyDefault    = "default"
-	subscriptionStatusActive = "active"
+	providerName               = "stripe"
+	defaultHTTPTimeout         = 10 * time.Second
+	defaultRateLimitWindow     = time.Minute
+	defaultRateLimitRequests   = 100
+	defaultTierName            = "explorer"
+	defaultTierKeyWildcard     = "*"
+	defaultTierKeyDefault      = "default"
+	subscriptionStatusActive   = "active"
+	subscriptionStatusTrialing = "trialing"
+	subscriptionStatusPastDue  = "past_due"
 )
+
+// isSubscriptionStatusValidForAccess returns true if a subscription status should grant tier access
+// Valid statuses: "active", "trialing", "past_due" (grace period)
+// Invalid statuses: "incomplete", "incomplete_expired", "canceled", "unpaid", "paused"
+func isSubscriptionStatusValidForAccess(status string) bool {
+	switch status {
+	case subscriptionStatusActive, subscriptionStatusTrialing, subscriptionStatusPastDue:
+		return true
+	default:
+		return false
+	}
+}
 
 // Config extends billing.Config with Stripe-specific options
 type Config struct {
@@ -59,46 +73,33 @@ type Provider struct {
 	metrics            billing.Metrics
 }
 
-// NewProvider creates a new Stripe billing provider
-func NewProvider(config Config) (*Provider, error) {
+// validateProviderConfig validates the provider configuration
+func validateProviderConfig(config Config) (apiKey, webhookSecretStr string, err error) {
 	if config.Manager == nil {
-		return nil, billing.ErrProviderNotConfigured
+		return "", "", billing.ErrProviderNotConfigured
 	}
 
-	// Setup HTTP client
-	httpClient := config.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: defaultHTTPTimeout,
-		}
+	// At least one of API key or webhook secret must be provided
+	apiKey = strings.TrimSpace(config.StripeAPIKey)
+	webhookSecretStr = strings.TrimSpace(config.StripeWebhookSecret)
+	if apiKey == "" && webhookSecretStr == "" {
+		return "", "", billing.ErrProviderNotConfigured
 	}
 
-	// Setup Stripe API key and client
-	apiKey := strings.TrimSpace(config.StripeAPIKey)
-	if apiKey == "" {
-		return nil, billing.ErrProviderNotConfigured
-	}
+	return apiKey, webhookSecretStr, nil
+}
 
-	// Create Stripe client (new API in v82+)
-	stripeClient := stripe.NewClient(apiKey)
-
-	// Setup webhook secret
-	webhookSecretStr := strings.TrimSpace(config.StripeWebhookSecret)
-	if strings.HasPrefix(strings.ToLower(webhookSecretStr), "whsec_") {
-		webhookSecretStr = strings.TrimSpace(webhookSecretStr)
-	}
-	webhookSecret := []byte(webhookSecretStr)
-
-	// Get default tier - use manager's default if available
-	defaultTier := defaultTierName
-	// Manager config may have DefaultTier, but we'll use our constant for consistency
-	// The manager will use its configured DefaultTier when no entitlement exists
-
-	// Setup tier mapping
-	tierMapping := make(map[string]string)
+// setupTierMapping processes the tier mapping configuration and returns the mapping and default tier
+func setupTierMapping(config Config) (tierMapping map[string]string, defaultTier string) {
+	tierMapping = make(map[string]string)
 	for k, v := range config.TierMapping {
 		tierMapping[strings.ToLower(k)] = v
 	}
+
+	// Get default tier - use manager's default if available
+	defaultTier = defaultTierName
+	// Manager config may have DefaultTier, but we'll use our constant for consistency
+	// The manager will use its configured DefaultTier when no entitlement exists
 
 	// Check for default tier mapping
 	if defaultTierKey, ok := tierMapping[defaultTierKeyWildcard]; ok {
@@ -107,7 +108,11 @@ func NewProvider(config Config) (*Provider, error) {
 		defaultTier = defaultTierKey
 	}
 
-	// Setup tier weights
+	return tierMapping, defaultTier
+}
+
+// setupTierWeights processes the tier weights configuration
+func setupTierWeights(config Config, defaultTier string) map[string]int {
 	tierWeights := make(map[string]int)
 	if config.TierWeights != nil {
 		// Use provided weights
@@ -132,6 +137,44 @@ func NewProvider(config Config) (*Provider, error) {
 	}
 	// Default tier always has weight 0
 	tierWeights[defaultTier] = 0
+	return tierWeights
+}
+
+// NewProvider creates a new Stripe billing provider
+func NewProvider(config Config) (*Provider, error) {
+	apiKey, webhookSecretStr, err := validateProviderConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Setup HTTP client
+	httpClient := config.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{
+			Timeout: defaultHTTPTimeout,
+		}
+	}
+
+	// Setup Stripe API key and client
+	// API key is optional - webhooks can work with just webhook secret
+	// API key is only needed for operations that call Stripe API (SyncUser, subscription metadata updates)
+	var stripeClient *stripe.Client
+	if apiKey != "" {
+		// Create Stripe client (new API in v82+)
+		stripeClient = stripe.NewClient(apiKey)
+	}
+
+	// Setup webhook secret
+	if strings.HasPrefix(strings.ToLower(webhookSecretStr), "whsec_") {
+		webhookSecretStr = strings.TrimSpace(webhookSecretStr)
+	}
+	webhookSecret := []byte(webhookSecretStr)
+
+	// Setup tier mapping and default tier
+	tierMapping, defaultTier := setupTierMapping(config)
+
+	// Setup tier weights
+	tierWeights := setupTierWeights(config, defaultTier)
 
 	// Setup rate limiter
 	limiter := internal.NewRateLimiter(defaultRateLimitRequests, defaultRateLimitWindow)

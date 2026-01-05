@@ -22,6 +22,7 @@ import (
 	"github.com/mihaimyh/goquota/pkg/billing"
 	billingPromMetrics "github.com/mihaimyh/goquota/pkg/billing/metrics/prometheus"
 	"github.com/mihaimyh/goquota/pkg/billing/revenuecat"
+	"github.com/mihaimyh/goquota/pkg/billing/stripe"
 	"github.com/mihaimyh/goquota/pkg/goquota"
 	zerolog_adapter "github.com/mihaimyh/goquota/pkg/goquota/logger/zerolog"
 	prometheus_adapter "github.com/mihaimyh/goquota/pkg/goquota/metrics/prometheus"
@@ -200,6 +201,11 @@ func main() {
 	hasWebhookSecret = webhookSecret != ""
 	hasAPIKey = apiKey != ""
 
+	// Create shared billing metrics instance (used by both RevenueCat and Stripe if enabled)
+	// Only create once to avoid duplicate registration
+	var sharedBillingMetrics billing.Metrics
+	metricsCreated := false
+
 	if !hasWebhookSecret && !hasAPIKey {
 		fmt.Println("   ⚠ RevenueCat disabled: REVENUECAT_WEBHOOK_SECRET and REVENUECAT_SECRET_API_KEY not set")
 		fmt.Println("     To enable RevenueCat webhooks, set REVENUECAT_WEBHOOK_SECRET environment variable")
@@ -207,7 +213,12 @@ func main() {
 		// Create provider if webhook secret is provided (API key is optional for webhook-only usage)
 		if hasWebhookSecret {
 			// Create billing metrics (optional - uses same namespace as goquota metrics)
-			billingMetrics := billingPromMetrics.DefaultMetrics("goquota_comprehensive")
+			// Only create once and share between providers
+			if !metricsCreated {
+				sharedBillingMetrics = billingPromMetrics.DefaultMetrics("goquota_comprehensive")
+				metricsCreated = true
+			}
+			billingMetrics := sharedBillingMetrics
 
 			rcProvider, err := revenuecat.NewProvider(billing.Config{
 				Manager: manager,
@@ -250,6 +261,83 @@ func main() {
 		} else {
 			fmt.Println("   ⚠ RevenueCat webhook disabled: REVENUECAT_WEBHOOK_SECRET not set")
 			fmt.Println("     (API key alone is not sufficient for webhook verification)")
+		}
+	}
+
+	// ============================================================
+	// 3c. Optional: Configure Stripe Billing Provider
+	// ============================================================
+	fmt.Println("3c. Configuring Stripe billing provider (optional)...")
+	var stripeProvider billing.Provider
+	stripeAPIKey := os.Getenv("STRIPE_API_KEY")
+	stripeWebhookSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
+	hasStripeAPIKey := stripeAPIKey != ""
+	hasStripeWebhookSecret := stripeWebhookSecret != ""
+
+	if !hasStripeAPIKey && !hasStripeWebhookSecret {
+		fmt.Println("   ⚠ Stripe disabled: STRIPE_API_KEY and STRIPE_WEBHOOK_SECRET not set")
+		fmt.Println("     To enable Stripe webhooks, set STRIPE_WEBHOOK_SECRET environment variable")
+		fmt.Println("     To enable Stripe API sync, set STRIPE_API_KEY environment variable")
+	} else {
+		// Create provider if webhook secret OR API key is provided
+		// Webhook secret is required for webhook signature verification
+		// API key is optional but required for subscription operations and SyncUser
+		if hasStripeWebhookSecret || hasStripeAPIKey {
+			// Create billing metrics (optional - uses same namespace as goquota metrics)
+			// Reuse shared metrics instance if already created
+			if !metricsCreated {
+				sharedBillingMetrics = billingPromMetrics.DefaultMetrics("goquota_comprehensive")
+				metricsCreated = true
+			}
+			stripeBillingMetrics := sharedBillingMetrics
+
+			stripeProv, err := stripe.NewProvider(stripe.Config{
+				Config: billing.Config{
+					Manager: manager,
+					TierMapping: map[string]string{
+						// Map Stripe Price IDs to goquota tiers
+						// These prices were created via Stripe MCP server for testing
+						// Free Tier
+						"price_1SmBvJERG1ZIgEobmVu51B8F": "free", // Free monthly ($0)
+						"price_1SmBvKERG1ZIgEobRFhe5l6k": "free", // Free annual ($0)
+						// Pro Tier
+						"price_1SmBvLERG1ZIgEob52Zugp4X": "pro", // Pro monthly ($10)
+						"price_1SmBvMERG1ZIgEobP7OoCkti": "pro", // Pro annual ($100)
+						// Enterprise Tier
+						"price_1SmBvMERG1ZIgEobiWRrQNkH": "enterprise", // Enterprise monthly ($50)
+						"price_1SmBvNERG1ZIgEobLbli8DpI": "enterprise", // Enterprise annual ($500)
+						// Fallback mappings
+						"*":       "free", // Default / unknown entitlements
+						"default": "free",
+					},
+					Metrics: stripeBillingMetrics, // Optional: enables Prometheus metrics for billing operations
+				},
+				StripeAPIKey:        stripeAPIKey,
+				StripeWebhookSecret: stripeWebhookSecret, // May be empty for API-only usage
+			})
+			if err != nil {
+				fmt.Printf("   ⚠ Failed to create Stripe provider: %v\n", err)
+				fmt.Println("     Webhook endpoint will NOT be available")
+			} else {
+				stripeProvider = stripeProv
+				fmt.Println("   ✓ Stripe provider configured")
+				if hasStripeWebhookSecret {
+					fmt.Println("     - Webhook endpoint: POST /webhooks/stripe")
+					secretPreviewLen := 8
+					if len(stripeWebhookSecret) < secretPreviewLen {
+						secretPreviewLen = len(stripeWebhookSecret)
+					}
+					fmt.Printf("     - Webhook secret: %s... (configured)\n", stripeWebhookSecret[:secretPreviewLen])
+				} else {
+					fmt.Println("     ⚠ Webhook disabled: STRIPE_WEBHOOK_SECRET not set")
+				}
+				if hasStripeAPIKey {
+					fmt.Println("     - Restore purchases endpoint: POST /api/restore-purchases-stripe")
+				} else {
+					fmt.Println("     ⚠ Restore purchases disabled: STRIPE_API_KEY not set")
+				}
+				fmt.Println("     - Prometheus metrics enabled for billing operations")
+			}
 		}
 	}
 
@@ -462,6 +550,73 @@ func main() {
 			})
 		})
 		fmt.Println("     Debug endpoint registered: POST /webhooks/revenuecat (returns 503)")
+	}
+
+	// ============================================================
+	// 5b. Billing Integration Endpoints (Stripe)
+	// ============================================================
+	if stripeProvider != nil {
+		// Stripe webhook endpoint (used by Stripe to push subscription changes)
+		// Provider is only created if API key is provided, webhook secret is optional
+		if hasStripeWebhookSecret {
+			r.POST("/webhooks/stripe", gin.WrapH(stripeProvider.WebhookHandler()))
+			fmt.Println("   ✓ Stripe webhook route registered: POST /webhooks/stripe")
+		} else {
+			// Register a helpful error endpoint for debugging
+			r.POST("/webhooks/stripe", func(c *gin.Context) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{
+					"error":    "Stripe webhook not configured",
+					"message":  "STRIPE_WEBHOOK_SECRET environment variable is not set",
+					"endpoint": "/webhooks/stripe",
+				})
+			})
+			fmt.Println("     Debug endpoint registered: POST /webhooks/stripe (returns 503)")
+		}
+
+		// Restore purchases / manual sync endpoint
+		// Only register if API key is provided (required for SyncUser)
+		if hasStripeAPIKey {
+			r.POST("/api/restore-purchases-stripe", func(c *gin.Context) {
+				// Prefer explicit query parameter, fall back to authenticated user header
+				userID := c.Query("user_id")
+				if userID == "" {
+					userID = c.GetHeader("X-User-ID")
+				}
+				if userID == "" {
+					c.JSON(http.StatusBadRequest, gin.H{
+						"error": "missing user identifier (provide ?user_id=... or X-User-ID header)",
+					})
+					return
+				}
+
+				tier, err := stripeProvider.SyncUser(c.Request.Context(), userID)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{
+						"error":   "failed to sync purchases",
+						"details": err.Error(),
+					})
+					return
+				}
+
+				c.JSON(http.StatusOK, gin.H{
+					"user_id": userID,
+					"tier":    tier,
+				})
+			})
+			fmt.Println("   ✓ Restore purchases route registered: POST /api/restore-purchases-stripe")
+		}
+	} else {
+		fmt.Println("   ⚠ Stripe billing endpoints NOT registered (Stripe provider disabled)")
+		fmt.Println("     Set STRIPE_API_KEY environment variable to enable Stripe integration")
+		// Register a helpful error endpoint for debugging
+		r.POST("/webhooks/stripe", func(c *gin.Context) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":    "Stripe webhook not configured",
+				"message":  "STRIPE_API_KEY environment variable is not set",
+				"endpoint": "/webhooks/stripe",
+			})
+		})
+		fmt.Println("     Debug endpoint registered: POST /webhooks/stripe (returns 503)")
 	}
 
 	// Protected API endpoints with middleware

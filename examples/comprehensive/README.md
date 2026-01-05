@@ -13,7 +13,7 @@ This example demonstrates all goquota features in a single application:
 - **Tier Changes & Proration** - Mid-cycle upgrades/downgrades
 - **Soft Limits & Warnings** - Threshold-based callbacks
 - **HTTP Middleware** - Gin framework with dynamic cost calculation
- - **Billing Integration (optional)** - RevenueCat provider for automatic entitlement → tier sync
+ - **Billing Integration (optional)** - RevenueCat and Stripe providers for automatic entitlement → tier sync
 
 ## Running Locally
 
@@ -29,7 +29,9 @@ This example demonstrates all goquota features in a single application:
    go run examples/comprehensive/main.go
    ```
 
-3. **(Optional) Enable RevenueCat billing integration**:
+3. **(Optional) Enable billing integration**:
+   
+   **RevenueCat:**
    ```bash
    export REVENUECAT_WEBHOOK_SECRET="yWt"
    export REVENUECAT_SECRET_API_KEY="sk_"
@@ -37,6 +39,17 @@ This example demonstrates all goquota features in a single application:
    # $env:REVENUECAT_WEBHOOK_SECRET="..."
    # $env:REVENUECAT_SECRET_API_KEY="..."
    ```
+   
+   **Stripe (test mode):**
+   ```bash
+   export STRIPE_API_KEY="sk_test_..."
+   export STRIPE_WEBHOOK_SECRET="whsec_test_..."
+   # or on Windows PowerShell:
+   # $env:STRIPE_API_KEY="sk_test_..."
+   # $env:STRIPE_WEBHOOK_SECRET="whsec_test_..."
+   ```
+   
+   Note: Both providers can be enabled simultaneously.
 
 The example will:
 - Run programmatic demonstrations of all features
@@ -109,6 +122,49 @@ RevenueCat webhooks require a publicly accessible URL. For local development, us
 cloudflared tunnel --url http://localhost:8080
 ```
 
+### Exposing Webhooks for Stripe (Local Development)
+
+Stripe webhooks can be tested locally using the Stripe CLI (recommended for testing):
+
+1. **Install Stripe CLI**: [stripe.com/docs/stripe-cli](https://stripe.com/docs/stripe-cli)
+
+2. **Login to Stripe CLI**:
+   ```bash
+   stripe login
+   ```
+
+3. **Forward webhooks to local server**:
+   ```bash
+   stripe listen --forward-to localhost:8080/webhooks/stripe
+   ```
+   
+   This will output a webhook signing secret (starts with `whsec_`). Copy this value.
+
+4. **Set the webhook secret**:
+   ```bash
+   export STRIPE_WEBHOOK_SECRET="whsec_..."  # From step 3
+   export STRIPE_API_KEY="sk_test_..."        # Your Stripe test API key
+   ```
+
+5. **Restart the comprehensive example** (if running):
+   ```bash
+   docker-compose restart comprehensive-example
+   ```
+
+6. **Trigger test events**:
+   ```bash
+   stripe trigger customer.subscription.created
+   stripe trigger invoice.payment_succeeded
+   stripe trigger checkout.session.completed
+   ```
+
+**For production webhooks**, use ngrok (same setup as RevenueCat above) and configure the webhook endpoint in Stripe Dashboard → Developers → Webhooks.
+
+**Important**: 
+- Stripe requires `metadata["user_id"]` on subscriptions to map Stripe customers to your application users
+- Configure tier mappings in `main.go` to map your Stripe Price IDs to goquota tiers (free, pro, enterprise)
+- See `pkg/billing/stripe/CONFIGURATION.md` for detailed Stripe integration requirements
+
 ## Testing the API
 
 Once running, test the endpoints:
@@ -135,15 +191,22 @@ curl http://localhost:9090/metrics
 # (Optional) Restore purchases / sync from RevenueCat
 curl -X POST "http://localhost:8080/api/restore-purchases?user_id=user1_free"
 
+# (Optional) Restore purchases / sync from Stripe
+curl -X POST "http://localhost:8080/api/restore-purchases-stripe?user_id=user1_free"
+
 # (Optional) RevenueCat webhook (normally called by RevenueCat, not manually)
 curl -X POST "http://localhost:8080/webhooks/revenuecat" \
   -H "Authorization: Bearer $REVENUECAT_SECRET" \
   -H "Content-Type: application/json" \
   -d '{"event":{"id":"test","type":"TEST","app_user_id":"user1_free"}}'
+
+# (Optional) Stripe webhook (normally called by Stripe, use Stripe CLI for testing)
+# See "Exposing Webhooks for Stripe" section above
 ```
 
-> Note: Billing endpoints (`/webhooks/revenuecat`, `/api/restore-purchases`) are only
-> registered when `REVENUECAT_SECRET` is set and the provider initializes successfully.
+> Note: Billing endpoints are only registered when the respective provider is configured:
+> - RevenueCat: `/webhooks/revenuecat`, `/api/restore-purchases` (requires `REVENUECAT_WEBHOOK_SECRET`)
+> - Stripe: `/webhooks/stripe`, `/api/restore-purchases-stripe` (requires `STRIPE_API_KEY`)
 
 ## What the Example Demonstrates
 
@@ -170,9 +233,14 @@ curl -X POST "http://localhost:8080/webhooks/revenuecat" \
 
 - `REDIS_HOST` - Redis connection string (default: `localhost:6379`)
   - Use `redis:6379` when running in Docker Compose
- - `REVENUECAT_WEBHOOK_SECRET` - RevenueCat webhook secret used to verify `/webhooks/revenuecat` (optional)
- - `REVENUECAT_SECRET_API_KEY` - RevenueCat API key used by `SyncUser` for `/api/restore-purchases` (optional)
-   - If either is unset, the example still runs but billing integration is disabled
+- **RevenueCat (optional)**:
+  - `REVENUECAT_WEBHOOK_SECRET` - RevenueCat webhook secret used to verify `/webhooks/revenuecat` (optional)
+  - `REVENUECAT_SECRET_API_KEY` - RevenueCat API key used by `SyncUser` for `/api/restore-purchases` (optional)
+- **Stripe (optional)**:
+  - `STRIPE_API_KEY` - Stripe API key (required for Stripe provider, use `sk_test_...` for test mode)
+  - `STRIPE_WEBHOOK_SECRET` - Stripe webhook secret used to verify `/webhooks/stripe` (optional, use `whsec_test_...` for test mode)
+  - If unset, the example still runs but the respective billing integration is disabled
+  - Both RevenueCat and Stripe can be enabled simultaneously
 
 ## Files
 
