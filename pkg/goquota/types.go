@@ -2,7 +2,14 @@ package goquota
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
+)
+
+const (
+	algorithmTokenBucket   = "token_bucket"
+	algorithmSlidingWindow = "sliding_window"
 )
 
 // PeriodType defines the type of quota period
@@ -232,6 +239,249 @@ type Config struct {
 	FallbackConfig *FallbackConfig
 }
 
+// Validate validates the configuration and returns an error if invalid.
+// This should be called before creating a Manager to fail fast on configuration errors.
+func (c *Config) Validate() error {
+	var errs []error
+
+	// Validate DefaultTier exists in Tiers map
+	errs = append(errs, c.validateDefaultTier()...)
+
+	// Validate tier configurations
+	if c.Tiers != nil {
+		for tierName, tierConfig := range c.Tiers {
+			errs = append(errs, c.validateTierConfig(tierName, tierConfig)...)
+		}
+	}
+
+	// Validate other config sections
+	errs = append(errs, c.validateCacheConfig()...)
+	errs = append(errs, c.validateCircuitBreakerConfig()...)
+	errs = append(errs, c.validateFallbackConfig()...)
+	errs = append(errs, c.validateIdempotencyTTL()...)
+
+	// Combine errors
+	if len(errs) > 0 {
+		var errMsg strings.Builder
+		errMsg.WriteString("configuration validation failed:\n")
+		for i, err := range errs {
+			errMsg.WriteString(fmt.Sprintf("  %d. %s\n", i+1, err.Error()))
+		}
+		return fmt.Errorf("%s", errMsg.String())
+	}
+
+	return nil
+}
+
+// validateDefaultTier validates the default tier configuration
+func (c *Config) validateDefaultTier() []error {
+	var errs []error
+	if c.DefaultTier == "" {
+		errs = append(errs, fmt.Errorf("defaultTier is required"))
+	} else if c.Tiers == nil {
+		errs = append(errs,
+			fmt.Errorf("defaultTier '%s' does not exist in Tiers map (Tiers is nil)", c.DefaultTier))
+	} else if _, ok := c.Tiers[c.DefaultTier]; !ok {
+		errs = append(errs,
+			fmt.Errorf("defaultTier '%s' does not exist in Tiers map", c.DefaultTier))
+	}
+	return errs
+}
+
+// validateTierConfig validates a single tier configuration
+func (c *Config) validateTierConfig(tierName string, tierConfig TierConfig) []error {
+	var errs []error
+
+	// Validate tier name matches config name
+	if tierConfig.Name != tierName {
+		errs = append(errs,
+			fmt.Errorf("tier '%s' has mismatched name in config: '%s'", tierName, tierConfig.Name))
+	}
+
+	// Validate quotas
+	errs = append(errs, c.validateQuotas(tierName, tierConfig)...)
+
+	// Validate warning thresholds
+	errs = append(errs, c.validateWarningThresholds(tierName, tierConfig)...)
+
+	// Validate rate limits
+	errs = append(errs, c.validateRateLimits(tierName, tierConfig)...)
+
+	// Validate consumption order
+	errs = append(errs, c.validateConsumptionOrder(tierName, tierConfig)...)
+
+	return errs
+}
+
+// validateQuotas validates quota values are non-negative
+func (c *Config) validateQuotas(tierName string, tierConfig TierConfig) []error {
+	var errs []error
+
+	for resource, limit := range tierConfig.MonthlyQuotas {
+		if limit < -1 {
+			errs = append(errs, fmt.Errorf(
+				"tier '%s' resource '%s' has negative monthly quota: %d (use -1 for unlimited)",
+				tierName, resource, limit))
+		}
+	}
+
+	for resource, limit := range tierConfig.DailyQuotas {
+		if limit < -1 {
+			errs = append(errs, fmt.Errorf(
+				"tier '%s' resource '%s' has negative daily quota: %d (use -1 for unlimited)",
+				tierName, resource, limit))
+		}
+	}
+
+	for resource, limit := range tierConfig.InitialForeverCredits {
+		if limit < 0 {
+			errs = append(errs, fmt.Errorf(
+				"tier '%s' resource '%s' has negative initial forever credits: %d",
+				tierName, resource, limit))
+		}
+	}
+
+	return errs
+}
+
+// validateWarningThresholds validates warning thresholds are in [0, 1] range
+func (c *Config) validateWarningThresholds(tierName string, tierConfig TierConfig) []error {
+	var errs []error
+
+	for resource, thresholds := range tierConfig.WarningThresholds {
+		for i, threshold := range thresholds {
+			if threshold < 0 || threshold > 1 {
+				errs = append(errs, fmt.Errorf(
+					"tier '%s' resource '%s' warning threshold[%d] is out of range [0, 1]: %f",
+					tierName, resource, i, threshold))
+			}
+		}
+	}
+
+	return errs
+}
+
+// validateRateLimits validates rate limit configurations
+func (c *Config) validateRateLimits(tierName string, tierConfig TierConfig) []error {
+	var errs []error
+
+	for resource, rateLimit := range tierConfig.RateLimits {
+		if rateLimit.Rate < 0 {
+			errs = append(errs, fmt.Errorf(
+				"tier '%s' resource '%s' has negative rate limit: %d",
+				tierName, resource, rateLimit.Rate))
+		}
+		if rateLimit.Window <= 0 {
+			errs = append(errs, fmt.Errorf(
+				"tier '%s' resource '%s' has invalid rate limit window: %v",
+				tierName, resource, rateLimit.Window))
+		}
+		if rateLimit.Burst < 0 {
+			errs = append(errs, fmt.Errorf(
+				"tier '%s' resource '%s' has negative burst limit: %d",
+				tierName, resource, rateLimit.Burst))
+		}
+		if rateLimit.Algorithm != "" &&
+			rateLimit.Algorithm != algorithmTokenBucket &&
+			rateLimit.Algorithm != algorithmSlidingWindow {
+			errs = append(errs, fmt.Errorf(
+				"tier '%s' resource '%s' has invalid rate limit algorithm: %s "+
+					"(must be 'token_bucket' or 'sliding_window')",
+				tierName, resource, rateLimit.Algorithm))
+		}
+	}
+
+	return errs
+}
+
+// validateConsumptionOrder validates consumption order period types
+func (c *Config) validateConsumptionOrder(tierName string, tierConfig TierConfig) []error {
+	var errs []error
+
+	for i, periodType := range tierConfig.ConsumptionOrder {
+		if periodType != PeriodTypeMonthly &&
+			periodType != PeriodTypeDaily &&
+			periodType != PeriodTypeForever {
+			errs = append(errs, fmt.Errorf(
+				"tier '%s' consumptionOrder[%d] has invalid period type: %s",
+				tierName, i, periodType))
+		}
+	}
+
+	return errs
+}
+
+// validateCacheConfig validates cache configuration
+func (c *Config) validateCacheConfig() []error {
+	var errs []error
+
+	if c.CacheConfig != nil && c.CacheConfig.Enabled {
+		if c.CacheConfig.EntitlementTTL < 0 {
+			errs = append(errs, fmt.Errorf("cacheConfig.entitlementTTL cannot be negative"))
+		}
+		if c.CacheConfig.UsageTTL < 0 {
+			errs = append(errs, fmt.Errorf("cacheConfig.usageTTL cannot be negative"))
+		}
+		if c.CacheConfig.MaxEntitlements < 0 {
+			errs = append(errs, fmt.Errorf("cacheConfig.maxEntitlements cannot be negative"))
+		}
+		if c.CacheConfig.MaxUsage < 0 {
+			errs = append(errs, fmt.Errorf("cacheConfig.maxUsage cannot be negative"))
+		}
+	}
+
+	return errs
+}
+
+// validateCircuitBreakerConfig validates circuit breaker configuration
+func (c *Config) validateCircuitBreakerConfig() []error {
+	var errs []error
+
+	if c.CircuitBreakerConfig != nil && c.CircuitBreakerConfig.Enabled {
+		if c.CircuitBreakerConfig.FailureThreshold < 0 {
+			errs = append(errs,
+				fmt.Errorf("circuitBreakerConfig.failureThreshold cannot be negative"))
+		}
+		if c.CircuitBreakerConfig.ResetTimeout < 0 {
+			errs = append(errs,
+				fmt.Errorf("circuitBreakerConfig.resetTimeout cannot be negative"))
+		}
+	}
+
+	return errs
+}
+
+// validateFallbackConfig validates fallback configuration
+func (c *Config) validateFallbackConfig() []error {
+	var errs []error
+
+	if c.FallbackConfig != nil && c.FallbackConfig.Enabled {
+		percentage := c.FallbackConfig.OptimisticAllowancePercentage
+		if percentage < 0 || percentage > 100 {
+			errs = append(errs, fmt.Errorf(
+				"fallbackConfig.optimisticAllowancePercentage must be in range [0, 100]: %f",
+				percentage))
+		}
+		if c.FallbackConfig.MaxStaleness < 0 {
+			errs = append(errs,
+				fmt.Errorf("fallbackConfig.maxStaleness cannot be negative"))
+		}
+	}
+
+	return errs
+}
+
+// validateIdempotencyTTL validates idempotency key TTL
+func (c *Config) validateIdempotencyTTL() []error {
+	var errs []error
+
+	if c.IdempotencyKeyTTL < 0 {
+		errs = append(errs, fmt.Errorf("idempotencyKeyTTL cannot be negative"))
+	}
+
+	return errs
+}
+
 // WarningHandler is the interface for handling quota warnings
 type WarningHandler interface {
 	OnWarning(ctx context.Context, usage *Usage, threshold float64)
@@ -243,12 +493,22 @@ type ConsumeOption func(*ConsumeOptions)
 // ConsumeOptions holds options for the Consume operation
 type ConsumeOptions struct {
 	IdempotencyKey string
+	DryRun         bool // If true, log violation but don't block
 }
 
 // WithIdempotencyKey sets the idempotency key for a consume operation
 func WithIdempotencyKey(key string) ConsumeOption {
 	return func(opts *ConsumeOptions) {
 		opts.IdempotencyKey = key
+	}
+}
+
+// WithDryRun enables dry-run mode for a consume operation.
+// In dry-run mode, quota violations are logged but the request is not blocked.
+// This is useful for shadow mode deployments and testing quota rules.
+func WithDryRun(dryRun bool) ConsumeOption {
+	return func(opts *ConsumeOptions) {
+		opts.DryRun = dryRun
 	}
 }
 
@@ -289,6 +549,15 @@ type ConsumptionRecord struct {
 	IdempotencyKey string
 	NewUsed        int
 	Metadata       map[string]string
+}
+
+// ConsumeResult represents the result of a Consume operation with full quota information.
+// This allows applications to trigger side-effects (emails/webhooks) without additional storage calls.
+type ConsumeResult struct {
+	NewUsed    int     // New total used amount after consumption
+	Limit      int     // Quota limit for the resource
+	Remaining  int     // Remaining quota (limit - newUsed)
+	Percentage float64 // Usage percentage (newUsed / limit * 100)
 }
 
 // TryConsumeResult represents the result of a TryConsume operation

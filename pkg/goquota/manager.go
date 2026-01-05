@@ -20,6 +20,7 @@ func WithWarningHandler(ctx context.Context, handler WarningHandler) context.Con
 // Manager manages quota consumption and tracking across multiple resources and time periods
 type Manager struct {
 	storage          Storage
+	timeSource       TimeSource // Optional: uses storage time if available, falls back to time.Now()
 	config           Config
 	cache            Cache
 	metrics          Metrics
@@ -40,6 +41,11 @@ func NewManager(storage Storage, config *Config) (*Manager, error) {
 		config = &Config{}
 	}
 
+	// Validate configuration before proceeding (fail fast)
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
 	applyConfigDefaults(config)
 	cache := initializeCache(config)
 	metrics := initializeMetrics(config.Metrics)
@@ -48,8 +54,18 @@ func NewManager(storage Storage, config *Config) (*Manager, error) {
 	fallbackStrategy := initializeFallback(config, cache, metrics, logger)
 	rateLimiter := NewRateLimiter(currentStorage, false) // Use storage-backed rate limiter
 
+	// Check if storage implements TimeSource interface
+	var timeSource TimeSource
+	if ts, ok := currentStorage.(TimeSource); ok {
+		timeSource = ts
+		logger.Info("storage implements TimeSource, using storage engine time")
+	} else {
+		logger.Info("storage does not implement TimeSource, using application server time")
+	}
+
 	return &Manager{
 		storage:          currentStorage,
+		timeSource:       timeSource,
 		config:           *config,
 		cache:            cache,
 		metrics:          metrics,
@@ -185,7 +201,7 @@ func (m *Manager) GetCurrentCycle(ctx context.Context, userID string) (Period, e
 	if err != nil {
 		if err == ErrEntitlementNotFound {
 			// Use current time as start for users without entitlement
-			now := time.Now().UTC()
+			now := m.now(ctx)
 			start, end := CurrentCycleForStart(startOfDayUTC(now), now)
 			return Period{
 				Start: start,
@@ -196,7 +212,8 @@ func (m *Manager) GetCurrentCycle(ctx context.Context, userID string) (Period, e
 		return Period{}, err
 	}
 
-	start, end := CurrentCycleForStart(ent.SubscriptionStartDate, time.Now().UTC())
+	now := m.now(ctx)
+	start, end := CurrentCycleForStart(ent.SubscriptionStartDate, now)
 	return Period{
 		Start: start,
 		End:   end,
@@ -222,20 +239,21 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 		tier = ent.Tier
 	}
 
+	// Get current time (using TimeSource if available)
+	now := m.now(ctx)
+
 	// Calculate period based on type
 	switch periodType {
 	case PeriodTypeMonthly:
 		var start, end time.Time
 		if err == nil {
-			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, time.Now().UTC())
+			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, now)
 		} else {
-			now := time.Now().UTC()
 			start, end = CurrentCycleForStart(startOfDayUTC(now), now)
 		}
 		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
 
 	case PeriodTypeDaily:
-		now := time.Now().UTC()
 		start := startOfDayUTC(now)
 		end := start.Add(24 * time.Hour)
 		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
@@ -243,7 +261,6 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 	case PeriodTypeForever:
 		// Forever periods use a stable start time and sentinel end time
 		// The period key will be "forever" regardless of dates
-		now := time.Now().UTC()
 		start := startOfDayUTC(now)
 		// Use sentinel value for end (or NULL in storage)
 		end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
@@ -370,6 +387,14 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 //nolint:gocyclo // Complex function handles idempotency, period calculation, and error cases
 func (m *Manager) Consume(ctx context.Context, userID, resource string, amount int,
 	periodType PeriodType, opts ...ConsumeOption) (int, error) {
+	// Check if context is already canceled or timed out
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+		// Context is still valid, continue
+	}
+
 	if amount < 0 {
 		return 0, ErrInvalidAmount
 	}
@@ -420,6 +445,9 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		tier = ent.Tier
 	}
 
+	// Get current time (using TimeSource if available)
+	now := m.now(ctx)
+
 	// Handle cascading consumption for PeriodTypeAuto
 	if periodType == PeriodTypeAuto {
 		// Get consumption order from tier config
@@ -458,22 +486,19 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 	case PeriodTypeMonthly:
 		var start, end time.Time
 		if err == nil {
-			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, time.Now().UTC())
+			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, now)
 		} else {
-			now := time.Now().UTC()
 			start, end = CurrentCycleForStart(startOfDayUTC(now), now)
 		}
 		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
 
 	case PeriodTypeDaily:
-		now := time.Now().UTC()
 		start := startOfDayUTC(now)
 		end := start.Add(24 * time.Hour)
 		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
 
 	case PeriodTypeForever:
 		// Forever periods use a stable start time and sentinel end time
-		now := time.Now().UTC()
 		start := startOfDayUTC(now)
 		// Use sentinel value for end (or NULL in storage)
 		end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
@@ -530,6 +555,53 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 
 	if limit <= 0 {
 		return 0, ErrQuotaExceeded // No quota available for this tier
+	}
+
+	// Check if this is a dry-run (shadow mode)
+	if consumeOpts.DryRun {
+		// Get current usage to check if it would exceed
+		usage, err := m.storage.GetUsage(ctx, userID, resource, period)
+		if err != nil {
+			m.logger.Warn("dry-run: failed to get usage, allowing request",
+				Field{"userId", userID},
+				Field{"resource", resource},
+				Field{"error", err},
+			)
+			// In dry-run mode, allow the request even if we can't check
+			return 0, nil
+		}
+
+		currentUsed := 0
+		if usage != nil {
+			currentUsed = usage.Used
+		}
+
+		// Check if consumption would exceed limit
+		if currentUsed+amount > limit {
+			// Log violation but don't block
+			m.logger.Info("dry-run: quota would be exceeded (allowing)",
+				Field{"userId", userID},
+				Field{"resource", resource},
+				Field{"currentUsed", currentUsed},
+				Field{"amount", amount},
+				Field{"limit", limit},
+			)
+			// Record metric for shadow mode violations
+			m.metrics.RecordConsumption(userID, resource, tier, amount, false)
+			// Return success in dry-run mode
+			return currentUsed + amount, nil
+		}
+
+		// Would succeed - log and allow
+		m.logger.Info("dry-run: quota check passed",
+			Field{"userId", userID},
+			Field{"resource", resource},
+			Field{"currentUsed", currentUsed},
+			Field{"amount", amount},
+			Field{"limit", limit},
+		)
+		m.metrics.RecordConsumption(userID, resource, tier, amount, true)
+		return currentUsed + amount, nil
 	}
 
 	// Consume via storage (transaction-safe)
@@ -679,6 +751,64 @@ func calculateRemaining(limit, used int) int {
 		return 0
 	}
 	return remaining
+}
+
+// ConsumeWithResult consumes quota and returns a ConsumeResult with full quota information.
+// This allows applications to trigger side-effects (emails/webhooks) without additional storage calls.
+// The method has the same behavior as Consume but returns more detailed information.
+func (m *Manager) ConsumeWithResult(ctx context.Context, userID, resource string, amount int,
+	periodType PeriodType, opts ...ConsumeOption) (*ConsumeResult, error) {
+	newUsed, err := m.Consume(ctx, userID, resource, amount, periodType, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get usage to get the limit
+	usage, err := m.GetQuota(ctx, userID, resource, periodType)
+	if err != nil {
+		// If we can't get usage, we still return what we know
+		// This shouldn't happen after a successful consume, but handle gracefully
+		return &ConsumeResult{
+			NewUsed:    newUsed,
+			Limit:      0,
+			Remaining:  0,
+			Percentage: 0,
+		}, nil
+	}
+
+	limit := usage.Limit
+	remaining := limit - newUsed
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	var percentage float64
+	if limit > 0 {
+		percentage = float64(newUsed) / float64(limit) * 100
+	} else if limit == -1 {
+		// Unlimited quota
+		percentage = 0
+		remaining = -1
+	}
+
+	return &ConsumeResult{
+		NewUsed:    newUsed,
+		Limit:      limit,
+		Remaining:  remaining,
+		Percentage: percentage,
+	}, nil
+}
+
+// GetUsageAfterConsume is a convenience method that calls Consume and then GetQuota.
+// This reduces the need for applications to make two separate calls.
+// Note: This makes 2 storage calls, so ConsumeWithResult is more efficient.
+func (m *Manager) GetUsageAfterConsume(ctx context.Context, userID, resource string, amount int,
+	periodType PeriodType, opts ...ConsumeOption) (*Usage, error) {
+	_, err := m.Consume(ctx, userID, resource, amount, periodType, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return m.GetQuota(ctx, userID, resource, periodType)
 }
 
 // TryConsume attempts to consume quota without throwing errors for quota exceeded scenarios.
@@ -994,27 +1124,27 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 	ent, err := m.GetEntitlement(ctx, req.UserID)
 	var period Period
 
+	// Get current time (using TimeSource if available)
+	now := m.now(ctx)
+
 	// Calculate period
 	switch req.PeriodType {
 	case PeriodTypeMonthly:
 		var start, end time.Time
 		if err == nil {
-			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, time.Now().UTC())
+			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, now)
 		} else {
-			now := time.Now().UTC()
 			start, end = CurrentCycleForStart(startOfDayUTC(now), now)
 		}
 		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
 
 	case PeriodTypeDaily:
-		now := time.Now().UTC()
 		start := startOfDayUTC(now)
 		end := start.Add(24 * time.Hour)
 		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
 
 	case PeriodTypeForever:
 		// Forever periods use a stable start time and sentinel end time
-		now := time.Now().UTC()
 		start := startOfDayUTC(now)
 		// Use sentinel value for end (or NULL in storage)
 		end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
@@ -1078,8 +1208,10 @@ func (m *Manager) TopUpLimit(ctx context.Context, userID, resource string, amoun
 		opt(topUpOpts)
 	}
 
+	// Get current time (using TimeSource if available)
+	now := m.now(ctx)
+
 	// Create forever period
-	now := time.Now().UTC()
 	start := startOfDayUTC(now)
 	// Use sentinel value for end (or NULL in storage)
 	end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
@@ -1134,8 +1266,10 @@ func (m *Manager) RefundCredits(
 		opt(refundOpts)
 	}
 
+	// Get current time (using TimeSource if available)
+	now := m.now(ctx)
+
 	// Create forever period
-	now := time.Now().UTC()
 	start := startOfDayUTC(now)
 	// Use sentinel value for end (or NULL in storage)
 	end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
@@ -1260,7 +1394,7 @@ func (m *Manager) checkWarnings(ctx context.Context, userID, resource, tier stri
 				Limit:     limit,
 				Period:    period,
 				Tier:      tier,
-				UpdatedAt: time.Now().UTC(),
+				UpdatedAt: m.now(ctx),
 			}
 
 			// Record warning metric
@@ -1300,4 +1434,210 @@ func (m *Manager) getWarningThresholds(resource, tier string) []float64 {
 		}
 	}
 	return nil
+}
+
+// now returns the current time, using TimeSource if available, otherwise time.Now().
+// This ensures consistency in distributed systems by using storage engine time
+// when available, preventing clock skew issues.
+func (m *Manager) now(ctx context.Context) time.Time {
+	if m.timeSource != nil {
+		t, err := m.timeSource.Now(ctx)
+		if err == nil {
+			return t.UTC()
+		}
+		// Log error but fall back to local time
+		m.logger.Warn("failed to get time from storage, using local time",
+			Field{"error", err},
+		)
+	}
+	return time.Now().UTC()
+}
+
+// logAuditEntry logs an audit entry if the storage implements AuditLogger.
+// This is a helper method that safely checks for AuditLogger implementation.
+func (m *Manager) logAuditEntry(ctx context.Context, entry *AuditLogEntry) {
+	if auditLogger, ok := m.storage.(AuditLogger); ok {
+		if err := auditLogger.LogAuditEntry(ctx, entry); err != nil {
+			// Log error but don't fail the operation
+			m.logger.Warn("failed to log audit entry",
+				Field{"action", entry.Action},
+				Field{"userId", entry.UserID},
+				Field{"error", err},
+			)
+		}
+	}
+}
+
+// GetAuditLogs retrieves audit logs if the storage implements AuditLogger.
+// Returns an error if storage doesn't implement AuditLogger or if query fails.
+func (m *Manager) GetAuditLogs(ctx context.Context, filter AuditLogFilter) ([]*AuditLogEntry, error) {
+	auditLogger, ok := m.storage.(AuditLogger)
+	if !ok {
+		return nil, fmt.Errorf("storage does not implement AuditLogger")
+	}
+	return auditLogger.GetAuditLogs(ctx, filter)
+}
+
+// SetUsage manually sets the used amount for a specific resource and period.
+// This is useful for administrative operations like quota resets or corrections.
+// The limit is automatically determined from the user's tier configuration.
+func (m *Manager) SetUsage(ctx context.Context, userID, resource string, periodType PeriodType, amount int) error {
+	if amount < 0 {
+		return ErrInvalidAmount
+	}
+
+	// Get entitlement to determine tier
+	ent, err := m.GetEntitlement(ctx, userID)
+	tier := m.config.DefaultTier
+	if err == nil && ent != nil {
+		tier = ent.Tier
+	}
+
+	// Get current time (using TimeSource if available)
+	now := m.now(ctx)
+
+	// Calculate period based on type
+	var period Period
+	switch periodType {
+	case PeriodTypeMonthly:
+		var start, end time.Time
+		if err == nil && ent != nil {
+			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, now)
+		} else {
+			start, end = CurrentCycleForStart(startOfDayUTC(now), now)
+		}
+		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
+
+	case PeriodTypeDaily:
+		start := startOfDayUTC(now)
+		end := start.Add(24 * time.Hour)
+		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
+
+	case PeriodTypeForever:
+		start := startOfDayUTC(now)
+		end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+		period = Period{Start: start, End: end, Type: PeriodTypeForever}
+
+	default:
+		return ErrInvalidPeriod
+	}
+
+	// Get limit for resource
+	limit := m.getLimitForResource(resource, tier, periodType)
+
+	// For forever periods, get actual limit from storage (dynamic credits)
+	if periodType == PeriodTypeForever {
+		usage, err := m.storage.GetUsage(ctx, userID, resource, period)
+		if err != nil {
+			return fmt.Errorf("failed to get usage for forever period: %w", err)
+		}
+		if usage != nil && usage.Limit > 0 {
+			limit = usage.Limit
+		}
+	}
+
+	// Create usage object
+	usage := &Usage{
+		UserID:    userID,
+		Resource:  resource,
+		Used:      amount,
+		Limit:     limit,
+		Period:    period,
+		Tier:      tier,
+		UpdatedAt: m.now(ctx),
+	}
+
+	// Set usage via storage
+	sStart := time.Now()
+	err = m.storage.SetUsage(ctx, userID, resource, usage, period)
+	m.metrics.RecordStorageOperation("SetUsage", time.Since(sStart), err)
+
+	if err != nil {
+		m.logger.Error("failed to set usage",
+			Field{"userId", userID},
+			Field{"resource", resource},
+			Field{"amount", amount},
+			Field{"error", err},
+		)
+		return err
+	}
+
+	// Invalidate cache
+	usageKey := userID + ":" + resource + ":" + period.Key()
+	m.cache.InvalidateUsage(usageKey)
+
+	m.logger.Info("usage set successfully",
+		Field{"userId", userID},
+		Field{"resource", resource},
+		Field{"amount", amount},
+		Field{"periodType", periodType},
+	)
+
+	// Log audit entry
+	m.logAuditEntry(ctx, &AuditLogEntry{
+		ID:        fmt.Sprintf("%s-%s-%d", userID, resource, m.now(ctx).UnixNano()),
+		UserID:    userID,
+		Resource:  resource,
+		Action:    "admin_set",
+		Amount:    amount,
+		Timestamp: m.now(ctx),
+		Actor:     "system", // Could be enhanced to accept actor from context
+		Reason:    "administrative_set",
+		Metadata: map[string]string{
+			"periodType": string(periodType),
+			"limit":      fmt.Sprintf("%d", limit),
+		},
+	})
+
+	return nil
+}
+
+// GrantOneTimeCredit grants temporary "overflow" capacity without changing the user's plan.
+// This adds credits to the user's forever credits pool, which can be used for any period type
+// when using PeriodTypeAuto consumption.
+func (m *Manager) GrantOneTimeCredit(ctx context.Context, userID, resource string, amount int) error {
+	if amount <= 0 {
+		return ErrInvalidAmount
+	}
+
+	// Use TopUpLimit for forever credits (one-time bonus)
+	err := m.TopUpLimit(ctx, userID, resource, amount)
+	if err != nil {
+		m.logger.Error("failed to grant one-time credit",
+			Field{"userId", userID},
+			Field{"resource", resource},
+			Field{"amount", amount},
+			Field{"error", err},
+		)
+		return err
+	}
+
+	m.logger.Info("one-time credit granted successfully",
+		Field{"userId", userID},
+		Field{"resource", resource},
+		Field{"amount", amount},
+	)
+
+	// Log audit entry
+	m.logAuditEntry(ctx, &AuditLogEntry{
+		ID:        fmt.Sprintf("%s-%s-%d", userID, resource, m.now(ctx).UnixNano()),
+		UserID:    userID,
+		Resource:  resource,
+		Action:    "admin_grant_credit",
+		Amount:    amount,
+		Timestamp: m.now(ctx),
+		Actor:     "system", // Could be enhanced to accept actor from context
+		Reason:    "one_time_credit",
+		Metadata: map[string]string{
+			"periodType": "forever",
+		},
+	})
+
+	return nil
+}
+
+// ResetUsage resets the usage to zero for a specific resource and period.
+// This is a convenience method that calls SetUsage with amount 0.
+func (m *Manager) ResetUsage(ctx context.Context, userID, resource string, periodType PeriodType) error {
+	return m.SetUsage(ctx, userID, resource, periodType, 0)
 }

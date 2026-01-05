@@ -32,10 +32,12 @@ func setupTestManager(t *testing.T) *goquota.Manager {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"api_calls": 100},
 				DailyQuotas:   map[string]int{"api_calls": 10},
 			},
 			"pro": {
+				Name:          "pro",
 				MonthlyQuotas: map[string]int{"api_calls": 10000},
 				DailyQuotas:   map[string]int{"api_calls": 1000},
 			},
@@ -297,6 +299,7 @@ func TestMiddleware_CustomRateLimitHandler(t *testing.T) {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"api_calls": 10000},
 				RateLimits: map[string]goquota.RateLimitConfig{
 					"api_calls": {
@@ -309,7 +312,10 @@ func TestMiddleware_CustomRateLimitHandler(t *testing.T) {
 			},
 		},
 	}
-	manager, _ := goquota.NewManager(storage, &config)
+	manager, err := goquota.NewManager(storage, &config)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
 	setupEntitlement(t, manager, "user1", "free")
 
 	customRateLimitCalled := false
@@ -642,6 +648,7 @@ func TestMiddleware_Warnings(t *testing.T) {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"requests": 100},
 				WarningThresholds: map[string][]float64{
 					"requests": {0.8},
@@ -649,7 +656,10 @@ func TestMiddleware_Warnings(t *testing.T) {
 			},
 		},
 	}
-	manager, _ := goquota.NewManager(storage, &config)
+	manager, err := goquota.NewManager(storage, &config)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
 	setupEntitlement(t, manager, "user1", "free")
 
 	// Consume up to 79%
@@ -699,6 +709,7 @@ func TestMiddleware_CustomWarningHandler(t *testing.T) {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"requests": 100},
 				WarningThresholds: map[string][]float64{
 					"requests": {0.8},
@@ -706,7 +717,10 @@ func TestMiddleware_CustomWarningHandler(t *testing.T) {
 			},
 		},
 	}
-	manager, _ := goquota.NewManager(storage, &config)
+	manager, err := goquota.NewManager(storage, &config)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
 	setupEntitlement(t, manager, "user1", "free")
 
 	// Consume up to 79%
@@ -754,6 +768,7 @@ func TestMiddleware_StorageError(t *testing.T) {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"api_calls": 100},
 			},
 		},
@@ -795,6 +810,7 @@ func TestMiddleware_StorageError_CustomHandler(t *testing.T) {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"api_calls": 100},
 			},
 		},
@@ -844,6 +860,7 @@ func TestMiddleware_HeadersOnSuccess(t *testing.T) {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"api_calls": 100},
 				RateLimits: map[string]goquota.RateLimitConfig{
 					"api_calls": {
@@ -856,7 +873,10 @@ func TestMiddleware_HeadersOnSuccess(t *testing.T) {
 			},
 		},
 	}
-	manager, _ := goquota.NewManager(storage, &config)
+	manager, err := goquota.NewManager(storage, &config)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
 	setupEntitlement(t, manager, "user1", "free")
 
 	r := gin.New()

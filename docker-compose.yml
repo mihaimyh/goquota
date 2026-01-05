@@ -33,6 +33,24 @@ services:
       retries: 5
     restart: unless-stopped
 
+  firestore:
+    image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    container_name: goquota-firestore
+    command: gcloud beta emulators firestore start --host-port=0.0.0.0:8081
+    ports:
+      - "8081:8081"
+    volumes:
+      - firestore-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'firestore' > /dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    profiles:
+      - test  # Only start when running tests
+
   comprehensive-example:
     build:
       context: .
@@ -141,4 +159,6 @@ volumes:
   prometheus-data:
     driver: local
   grafana-data:
+    driver: local
+  firestore-data:
     driver: local

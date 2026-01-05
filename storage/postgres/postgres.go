@@ -30,6 +30,19 @@ type Storage struct {
 	stopCleanup func()
 }
 
+// Now returns the current time from PostgreSQL server.
+// This ensures consistency in distributed systems by using PostgreSQL server time
+// instead of application server time, preventing clock skew issues.
+func (s *Storage) Now(ctx context.Context) (time.Time, error) {
+	var dbTime time.Time
+	err := s.pool.QueryRow(ctx, "SELECT NOW()").Scan(&dbTime)
+	if err != nil {
+		// Fallback to local time if database query fails
+		return time.Now().UTC(), fmt.Errorf("failed to get PostgreSQL time, using local time: %w", err)
+	}
+	return dbTime.UTC(), nil
+}
+
 // Config holds PostgreSQL storage configuration
 type Config struct {
 	// ConnectionString is the PostgreSQL connection string

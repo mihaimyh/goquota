@@ -316,7 +316,7 @@ Shared quota pools for teams.
 
 ### 3.4 Audit Trail
 
-**Status**: 🔴 Not Started  
+**Status**: 🟡 Partially Implemented  
 **Priority**: Medium  
 **Effort**: Medium
 
@@ -324,11 +324,13 @@ Comprehensive audit logging for compliance.
 
 **Features**:
 
-- Immutable audit logs
-- Quota change tracking
-- User action attribution
-- Compliance reporting
-- Retention policies
+- ✅ AuditLogEntry and AuditLogger interface defined
+- ✅ Basic audit logging integration in admin methods
+- ✅ GetAuditLogs query API
+- ❌ Storage backend implementations (Redis, Firestore, Postgres)
+- ❌ Immutable audit logs
+- ❌ Retention policies
+- ❌ Compliance reporting exports
 
 ### 3.5 RBAC for Quota Management
 
@@ -397,6 +399,43 @@ Support for read-heavy workloads.
 - Eventual consistency handling
 - Replica lag monitoring
 - Automatic failover
+
+### 4.4 Schema Versioning & Migration
+
+**Status**: 🟡 Design Documented  
+**Priority**: Medium  
+**Effort**: High
+
+Migration strategy for quota period schema changes without data loss.
+
+**Problem**: Changing a user's quota period from `MONTHLY` to `WEEKLY` while they have active usage causes the key structure to change, effectively "resetting" their quota instantly.
+
+**Current State**:
+- Usage keys are based on period type and date (see `Period.Key()` in `pkg/goquota/types.go`)
+- Changing period type or tier config changes the key structure
+- No migration path for existing data
+
+**Design Options**:
+
+1. **Versioned Keys**: Include schema version in key (e.g., `user:123:reqs:v2:2024-01`)
+   - Pros: Clean separation, easy to query
+   - Cons: Requires migration of all existing keys
+
+2. **Migration Tooling**: CLI to migrate existing usage records
+   - Pros: Flexible, can handle complex migrations
+   - Cons: Requires manual execution, potential downtime
+
+3. **Graceful Degradation**: Support both old and new key formats during transition
+   - Pros: Zero-downtime migration
+   - Cons: More complex code, temporary storage overhead
+
+**Recommendation**: Implement graceful degradation with migration tooling for initial setup. Document migration procedures in a dedicated migration guide.
+
+**Implementation**:
+- Add version field to Period struct (optional, defaults to v1)
+- Update Period.Key() to include version when > v1
+- Add migration utilities package
+- Document migration procedures
 
 ---
 

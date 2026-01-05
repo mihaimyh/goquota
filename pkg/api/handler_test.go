@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -53,7 +54,10 @@ func newTestManager() *goquota.Manager {
 			},
 		},
 	}
-	manager, _ := goquota.NewManager(storage, config)
+	manager, err := goquota.NewManager(storage, config)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create manager: %v", err))
+	}
 	return manager
 }
 

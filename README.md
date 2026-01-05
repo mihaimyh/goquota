@@ -18,6 +18,12 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Refund Support** - Gracefully handle failed operations with idempotency and audit trails
 - **Rate Limiting** - Time-based request frequency limits (requests per second/minute/hour) with token bucket and sliding window algorithms
 - **Soft Limits & Warnings** - Trigger callbacks when usage approaches limits (e.g. 80%)
+- **Admin Operations** - Manual quota management for incident response (SetUsage, GrantOneTimeCredit, ResetUsage)
+- **Dry-Run Mode** - Test quota rules without blocking traffic for safe deployments
+- **Audit Trail** - Comprehensive logging of all quota changes for compliance and debugging
+- **Clock Skew Protection** - Uses storage server time to prevent quota double-spending at reset boundaries
+- **Enhanced Response** - Get detailed usage info without extra storage calls (50% Redis load reduction)
+- **Config Validation** - Fail fast on startup with comprehensive configuration validation
 - **Fallback Strategies** - Graceful degradation when storage is unavailable (cache, optimistic, secondary storage)
 - **Observability** - Built-in Prometheus metrics and structured logging
 - **HTTP Middlewares** - Easy integration with standard `net/http` servers, Gin, Echo, and Fiber frameworks with rate limit headers
@@ -537,6 +543,257 @@ manager.SetWarningCallback(func(ctx context.Context, userID, resource string, pc
     }
 })
 ```
+
+### Admin Operations
+
+`goquota` provides administrative methods for incident response and customer support operations.
+
+**Set Usage** - Manually set quota usage (for corrections or resets):
+```go
+// Reset user's monthly usage to zero
+err := manager.SetUsage(ctx, "user123", "api_calls", goquota.PeriodTypeMonthly, 0)
+
+// Set to specific value (e.g., manual correction)
+err = manager.SetUsage(ctx, "user123", "api_calls", goquota.PeriodTypeMonthly, 500)
+```
+
+**Grant One-Time Credits** - Give temporary credits without changing the plan:
+```go
+// Compensate for service outage
+err := manager.GrantOneTimeCredit(ctx, "user123", "api_calls", 1000)
+
+// These are added as forever credits (non-expiring)
+```
+
+**Reset Usage** - Quick reset to zero:
+```go
+// Reset monthly usage
+err := manager.ResetUsage(ctx, "user123", "api_calls", goquota.PeriodTypeMonthly)
+
+// Reset forever credits
+err = manager.ResetUsage(ctx, "user123", "api_calls", goquota.PeriodTypeForever)
+```
+
+All admin operations are automatically logged if an audit logger is configured.
+
+### Dry-Run / Shadow Mode
+
+Test new quota rules without blocking real traffic. Perfect for validating configuration changes before enforcement.
+
+```go
+// Test mode: log violations but don't block
+result, err := manager.Consume(
+    ctx,
+    "user123",
+    "api_calls",
+    1,
+    goquota.PeriodTypeMonthly,
+    goquota.WithDryRun(true), // Won't actually block on exceed
+)
+
+// Check if it would have been blocked
+if err == goquota.ErrQuotaExceeded {
+    log.Printf("Would have blocked user123 (dry-run mode)")
+    // User's request continues normally
+}
+```
+
+**Use Cases:**
+- Gradual rollout: Enable for 10% of users, monitor, then expand
+- A/B testing: Compare quota enforcement strategies
+- Configuration validation: Test new limits before applying
+
+**Per-Request Flexibility:**
+```go
+// Production enforcement for free tier
+manager.Consume(ctx, userID, resource, amount, goquota.PeriodTypeMonthly)
+
+// Shadow mode for enterprise (migration period)
+if tier == "enterprise" {
+    manager.Consume(ctx, userID, resource, amount, goquota.PeriodTypeMonthly, 
+        goquota.WithDryRun(true))
+}
+```
+
+### Enhanced Consume Response
+
+Get detailed usage information without extra storage calls, reducing Redis load by 50% for notification-heavy workloads.
+
+**ConsumeWithResult** - Returns detailed usage breakdown:
+```go
+result, err := manager.ConsumeWithResult(
+    ctx,
+    "user123",
+    "api_calls",
+    1,
+    goquota.PeriodTypeMonthly,
+)
+
+if err != nil {
+    // Handle error
+}
+
+// Access detailed info without additional GetUsage() call
+fmt.Printf("Used: %d/%d (%.1f%% - %d remaining)\n", 
+    result.NewUsed, 
+    result.Limit, 
+    result.Percentage,
+    result.Remaining,
+)
+
+// Trigger notifications based on percentage
+if result.Percentage >= 80.0 {
+    sendWarningEmail(userID) // No extra storage call needed!
+}
+```
+
+**GetUsageAfterConsume** - Convenience wrapper:
+```go
+usage, err := manager.GetUsageAfterConsume(
+    ctx,
+    "user123",
+    "api_calls",
+    1,
+    goquota.PeriodTypeMonthly,
+)
+
+// Returns full Usage struct with limit, used, remaining, period info
+```
+
+### Audit Trail
+
+Track all quota changes for compliance, debugging, and customer support.
+
+**Automatic Logging** - Configure an audit logger:
+```go
+// Implement the AuditLogger interface or use a provided implementation
+type CustomAuditLogger struct {
+    db *sql.DB
+}
+
+func (l *CustomAuditLogger) LogAuditEntry(ctx context.Context, entry *goquota.AuditLogEntry) error {
+    _, err := l.db.ExecContext(ctx, 
+        "INSERT INTO audit_logs (user_id, resource, action, amount, timestamp, actor, reason) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        entry.UserID, entry.Resource, entry.Action, entry.Amount, entry.Timestamp, entry.Actor, entry.Reason,
+    )
+    return err
+}
+
+func (l *CustomAuditLogger) GetAuditLogs(ctx context.Context, filter goquota.AuditLogFilter) ([]*goquota.AuditLogEntry, error) {
+    // Query and return audit logs based on filter
+    // ...
+}
+
+// Set audit logger on manager
+manager.SetAuditLogger(auditLogger)
+```
+
+**Query Audit History:**
+```go
+// Get all quota changes for a user
+logs, err := manager.GetAuditLogs(ctx, goquota.AuditLogFilter{
+    UserID:    "user123",
+    StartTime: time.Now().Add(-30 * 24 * time.Hour), // Last 30 days
+})
+
+// Filter by resource
+logs, err = manager.GetAuditLogs(ctx, goquota.AuditLogFilter{
+    UserID:   "user123",
+    Resource: "api_calls",
+})
+
+// View audit entry details
+for _, log := range logs {
+    fmt.Printf("%s: %s %s %d units (actor: %s, reason: %s)\n",
+        log.Timestamp.Format(time.RFC3339),
+        log.Action,      // "consume", "refund", "set_usage", "grant_credit"
+        log.Resource,
+        log.Amount,
+        log.Actor,       // "system", "admin:john@company.com"
+        log.Reason,      // "Normal consumption", "Service outage compensation"
+    )
+}
+```
+
+**Logged Actions:**
+- Quota consumption (with idempotency key)
+- Refunds (with reason)
+- Admin operations (SetUsage, GrantOneTimeCredit, ResetUsage)
+- Tier changes (with proration details)
+
+### Clock Skew Protection
+
+Prevent quota double-spending at reset boundaries in distributed systems using storage server time instead of application server time.
+
+**TimeSource Interface** - Automatically used when available:
+```go
+// All storage backends implement TimeSource
+type TimeSource interface {
+    Now(ctx context.Context) (time.Time, error)
+}
+
+// Redis: Uses REDIS TIME command
+// Firestore: Uses Firestore server timestamps
+// Postgres: Uses PostgreSQL NOW()
+// Memory: Falls back to time.Now() (for testing)
+```
+
+**Why It Matters:**
+- Prevents "time travel" attacks from clock drift
+- Ensures consistent period calculations across instances
+- Critical for accurate billing at month/day boundaries
+
+**No Configuration Required** - Works automatically:
+```go
+// Manager automatically uses storage server time if available
+manager, err := goquota.NewManager(storage, &config)
+
+// Period calculations use storage.Now(ctx) instead of time.Now()
+// Quota resets happen at the exact same moment across all instances
+```
+
+**Fallback Behavior:**
+- If storage doesn't implement TimeSource: falls back to `time.Now().UTC()`
+- If storage.Now() fails: falls back to `time.Now().UTC()` with error logging
+
+### Config Validation
+
+Fail fast on startup with comprehensive configuration validation.
+
+**Automatic Validation** - Runs on `NewManager()`:
+```go
+config := goquota.Config{
+    DefaultTier: "free",
+    Tiers: map[string]goquota.TierConfig{
+        "free": {
+            MonthlyQuotas: map[string]int{
+                "api_calls": 100,
+            },
+        },
+    },
+}
+
+// Validates:
+// - DefaultTier exists in Tiers map
+// - Quota values are >= 0
+// - Tier names are valid
+// - Rate limit configs are valid
+// - Period types are valid
+manager, err := goquota.NewManager(storage, &config)
+if err != nil {
+    // Detailed validation error
+    // Example: "invalid config: default tier 'premium' not found in tiers map"
+    log.Fatal(err)
+}
+```
+
+**What's Validated:**
+- ✅ Default tier exists
+- ✅ No negative quota values
+- ✅ Valid rate limit algorithms
+- ✅ Non-zero rate limit rates
+- ✅ Valid period types in consumption order
+- ✅ Tier integrity (all referenced tiers exist)
 
 ### Fallback Strategies
 

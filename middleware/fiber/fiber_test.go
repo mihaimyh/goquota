@@ -33,10 +33,12 @@ func setupTestManager(t *testing.T) *goquota.Manager {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"api_calls": 100},
 				DailyQuotas:   map[string]int{"api_calls": 10},
 			},
 			"pro": {
+				Name:          "pro",
 				MonthlyQuotas: map[string]int{"api_calls": 10000},
 				DailyQuotas:   map[string]int{"api_calls": 1000},
 			},
@@ -303,6 +305,7 @@ func TestMiddleware_CustomRateLimitHandler(t *testing.T) {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"api_calls": 10000},
 				RateLimits: map[string]goquota.RateLimitConfig{
 					"api_calls": {
@@ -677,6 +680,7 @@ func TestMiddleware_Warnings(t *testing.T) {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"requests": 100},
 				WarningThresholds: map[string][]float64{
 					"requests": {0.8},
@@ -735,6 +739,7 @@ func TestMiddleware_CustomWarningHandler(t *testing.T) {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"requests": 100},
 				WarningThresholds: map[string][]float64{
 					"requests": {0.8},
@@ -791,6 +796,7 @@ func TestMiddleware_StorageError(t *testing.T) {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"api_calls": 100},
 			},
 		},
@@ -833,6 +839,7 @@ func TestMiddleware_StorageError_CustomHandler(t *testing.T) {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:          "free",
 				MonthlyQuotas: map[string]int{"api_calls": 100},
 			},
 		},

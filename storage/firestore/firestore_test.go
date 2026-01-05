@@ -16,20 +16,35 @@ import (
 )
 
 const (
-	testProjectID = "test-project"
-	emulatorHost  = "localhost:8080"
+	testProjectID       = "test-project"
+	defaultEmulatorHost = "localhost:8081"
 )
 
 func setupFirestoreClient(t *testing.T) *firestore.Client {
 	t.Helper()
 
-	// Set emulator environment variable
-	os.Setenv("FIRESTORE_EMULATOR_HOST", emulatorHost)
+	// Always use the test emulator host (override any existing env var)
+	// This ensures tests use the correct port regardless of what's set in the environment
+	os.Setenv("FIRESTORE_EMULATOR_HOST", defaultEmulatorHost)
 
-	ctx := context.Background()
+	// Create context with timeout to prevent hanging
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	client, err := firestore.NewClient(ctx, testProjectID)
 	if err != nil {
-		t.Fatalf("Failed to create Firestore client: %v", err)
+		t.Skipf("Firestore emulator not available: %v", err)
+	}
+
+	// Verify connection by attempting a simple operation with timeout
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer verifyCancel()
+
+	// Try to list collections to verify emulator is running
+	_, err = client.Collections(verifyCtx).GetAll()
+	if err != nil {
+		client.Close()
+		t.Skipf("Firestore emulator not available or not responding: %v", err)
 	}
 
 	return client

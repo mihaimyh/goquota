@@ -1,6 +1,7 @@
 // Package main demonstrates all goquota features in a comprehensive example
 // including Redis storage, rate limiting, idempotency, refunds, tier changes,
-// soft limits, fallback strategies, observability, and HTTP middleware.
+// soft limits, fallback strategies, observability, HTTP middleware, admin operations,
+// dry-run mode, enhanced consume response, audit trail, and clock skew protection.
 package main
 
 import (
@@ -315,6 +316,18 @@ func main() {
 
 	// Demo 8: Fallback Strategies (documentation)
 	demoFallbackStrategies()
+
+	// Demo 9: Admin Operations
+	demoAdminOperations(ctx, manager, user1)
+
+	// Demo 10: Dry-Run Mode
+	demoDryRunMode(ctx, manager, user1)
+
+	// Demo 11: Enhanced Consume Response
+	demoEnhancedConsumeResponse(ctx, manager, user1)
+
+	// Demo 12: Clock Skew Protection (informational)
+	demoClockSkewProtection()
 
 	fmt.Println("5. Starting HTTP server with middleware...")
 
@@ -890,6 +903,168 @@ func demoFallbackStrategies() {
 	fmt.Println("  - Falls back to secondary storage")
 	fmt.Println("  - Allows optimistic consumption as last resort")
 	fmt.Println("  - All fallback usage is tracked for reconciliation")
+	fmt.Println()
+}
+
+func demoAdminOperations(ctx context.Context, manager *goquota.Manager, userID string) {
+	fmt.Println("--- Demo 9: Admin Operations ---")
+	fmt.Println("Administrative operations for incident response and customer support:")
+	fmt.Println()
+
+	// Get current usage before operations
+	usage, err := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("Error getting quota: %v\n\n", err)
+		return
+	}
+	fmt.Printf("Current usage: %d/%d\n", usage.Used, usage.Limit)
+
+	// 1. Set Usage - Manual correction
+	fmt.Println("\n1. SetUsage() - Manual correction:")
+	fmt.Println("   Use case: Fix incorrect usage due to system error")
+	if err := manager.SetUsage(ctx, userID, "api_calls", goquota.PeriodTypeMonthly, 50); err != nil {
+		fmt.Printf("   Error: %v\n", err)
+	} else {
+		fmt.Println("   ✓ Usage manually set to 50")
+	}
+
+	// 2. Grant One-Time Credit - Service compensation
+	fmt.Println("\n2. GrantOneTimeCredit() - Service compensation:")
+	fmt.Println("   Use case: Compensate user for service outage")
+	if err := manager.GrantOneTimeCredit(ctx, userID, "api_calls", 1000); err != nil {
+		fmt.Printf("   Error: %v\n", err)
+	} else {
+		fmt.Println("   ✓ Granted 1000 one-time credits (non-expiring)")
+		// Check forever credits
+		foreverUsage, _ := manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeForever)
+		fmt.Printf("   Forever credits balance: %d\n", foreverUsage.Limit-foreverUsage.Used)
+	}
+
+	// 3. Reset Usage - Fresh start
+	fmt.Println("\n3. ResetUsage() - Fresh start:")
+	fmt.Println("   Use case: Reset monthly usage during incident resolution")
+	if err := manager.ResetUsage(ctx, userID, "api_calls", goquota.PeriodTypeMonthly); err != nil {
+		fmt.Printf("   Error: %v\n", err)
+	} else {
+		fmt.Println("   ✓ Monthly usage reset to 0")
+	}
+
+	// Verify final state
+	usage, _ = manager.GetQuota(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+	fmt.Printf("\nFinal state: %d/%d monthly quota\n", usage.Used, usage.Limit)
+	fmt.Println("  ✓ All admin operations logged to audit trail (if configured)")
+	fmt.Println()
+}
+
+func demoDryRunMode(ctx context.Context, manager *goquota.Manager, userID string) {
+	fmt.Println("--- Demo 10: Dry-Run / Shadow Mode ---")
+	fmt.Println("Test quota enforcement without blocking traffic:")
+	fmt.Println()
+
+	// Reset to clean state
+	_ = manager.ResetUsage(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+
+	// Consume most of the quota
+	for i := 0; i < 990; i++ {
+		_, _ = manager.Consume(ctx, userID, "api_calls", 1, goquota.PeriodTypeMonthly)
+	}
+
+	fmt.Println("1. Normal enforcement mode:")
+	// Try to exceed limit (should fail)
+	_, err := manager.Consume(ctx, userID, "api_calls", 20, goquota.PeriodTypeMonthly)
+	if errors.Is(err, goquota.ErrQuotaExceeded) {
+		fmt.Println("   ✗ Request blocked: quota exceeded")
+	}
+
+	fmt.Println("\n2. Dry-run mode (shadow testing):")
+	// Same request with dry-run (should succeed but log violation)
+	_, err = manager.Consume(
+		ctx,
+		userID,
+		"api_calls",
+		20,
+		goquota.PeriodTypeMonthly,
+		goquota.WithDryRun(true),
+	)
+	if err == nil {
+		fmt.Println("   ✓ Request allowed (dry-run mode)")
+		fmt.Println("   📝 Violation logged for monitoring")
+	} else if errors.Is(err, goquota.ErrQuotaExceeded) {
+		fmt.Println("   ⚠️  Would have been blocked (dry-run)")
+		fmt.Println("   ✓ Request continues normally")
+	}
+
+	fmt.Println("\nUse cases:")
+	fmt.Println("  - Gradual rollout: Enable for 10% of users, monitor, expand")
+	fmt.Println("  - A/B testing: Compare enforcement strategies")
+	fmt.Println("  - Configuration validation: Test new limits before applying")
+	fmt.Println()
+}
+
+func demoEnhancedConsumeResponse(ctx context.Context, manager *goquota.Manager, userID string) {
+	fmt.Println("--- Demo 11: Enhanced Consume Response ---")
+	fmt.Println("Get detailed usage info without extra storage calls:")
+	fmt.Println()
+
+	// Reset to clean state
+	_ = manager.ResetUsage(ctx, userID, "api_calls", goquota.PeriodTypeMonthly)
+
+	// Use ConsumeWithResult for detailed response
+	fmt.Println("1. ConsumeWithResult() - Detailed response:")
+	result, err := manager.ConsumeWithResult(ctx, userID, "api_calls", 75, goquota.PeriodTypeMonthly)
+	if err != nil {
+		fmt.Printf("   Error: %v\n\n", err)
+		return
+	}
+
+	fmt.Printf("   Used:      %d\n", result.NewUsed)
+	fmt.Printf("   Limit:     %d\n", result.Limit)
+	fmt.Printf("   Remaining: %d\n", result.Remaining)
+	fmt.Printf("   Percentage: %.1f%%\n", result.Percentage)
+	fmt.Println("   ✓ All info in single storage call")
+
+	// Demonstrate notification logic
+	if result.Percentage >= 80.0 {
+		fmt.Printf("\n   ⚠️  User at %.1f%% - sending warning email\n", result.Percentage)
+	}
+
+	// Continue consuming
+	result, _ = manager.ConsumeWithResult(ctx, userID, "api_calls", 15, goquota.PeriodTypeMonthly)
+	fmt.Printf("\n2. After another request: %.1f%% used\n", result.Percentage)
+	if result.Percentage >= 90.0 {
+		fmt.Println("   🔴 Critical threshold - notify user immediately")
+	}
+
+	fmt.Println("\nBenefits:")
+	fmt.Println("  - 50% reduction in Redis load for notification logic")
+	fmt.Println("  - Single storage call instead of Consume() + GetUsage()")
+	fmt.Println("  - Perfect for soft limit notifications")
+	fmt.Println()
+}
+
+func demoClockSkewProtection() {
+	fmt.Println("--- Demo 12: Clock Skew Protection ---")
+	fmt.Println("Prevents quota double-spending at reset boundaries:")
+	fmt.Println()
+
+	fmt.Println("Problem: Application server clock drift")
+	fmt.Println("  - Server A: 23:59:59 (old period)")
+	fmt.Println("  - Server B: 00:00:01 (new period)")
+	fmt.Println("  - User could consume quota twice!")
+	fmt.Println()
+
+	fmt.Println("Solution: TimeSource interface")
+	fmt.Println("  ✓ Redis: Uses REDIS TIME command (server time)")
+	fmt.Println("  ✓ Firestore: Uses Firestore server timestamps")
+	fmt.Println("  ✓ Postgres: Uses PostgreSQL NOW()")
+	fmt.Println("  ✓ All instances use same time source")
+	fmt.Println()
+
+	fmt.Println("Benefits:")
+	fmt.Println("  - Consistent period calculations across all instances")
+	fmt.Println("  - Prevents 'time travel' attacks from clock drift")
+	fmt.Println("  - Critical for accurate billing at month/day boundaries")
+	fmt.Println("  - No configuration required - works automatically")
 	fmt.Println()
 }
 

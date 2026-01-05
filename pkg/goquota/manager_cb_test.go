@@ -24,6 +24,7 @@ func (m *mockFlakeyStorage) GetEntitlement(_ context.Context, userID string) (*E
 func TestManagerWithCircuitBreaker(t *testing.T) {
 	storage := &mockFlakeyStorage{fail: false}
 	config := Config{
+		DefaultTier: "explorer",
 		Tiers: map[string]TierConfig{
 			"explorer": {
 				Name: "explorer",
@@ -225,6 +226,7 @@ func TestManager_StorageFailure_PartialWrite(t *testing.T) {
 func TestManager_StorageFailure_NetworkTimeout(t *testing.T) {
 	storage := &mockFlakeyStorage{fail: false}
 	config := Config{
+		DefaultTier: "scholar",
 		Tiers: map[string]TierConfig{
 			"scholar": {
 				Name:          "scholar",

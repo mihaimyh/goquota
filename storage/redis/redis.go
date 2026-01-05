@@ -20,6 +20,21 @@ type Storage struct {
 	scripts map[string]*redis.Script
 }
 
+// Now returns the current time from Redis server.
+// This ensures consistency in distributed systems by using Redis server time
+// instead of application server time, preventing clock skew issues.
+func (s *Storage) Now(ctx context.Context) (time.Time, error) {
+	// Use Redis TIME command to get server time
+	// TIME returns [seconds, microseconds] as a tuple
+	result, err := s.client.Time(ctx).Result()
+	if err != nil {
+		// Fallback to local time if Redis TIME fails
+		return time.Now().UTC(), fmt.Errorf("failed to get Redis time, using local time: %w", err)
+	}
+	// Ensure result is in UTC
+	return result.UTC(), nil
+}
+
 // Config holds Redis storage configuration
 type Config struct {
 	// KeyPrefix is prepended to all Redis keys (default: "goquota:")

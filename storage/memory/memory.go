@@ -41,6 +41,13 @@ type Storage struct {
 	slidingWindows map[string]*slidingWindowState        // keyed by userID:resource
 }
 
+// Now returns the current time.
+// For in-memory storage, there's no clock skew issue since it's single-process,
+// but we implement TimeSource for API consistency.
+func (s *Storage) Now(_ context.Context) (time.Time, error) {
+	return time.Now().UTC(), nil
+}
+
 // New creates a new in-memory storage adapter
 func New() *Storage {
 	return &Storage{

@@ -16,6 +16,7 @@ func TestManager_Refund(t *testing.T) {
 		DefaultTier: "default",
 		Tiers: map[string]goquota.TierConfig{
 			"default": {
+				Name: "default",
 				MonthlyQuotas: map[string]int{
 					"api_calls": 1000,
 				},
@@ -120,6 +121,7 @@ func TestManager_Refund_Concurrency(t *testing.T) {
 		DefaultTier: "default",
 		Tiers: map[string]goquota.TierConfig{
 			"default": {
+				Name: "default",
 				MonthlyQuotas: map[string]int{
 					"api_calls": 1000,
 				},
