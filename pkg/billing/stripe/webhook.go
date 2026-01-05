@@ -15,6 +15,11 @@ import (
 	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
+// Stripe event type constants
+const (
+	eventTypeSubscriptionCreated = "customer.subscription.created"
+)
+
 // handleWebhook processes incoming Stripe webhook events
 func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
@@ -92,7 +97,7 @@ func (p *Provider) processWebhookEvent(ctx context.Context, event *stripe.Event)
 	eventTimestamp := time.Unix(event.Created, 0)
 
 	switch event.Type {
-	case "customer.subscription.created":
+	case eventTypeSubscriptionCreated:
 		return p.handleSubscriptionCreated(ctx, event, eventTimestamp)
 	case "customer.subscription.updated":
 		return p.handleSubscriptionUpdated(ctx, event, eventTimestamp)
@@ -113,7 +118,13 @@ func (p *Provider) processWebhookEvent(ctx context.Context, event *stripe.Event)
 }
 
 // handleSubscriptionCreated processes customer.subscription.created events
-func (p *Provider) handleSubscriptionCreated(ctx context.Context, event *stripe.Event, eventTimestamp time.Time) error {
+//
+//nolint:gocyclo // Complex business logic for subscription creation
+func (p *Provider) handleSubscriptionCreated(
+	ctx context.Context,
+	event *stripe.Event,
+	eventTimestamp time.Time,
+) error {
 	var subscription stripe.Subscription
 	if err := json.Unmarshal(event.Data.Raw, &subscription); err != nil {
 		return fmt.Errorf("failed to unmarshal subscription: %w", err)
@@ -187,7 +198,13 @@ func (p *Provider) handleSubscriptionCreated(ctx context.Context, event *stripe.
 }
 
 // handleSubscriptionUpdated processes customer.subscription.updated events
-func (p *Provider) handleSubscriptionUpdated(ctx context.Context, event *stripe.Event, eventTimestamp time.Time) error {
+//
+//nolint:gocyclo // Complex business logic for subscription updates
+func (p *Provider) handleSubscriptionUpdated(
+	ctx context.Context,
+	event *stripe.Event,
+	eventTimestamp time.Time,
+) error {
 	var subscription stripe.Subscription
 	if err := json.Unmarshal(event.Data.Raw, &subscription); err != nil {
 		return fmt.Errorf("failed to unmarshal subscription: %w", err)
