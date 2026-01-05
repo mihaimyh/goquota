@@ -12,6 +12,7 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Prorated quota adjustments** - Handle mid-cycle tier changes fairly
 - **Multiple quota types** - Support both daily and monthly quotas
 - **Pluggable storage** - Redis (recommended), PostgreSQL, Firestore, In-Memory, or custom backends
+- **Tiered Storage** - Hot/Cold architecture combining Redis speed with PostgreSQL/Firestore durability
 - **High Performance** - Redis adapter uses atomic Lua scripts for <1ms latency
 - **Transaction-safe** - Prevent over-consumption with atomic operations
 - **Idempotency Keys** - Prevent double-charging on retries with client-provided idempotency keys
@@ -227,6 +228,49 @@ import "github.com/mihaimyh/goquota/storage/memory"
 
 storage := memory.New()
 ```
+
+### Tiered Storage (Hot/Cold Architecture)
+
+Combine the speed of Redis with the durability of PostgreSQL/Firestore using a Hot/Cold tiered storage architecture. This adapter implements different strategies optimized for each operation type:
+
+- **Read-Through**: Entitlements and usage reads check Hot first, fall back to Cold, then populate Hot
+- **Write-Through**: Critical writes (entitlements, tier changes) write to Cold first, then Hot
+- **Hot-Primary/Async-Audit**: Quota consumption writes to Hot immediately (atomic), then syncs to Cold asynchronously for audit trail
+- **Hot-Only**: Rate limits operate on Hot only for maximum performance
+
+**Benefits:**
+- **Performance**: 99% of traffic hits Hot store for sub-millisecond latency
+- **Durability**: Critical data persisted in Cold store as source of truth
+- **Resilience**: Automatic cache repopulation from Cold on Hot miss/failure
+- **No Code Changes**: Pure decorator pattern - works with any storage combination
+
+```go
+import (
+    "github.com/mihaimyh/goquota/storage/redis"
+    "github.com/mihaimyh/goquota/storage/postgres"
+    "github.com/mihaimyh/goquota/storage/tiered"
+)
+
+// Initialize Hot (Redis) and Cold (PostgreSQL) stores
+hotStore, _ := redis.New(redisClient, redis.DefaultConfig())
+coldStore, _ := postgres.New(ctx, postgresConfig)
+
+// Create tiered storage adapter
+tieredStore, _ := tiered.New(tiered.Config{
+    Hot:            hotStore,
+    Cold:           coldStore,
+    AsyncUsageSync: true, // Non-blocking Cold writes for consumption
+    AsyncErrorHandler: func(err error) {
+        log.Printf("Background sync failed: %v", err)
+    },
+})
+defer tieredStore.Close()
+
+// Use tiered storage with Manager (no other changes needed)
+manager, _ := goquota.NewManager(tieredStore, &config)
+```
+
+See [storage/tiered/README.md](storage/tiered/README.md) for complete documentation.
 
 ## Advanced Features
 

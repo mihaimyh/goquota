@@ -1,5 +1,5 @@
 // Package main demonstrates all goquota features in a comprehensive example
-// including Redis storage, rate limiting, idempotency, refunds, tier changes,
+// including Tiered storage (Redis + PostgreSQL), rate limiting, idempotency, refunds, tier changes,
 // soft limits, fallback strategies, observability, HTTP middleware, admin operations,
 // dry-run mode, enhanced consume response, audit trail, and clock skew protection.
 package main
@@ -27,7 +27,9 @@ import (
 	zerolog_adapter "github.com/mihaimyh/goquota/pkg/goquota/logger/zerolog"
 	prometheus_adapter "github.com/mihaimyh/goquota/pkg/goquota/metrics/prometheus"
 	"github.com/mihaimyh/goquota/storage/memory"
+	postgresStorage "github.com/mihaimyh/goquota/storage/postgres"
 	redisStorage "github.com/mihaimyh/goquota/storage/redis"
+	"github.com/mihaimyh/goquota/storage/tiered"
 )
 
 //nolint:gocyclo // Comprehensive example demonstrating all features
@@ -48,11 +50,11 @@ func main() {
 	fmt.Println("   ✓ Prometheus metrics configured")
 
 	// ============================================================
-	// 2. Setup Storage (Redis + Fallback)
+	// 2. Setup Storage (Tiered: Redis Hot + PostgreSQL Cold)
 	// ============================================================
-	fmt.Println("2. Setting up storage backends...")
-	// Note: This assumes Redis is running (e.g., via docker-compose: docker-compose up -d redis)
-	// Use REDIS_HOST environment variable for Docker networking, default to localhost for local dev
+	fmt.Println("2. Setting up tiered storage backends...")
+	
+	// 2a. Setup Hot Store (Redis)
 	redisHost := os.Getenv("REDIS_HOST")
 	if redisHost == "" {
 		redisHost = "localhost:6379"
@@ -70,10 +72,9 @@ func main() {
 		log.Fatalf("Failed to connect to Redis: %v\n"+
 			"Make sure Redis is running (e.g., via Docker: docker-compose up -d redis)", err)
 	}
-	fmt.Println("   ✓ Connected to Redis")
+	fmt.Println("   ✓ Connected to Redis (Hot store)")
 
-	// Create Redis storage
-	primaryStorage, err := redisStorage.New(redisClient, redisStorage.Config{
+	hotStore, err := redisStorage.New(redisClient, redisStorage.Config{
 		KeyPrefix:      "goquota:",
 		EntitlementTTL: 24 * time.Hour,
 		UsageTTL:       7 * 24 * time.Hour,
@@ -82,11 +83,51 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create Redis storage: %v", err)
 	}
-	fmt.Println("   ✓ Redis storage adapter created")
+	fmt.Println("   ✓ Redis storage adapter created (Hot store)")
+
+	// 2b. Setup Cold Store (PostgreSQL)
+	postgresDSN := os.Getenv("POSTGRES_DSN")
+	if postgresDSN == "" {
+		postgresDSN = "postgres://postgres:postgres@localhost:5432/goquota?sslmode=disable"
+	}
+	
+	pgConfig := postgresStorage.DefaultConfig()
+	pgConfig.ConnectionString = postgresDSN
+	pgConfig.CleanupEnabled = true
+	pgConfig.CleanupInterval = 1 * time.Hour
+	pgConfig.RecordTTL = 7 * 24 * time.Hour // 7 days
+
+	coldStore, err := postgresStorage.New(ctx, pgConfig)
+	if err != nil {
+		//nolint:gocritic // Intentional: log.Fatalf exits before defer runs
+		log.Fatalf("Failed to connect to PostgreSQL: %v\n"+
+			"Make sure PostgreSQL is running and database exists (e.g., via Docker: docker-compose up -d postgres)\n"+
+			"Database setup: CREATE DATABASE goquota; then run migrations from storage/postgres/migrations/", err)
+	}
+	defer coldStore.Close()
+	fmt.Println("   ✓ Connected to PostgreSQL (Cold store)")
+
+	// 2c. Create Tiered Storage (Hot + Cold)
+	primaryStorage, err := tiered.New(tiered.Config{
+		Hot:            hotStore,
+		Cold:           coldStore,
+		AsyncUsageSync: true, // Non-blocking PostgreSQL writes for consumption
+		AsyncErrorHandler: func(err error) {
+			logger.Warn("Tiered storage async sync failed", goquota.Field{Key: "error", Value: err})
+		},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create tiered storage: %v", err)
+	}
+	defer primaryStorage.Close()
+	fmt.Println("   ✓ Tiered storage adapter created (Redis Hot + PostgreSQL Cold)")
+	fmt.Println("     - Rate limits: Redis only (Hot-Only)")
+	fmt.Println("     - Entitlements: Redis cache + PostgreSQL source of truth (Read-Through)")
+	fmt.Println("     - Consumption: Redis immediate + PostgreSQL async audit (Hot-Primary/Async-Audit)")
 
 	// Create secondary storage (in-memory) for fallback
 	secondaryStorage := memory.New()
-	fmt.Println("   ✓ Secondary storage (in-memory) configured")
+	fmt.Println("   ✓ Secondary storage (in-memory) configured for fallback")
 
 	// ============================================================
 	// 3. Configure Quota Manager with All Features
@@ -741,7 +782,8 @@ func main() {
 	fmt.Println("\n=== Server Ready ===")
 	fmt.Println("HTTP Server: http://localhost:8080")
 	fmt.Println("Prometheus Metrics: http://localhost:9090/metrics")
-	fmt.Println("\nNote: Redis should be running (e.g., via docker-compose: docker-compose up -d redis)")
+	fmt.Println("\nNote: Redis and PostgreSQL should be running (e.g., via docker-compose: docker-compose up -d redis postgres)")
+	fmt.Println("      PostgreSQL database setup: CREATE DATABASE goquota; then run migrations from storage/postgres/migrations/")
 	fmt.Println("\nTest commands:")
 	fmt.Println("  curl -H \"X-User-ID: user1_free\" http://localhost:8080/api/data")
 	fmt.Println("  curl -H \"X-User-ID: user1_free\" http://localhost:8080/api/quota")
@@ -1097,7 +1139,7 @@ func demoFallbackStrategies() {
 	fmt.Println("  3. Secondary Storage: Configured (in-memory)")
 	fmt.Println("     - Falls back to secondary storage if available")
 	fmt.Println()
-	fmt.Println("When primary storage (Redis) is unavailable:")
+	fmt.Println("When tiered storage (Redis Hot + PostgreSQL Cold) is unavailable:")
 	fmt.Println("  - System tries cache first (if data is fresh)")
 	fmt.Println("  - Falls back to secondary storage")
 	fmt.Println("  - Allows optimistic consumption as last resort")

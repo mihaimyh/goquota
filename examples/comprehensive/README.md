@@ -2,7 +2,7 @@
 
 This example demonstrates all goquota features in a single application:
 
-- **Redis Storage** - Production-ready storage backend
+- **Tiered Storage (Redis + PostgreSQL)** - Hot/Cold storage architecture for optimal performance and durability
 - **Multiple Tiers** - free, pro, enterprise with daily and monthly quotas
 - **Rate Limiting** - Token bucket and sliding window algorithms
 - **Caching** - Enabled with TTL configuration
@@ -19,12 +19,22 @@ This example demonstrates all goquota features in a single application:
 
 ### Prerequisites
 
-1. **Start Redis**:
+1. **Start Redis and PostgreSQL**:
    ```bash
-   docker-compose up -d redis
+   docker-compose up -d redis postgres
    ```
 
-2. **Run the example**:
+2. **Setup PostgreSQL database**:
+   ```bash
+   # Connect to PostgreSQL and create database
+   psql -h localhost -U postgres -c "CREATE DATABASE goquota;"
+   
+   # Run migrations (from project root)
+   psql -h localhost -U postgres -d goquota -f storage/postgres/migrations/001_initial_schema.sql
+   psql -h localhost -U postgres -d goquota -f storage/postgres/migrations/002_forever_periods.sql
+   ```
+
+3. **Run the example**:
    ```bash
    go run examples/comprehensive/main.go
    ```
@@ -72,8 +82,8 @@ docker-compose stop comprehensive-example
 ```
 
 The example will automatically:
-- Wait for Redis to be healthy before starting
-- Connect to Redis using Docker networking
+- Wait for Redis and PostgreSQL to be healthy before starting
+- Connect to Redis and PostgreSQL using Docker networking
 - Expose ports 8080 (HTTP) and 9090 (Prometheus metrics)
 
 ### Exposing Webhooks for RevenueCat (Local Development)
@@ -233,6 +243,8 @@ curl -X POST "http://localhost:8080/webhooks/revenuecat" \
 
 - `REDIS_HOST` - Redis connection string (default: `localhost:6379`)
   - Use `redis:6379` when running in Docker Compose
+- `POSTGRES_DSN` - PostgreSQL connection string (default: `postgres://postgres:postgres@localhost:5432/goquota?sslmode=disable`)
+  - Use `postgres://postgres:postgres@postgres:5432/goquota?sslmode=disable` when running in Docker Compose
 - **RevenueCat (optional)**:
   - `REVENUECAT_WEBHOOK_SECRET` - RevenueCat webhook secret used to verify `/webhooks/revenuecat` (optional)
   - `REVENUECAT_SECRET_API_KEY` - RevenueCat API key used by `SyncUser` for `/api/restore-purchases` (optional)

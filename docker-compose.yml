@@ -20,7 +20,7 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: goquota_test
+      POSTGRES_DB: goquota
     ports:
       - "5432:5432"
     volumes:
@@ -52,6 +52,8 @@ services:
       - test  # Only start when running tests
 
   comprehensive-example:
+    # Rebuild with: docker-compose build comprehensive-example
+    # Or force rebuild: docker-compose up --build comprehensive-example
     build:
       context: .
       dockerfile: examples/comprehensive/Dockerfile
@@ -61,6 +63,7 @@ services:
       - "9090:9090"  # Prometheus metrics
     environment:
       - REDIS_HOST=redis:6379
+      - POSTGRES_DSN=postgres://postgres:postgres@postgres:5432/goquota?sslmode=disable
       # RevenueCat billing integration (optional)
       # Set these environment variables on the host before running docker-compose
       - REVENUECAT_WEBHOOK_SECRET=${REVENUECAT_WEBHOOK_SECRET:-}
@@ -72,6 +75,8 @@ services:
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "-O", "-", "http://localhost:8080/health"]
@@ -95,6 +100,7 @@ services:
       - K6_DURATION=60s
     # Default command can be overridden when running:
     # docker-compose run --rm k6-load-test run /scripts/load-test.js
+    # docker-compose run --rm k6-load-test run /scripts/tiered-storage-edge-cases.js
     command: run /scripts/load-test.js
 
   prometheus:

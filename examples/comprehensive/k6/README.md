@@ -2,6 +2,8 @@
 
 This directory contains k6 load testing scripts to validate all goquota features including rate limiting, quota management, tier differences, and concurrent user scenarios.
 
+**Note**: The comprehensive example uses tiered storage (Redis Hot + PostgreSQL Cold). These tests validate the API endpoints which transparently use the tiered storage backend.
+
 ## Prerequisites
 
 - Docker and Docker Compose installed
@@ -221,7 +223,8 @@ If you see connection errors:
 If failure rates are unexpectedly high:
 
 1. Check Redis connection: `docker-compose logs redis`
-2. Check application logs: `docker-compose logs comprehensive-example`
+2. Check PostgreSQL connection: `docker-compose logs postgres`
+3. Check application logs: `docker-compose logs comprehensive-example`
 3. Verify user entitlements are set (check main.go setup)
 4. Reduce VUs or increase duration for gradual load
 
