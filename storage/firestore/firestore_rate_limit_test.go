@@ -2,32 +2,31 @@ package firestore
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
-	"cloud.google.com/go/firestore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
-// Note: These tests require Firestore emulator to be running
-// Set FIRESTORE_EMULATOR_HOST environment variable
+// Note: These tests require Firestore emulator to be running on localhost:8081
+// The setupFirestoreClient helper automatically configures the connection
 
 func TestStorage_CheckRateLimit_TokenBucket_Allowed(t *testing.T) {
 	ctx := context.Background()
-	client, err := firestore.NewClient(ctx, "test-project")
-	if err != nil {
-		t.Skip("Firestore emulator not available")
-	}
+	client := setupFirestoreClient(t)
 	defer client.Close()
 
 	storage, err := New(client, Config{})
 	require.NoError(t, err)
 
+	// Use unique user ID to avoid conflicts between test runs
+	userID := fmt.Sprintf("user1_%d", time.Now().UnixNano())
 	req := &goquota.RateLimitRequest{
-		UserID:    "user1",
+		UserID:    userID,
 		Resource:  "api_calls",
 		Algorithm: "token_bucket",
 		Rate:      10,
@@ -45,17 +44,16 @@ func TestStorage_CheckRateLimit_TokenBucket_Allowed(t *testing.T) {
 
 func TestStorage_CheckRateLimit_TokenBucket_Exceeded(t *testing.T) {
 	ctx := context.Background()
-	client, err := firestore.NewClient(ctx, "test-project")
-	if err != nil {
-		t.Skip("Firestore emulator not available")
-	}
+	client := setupFirestoreClient(t)
 	defer client.Close()
 
 	storage, err := New(client, Config{})
 	require.NoError(t, err)
 
+	// Use unique user ID to avoid conflicts between test runs
+	userID := fmt.Sprintf("user2_%d", time.Now().UnixNano())
 	req := &goquota.RateLimitRequest{
-		UserID:    "user2",
+		UserID:    userID,
 		Resource:  "api_calls",
 		Algorithm: "token_bucket",
 		Rate:      10,
@@ -85,17 +83,16 @@ func TestStorage_CheckRateLimit_TokenBucket_Exceeded(t *testing.T) {
 
 func TestStorage_CheckRateLimit_SlidingWindow_Allowed(t *testing.T) {
 	ctx := context.Background()
-	client, err := firestore.NewClient(ctx, "test-project")
-	if err != nil {
-		t.Skip("Firestore emulator not available")
-	}
+	client := setupFirestoreClient(t)
 	defer client.Close()
 
 	storage, err := New(client, Config{})
 	require.NoError(t, err)
 
+	// Use unique user ID to avoid conflicts between test runs
+	userID := fmt.Sprintf("user3_%d", time.Now().UnixNano())
 	req := &goquota.RateLimitRequest{
-		UserID:    "user3",
+		UserID:    userID,
 		Resource:  "api_calls",
 		Algorithm: "sliding_window",
 		Rate:      10,
@@ -113,17 +110,16 @@ func TestStorage_CheckRateLimit_SlidingWindow_Allowed(t *testing.T) {
 
 func TestStorage_CheckRateLimit_SlidingWindow_Exceeded(t *testing.T) {
 	ctx := context.Background()
-	client, err := firestore.NewClient(ctx, "test-project")
-	if err != nil {
-		t.Skip("Firestore emulator not available")
-	}
+	client := setupFirestoreClient(t)
 	defer client.Close()
 
 	storage, err := New(client, Config{})
 	require.NoError(t, err)
 
+	// Use unique user ID to avoid conflicts between test runs
+	userID := fmt.Sprintf("user4_%d", time.Now().UnixNano())
 	req := &goquota.RateLimitRequest{
-		UserID:    "user4",
+		UserID:    userID,
 		Resource:  "api_calls",
 		Algorithm: "sliding_window",
 		Rate:      10,
@@ -153,17 +149,16 @@ func TestStorage_CheckRateLimit_SlidingWindow_Exceeded(t *testing.T) {
 
 func TestStorage_CheckRateLimit_UnknownAlgorithm(t *testing.T) {
 	ctx := context.Background()
-	client, err := firestore.NewClient(ctx, "test-project")
-	if err != nil {
-		t.Skip("Firestore emulator not available")
-	}
+	client := setupFirestoreClient(t)
 	defer client.Close()
 
 	storage, err := New(client, Config{})
 	require.NoError(t, err)
 
+	// Use unique user ID to avoid conflicts between test runs
+	userID := fmt.Sprintf("user5_%d", time.Now().UnixNano())
 	req := &goquota.RateLimitRequest{
-		UserID:    "user5",
+		UserID:    userID,
 		Resource:  "api_calls",
 		Algorithm: "unknown",
 		Rate:      10,
@@ -178,17 +173,16 @@ func TestStorage_CheckRateLimit_UnknownAlgorithm(t *testing.T) {
 
 func TestStorage_RecordRateLimitRequest(t *testing.T) {
 	ctx := context.Background()
-	client, err := firestore.NewClient(ctx, "test-project")
-	if err != nil {
-		t.Skip("Firestore emulator not available")
-	}
+	client := setupFirestoreClient(t)
 	defer client.Close()
 
 	storage, err := New(client, Config{})
 	require.NoError(t, err)
 
+	// Use unique user ID to avoid conflicts between test runs
+	userID := fmt.Sprintf("user6_%d", time.Now().UnixNano())
 	req := &goquota.RateLimitRequest{
-		UserID:    "user6",
+		UserID:    userID,
 		Resource:  "api_calls",
 		Algorithm: "sliding_window",
 		Rate:      10,

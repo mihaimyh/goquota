@@ -6,11 +6,6 @@ import (
 	"time"
 )
 
-const (
-	algorithmTokenBucket   = "token_bucket"
-	algorithmSlidingWindow = "sliding_window"
-)
-
 // MemoryRateLimiter implements rate limiting using in-memory data structures
 // This is useful for single-instance deployments or when storage is unavailable
 type MemoryRateLimiter struct {

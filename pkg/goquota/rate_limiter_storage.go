@@ -46,7 +46,7 @@ func (r *StorageRateLimiter) Allow(
 	}
 
 	// For sliding window, record the request if allowed
-	if allowed && config.Algorithm == "sliding_window" {
+	if allowed && config.Algorithm == algorithmSlidingWindow {
 		// Record the request timestamp for sliding window tracking
 		// Ignore errors from recording - it's best effort
 		//nolint:errcheck // Best-effort recording, errors are non-critical

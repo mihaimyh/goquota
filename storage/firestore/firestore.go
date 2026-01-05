@@ -24,6 +24,57 @@ type Storage struct {
 	consumptionsCollection string
 }
 
+// Now returns the current time from Firestore server.
+// This ensures consistency in distributed systems by using Firestore server time
+// instead of application server time, preventing clock skew issues.
+func (s *Storage) Now(ctx context.Context) (time.Time, error) {
+	// Firestore doesn't have a direct "get server time" API like Redis TIME.
+	// We use a workaround: write a temporary document with ServerTimestamp,
+	// read it back, then delete it. This gives us the server time.
+	// For better performance, we could cache this and refresh periodically.
+
+	// Create a temporary document reference
+	tempDoc := s.client.Collection("_goquota_temp").Doc("_time_query")
+
+	// Write with ServerTimestamp
+	_, err := tempDoc.Set(ctx, map[string]interface{}{
+		"timestamp": firestore.ServerTimestamp,
+	})
+	if err != nil {
+		// Fallback to local time if Firestore operation fails
+		return time.Now().UTC(), fmt.Errorf("failed to get Firestore time, using local time: %w", err)
+	}
+
+	// Read it back to get the server timestamp
+	snap, err := tempDoc.Get(ctx)
+	if err != nil {
+		// Try to clean up even if read fails (ignore cleanup errors)
+		if _, delErr := tempDoc.Delete(ctx); delErr != nil {
+			// Log but don't fail on cleanup error
+			_ = delErr
+		}
+		return time.Now().UTC(), fmt.Errorf("failed to read Firestore time, using local time: %w", err)
+	}
+
+	// Extract the server timestamp
+	data := snap.Data()
+	if ts, ok := data["timestamp"].(time.Time); ok {
+		// Clean up the temporary document (ignore cleanup errors)
+		if _, delErr := tempDoc.Delete(ctx); delErr != nil {
+			// Log but don't fail on cleanup error
+			_ = delErr
+		}
+		return ts.UTC(), nil
+	}
+
+	// Clean up and fallback (ignore cleanup errors)
+	if _, delErr := tempDoc.Delete(ctx); delErr != nil {
+		// Log but don't fail on cleanup error
+		_ = delErr
+	}
+	return time.Now().UTC(), fmt.Errorf("failed to extract Firestore server timestamp, using local time")
+}
+
 // Config holds Firestore storage configuration
 type Config struct {
 	// EntitlementsCollection is the Firestore collection for user entitlements
