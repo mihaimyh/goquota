@@ -1,3 +1,35 @@
+// Package goquota provides production-ready subscription quota management for Go applications.
+//
+// Features:
+//   - Anniversary-based billing cycles with prorated tier changes
+//   - Multiple quota types: daily, monthly, and forever (pre-paid credits)
+//   - Pluggable storage: Redis (recommended), PostgreSQL, Firestore, In-Memory
+//   - Rate limiting: Token bucket and sliding window algorithms
+//   - Admin operations: SetUsage, GrantOneTimeCredit, ResetUsage
+//   - Dry-run mode: Test quota rules without blocking traffic
+//   - Audit trail: Comprehensive logging for compliance
+//   - Clock skew protection: Uses storage server time for consistency
+//   - Enhanced response: Detailed usage info without extra storage calls
+//   - Config validation: Fail-fast on startup
+//   - High performance: Redis adapter uses atomic Lua scripts for <1ms latency
+//   - HTTP middlewares: Gin, Echo, Fiber, and standard net/http
+//   - Billing integration: RevenueCat, Stripe webhook processing
+//
+// Quick Start:
+//
+//	storage := memory.New()
+//	config := goquota.Config{
+//	    DefaultTier: "free",
+//	    Tiers: map[string]goquota.TierConfig{
+//	        "free": {
+//	            MonthlyQuotas: map[string]int{"api_calls": 100},
+//	        },
+//	    },
+//	}
+//	manager, _ := goquota.NewManager(storage, &config)
+//	newUsed, err := manager.Consume(ctx, "user123", "api_calls", 1, goquota.PeriodTypeMonthly)
+//
+// See https://github.com/mihaimyh/goquota for complete documentation and examples.
 package goquota
 
 import (
