@@ -75,7 +75,7 @@ func main() {
 	})
 
 	// Demonstrate rate limiting
-	fmt.Println("=== Rate Limiting Demo ===\n")
+	fmt.Println("=== Rate Limiting Demo ===")
 
 	// Test 1: Token bucket with burst
 	fmt.Println("Test 1: Token Bucket (Free tier - 10 req/sec, burst 20)")
@@ -83,7 +83,7 @@ func main() {
 	allowedCount := 0
 	rateLimitedCount := 0
 
-	for i := 0; i < 25; i++ {
+	for range 25 {
 		_, err := manager.Consume(ctx, "user1", "api_calls", 1, goquota.PeriodTypeMonthly)
 		if err != nil {
 			var rateLimitErr *goquota.RateLimitExceededError
