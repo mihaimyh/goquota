@@ -335,9 +335,9 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 		return 0, fmt.Errorf("failed to get usage for update: %w", err)
 	}
 
-	// Check quota
+	// Check quota (skip check for unlimited quota -1)
 	newUsed := currentUsed + int64(req.Amount)
-	if newUsed > limitAmount {
+	if limitAmount != -1 && newUsed > limitAmount {
 		return int(currentUsed), goquota.ErrQuotaExceeded
 	}
 

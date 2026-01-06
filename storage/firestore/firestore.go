@@ -261,7 +261,8 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 		}
 
 		newUsed = currentUsed + req.Amount
-		if newUsed > currentLimit {
+		// Check limit only if not unlimited (-1)
+		if currentLimit != -1 && newUsed > currentLimit {
 			return goquota.ErrQuotaExceeded
 		}
 

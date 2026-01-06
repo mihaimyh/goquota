@@ -132,7 +132,8 @@ func (s *Storage) loadScripts() {
 		end
 		
 		local newUsed = currentUsed + amount
-		if newUsed > limit then
+		-- Check limit only if not unlimited (-1)
+		if limit ~= -1 and newUsed > limit then
 			return {currentUsed, 'quota_exceeded'}
 		end
 		

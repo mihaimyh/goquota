@@ -585,7 +585,11 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		}
 	}
 
-	if limit <= 0 {
+	// Check for unlimited quota (-1) - skip limit check
+	if limit == -1 {
+		// Unlimited quota - proceed without limit validation
+		// Storage layer will still track usage but won't enforce limits
+	} else if limit <= 0 {
 		return 0, ErrQuotaExceeded // No quota available for this tier
 	}
 
@@ -608,8 +612,8 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 			currentUsed = usage.Used
 		}
 
-		// Check if consumption would exceed limit
-		if currentUsed+amount > limit {
+		// Check if consumption would exceed limit (skip check for unlimited quota)
+		if limit != -1 && currentUsed+amount > limit {
 			// Log violation but don't block
 			m.logger.Info("dry-run: quota would be exceeded (allowing)",
 				Field{"userId", userID},
@@ -777,7 +781,11 @@ func (m *Manager) tryConsumeFailureResult(ctx context.Context, userID, resource 
 }
 
 // calculateRemaining calculates remaining quota, ensuring it's non-negative
+// Returns -1 for unlimited quota
 func calculateRemaining(limit, used int) int {
+	if limit == -1 {
+		return -1 // Unlimited
+	}
 	remaining := limit - used
 	if remaining < 0 {
 		return 0
@@ -891,7 +899,8 @@ func (m *Manager) TryConsume(ctx context.Context, userID, resource string, amoun
 
 	// Get limit for tier
 	limit := m.getLimitForResource(resource, tier, periodType)
-	if limit <= 0 {
+	// Allow unlimited quota (-1) to proceed
+	if limit != -1 && limit <= 0 {
 		return m.tryConsumeFailureResult(ctx, userID, resource, periodType, limit)
 	}
 
