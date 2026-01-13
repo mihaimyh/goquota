@@ -309,16 +309,19 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 	// Check cache first
 	if cached, found := m.cache.GetUsage(usageKey); found {
 		m.metrics.RecordCacheHit("usage")
-		// Always recalculate limit from current tier to handle tier upgrades
+		// Always recalculate limit from current tier to handle tier upgrades/downgrades
 		// The cached Usage may have an old limit from a previous tier
 		// Exceptions:
 		// 1. For forever periods, preserve stored limit (purchased credits)
-		// 2. If cached limit > tier config limit, it's likely prorated, preserve it
+		// 2. If cached tier matches current tier and cached limit > tier config limit, it's likely prorated, preserve it
 		tierConfigLimit := m.getLimitForResource(resource, tier, periodType)
 		if periodType == PeriodTypeForever {
 			// Forever periods: preserve cached limit
-		} else if cached.Limit > tierConfigLimit && tierConfigLimit > 0 {
-			// Cached limit is higher - likely prorated, preserve it
+		} else if cached.Tier != tier {
+			// Tier mismatch - definitely stale, always recalculate
+			cached.Limit = tierConfigLimit
+		} else if cached.Limit >= tierConfigLimit && tierConfigLimit > 0 {
+			// Tiers match and cached limit >= tier config - likely prorated from ApplyTierChange, preserve it
 		} else {
 			// Normal case: recalculate from tier config
 			cached.Limit = tierConfigLimit
@@ -334,15 +337,18 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 		// Double-check cache after acquiring the lock (another goroutine might have populated it)
 		if cached, found := m.cache.GetUsage(usageKey); found {
 			m.metrics.RecordCacheHit("usage")
-			// Always recalculate limit from current tier to handle tier upgrades
+			// Always recalculate limit from current tier to handle tier upgrades/downgrades
 			// Exceptions:
 			// 1. For forever periods, preserve cached limit (purchased credits)
-			// 2. If cached limit > tier config limit, it's likely prorated, preserve it
+			// 2. If cached tier matches current tier and cached limit > tier config limit, it's likely prorated, preserve it
 			tierConfigLimit := m.getLimitForResource(resource, tier, periodType)
 			if periodType == PeriodTypeForever {
 				// Forever periods: preserve cached limit
-			} else if cached.Limit > tierConfigLimit && tierConfigLimit > 0 {
-				// Cached limit is higher - likely prorated, preserve it
+			} else if cached.Tier != tier {
+				// Tier mismatch - definitely stale, always recalculate
+				cached.Limit = tierConfigLimit
+			} else if cached.Limit >= tierConfigLimit && tierConfigLimit > 0 {
+				// Tiers match and cached limit >= tier config - likely prorated from ApplyTierChange, preserve it
 			} else {
 				// Normal case: recalculate from tier config
 				cached.Limit = tierConfigLimit
@@ -368,15 +374,18 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 				m.metrics.RecordFallbackUsage("storage_error")
 				fallbackUsage, fallbackErr := m.fallbackStrategy.GetFallbackUsage(ctx, userID, resource, period)
 				if fallbackErr == nil && fallbackUsage != nil {
-					// Always recalculate limit from current tier to handle tier upgrades
+					// Always recalculate limit from current tier to handle tier upgrades/downgrades
 					// Exceptions:
 					// 1. For forever periods, preserve stored limit (purchased credits)
-					// 2. If fallback limit > tier config limit, it's likely prorated, preserve it
+					// 2. If fallback tier matches current tier and fallback limit > tier config limit, it's likely prorated, preserve it
 					tierConfigLimit := m.getLimitForResource(resource, tier, periodType)
 					if periodType == PeriodTypeForever {
 						// Forever periods: preserve fallback limit
-					} else if fallbackUsage.Limit > tierConfigLimit && tierConfigLimit > 0 {
-						// Fallback limit is higher - likely prorated, preserve it
+					} else if fallbackUsage.Tier != tier {
+						// Tier mismatch - definitely stale, always recalculate
+						fallbackUsage.Limit = tierConfigLimit
+					} else if fallbackUsage.Limit >= tierConfigLimit && tierConfigLimit > 0 {
+						// Tiers match and fallback limit >= tier config - likely prorated from ApplyTierChange, preserve it
 					} else {
 						// Normal case: recalculate from tier config
 						fallbackUsage.Limit = tierConfigLimit
@@ -435,16 +444,19 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 		}, nil
 	}
 
-	// Always recalculate limit from current tier to handle tier upgrades
+	// Always recalculate limit from current tier to handle tier upgrades/downgrades
 	// The stored limit may be from a previous tier
 	// Exceptions:
 	// 1. For forever periods, preserve stored limit (purchased credits)
-	// 2. If stored limit > tier config limit, it's likely a prorated limit from ApplyTierChange, preserve it
+	// 2. If stored tier matches current tier and stored limit > tier config limit, it's likely a prorated limit from ApplyTierChange, preserve it
 	tierConfigLimit := m.getLimitForResource(resource, tier, periodType)
 	if periodType == PeriodTypeForever {
 		// Forever periods: preserve stored limit (purchased credits)
-	} else if usage.Limit > tierConfigLimit && tierConfigLimit > 0 {
-		// Stored limit is higher than tier config - likely prorated from ApplyTierChange, preserve it
+	} else if usage.Tier != tier {
+		// Tier mismatch - definitely stale, always recalculate
+		usage.Limit = tierConfigLimit
+	} else if usage.Limit >= tierConfigLimit && tierConfigLimit > 0 {
+		// Tiers match and stored limit >= tier config - likely prorated from ApplyTierChange, preserve it
 	} else {
 		// Normal case: recalculate from tier config
 		usage.Limit = tierConfigLimit

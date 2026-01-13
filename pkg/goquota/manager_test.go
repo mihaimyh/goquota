@@ -254,6 +254,224 @@ func TestManager_GetQuota_TierUpgrade_CacheBug(t *testing.T) {
 	}
 }
 
+// TestManager_GetQuota_TierDowngrade_CacheBug reproduces the edge case where downgrading
+// from premium tier to free tier doesn't update the cached usage limit because the
+// cached limit is higher than the new tier limit, so it's incorrectly preserved as prorated.
+func TestManager_GetQuota_TierDowngrade_CacheBug(t *testing.T) {
+	storage := memory.New()
+	config := goquota.Config{
+		DefaultTier: "free",
+		CacheTTL:    5 * time.Minute, // Long TTL to ensure cache persists
+		Tiers: map[string]goquota.TierConfig{
+			"free": {
+				Name:          "free",
+				MonthlyQuotas: map[string]int{"api_calls": 5},
+			},
+			"premium": {
+				Name:          "premium",
+				MonthlyQuotas: map[string]int{"api_calls": 100},
+			},
+		},
+		CacheConfig: &goquota.CacheConfig{
+			Enabled:         true,
+			EntitlementTTL:  5 * time.Minute,
+			UsageTTL:        5 * time.Minute,
+			MaxEntitlements: 1000,
+			MaxUsage:        10000,
+		},
+	}
+
+	manager, err := goquota.NewManager(storage, &config)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	ctx := context.Background()
+	userID := "tier_downgrade_user"
+	resource := "api_calls"
+
+	// Step 1: Set up user with premium tier
+	err = manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "premium",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement (premium) failed: %v", err)
+	}
+
+	// Step 2: Consume some quota to create usage record in storage
+	_, err = manager.Consume(ctx, userID, resource, 10, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("Consume failed: %v", err)
+	}
+
+	// Step 3: Get quota to populate cache with premium tier limit (100) and usage (10)
+	usage1, err := manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota (premium tier) failed: %v", err)
+	}
+	if usage1.Limit != 100 {
+		t.Errorf("Expected limit 100 (premium tier), got %d", usage1.Limit)
+	}
+	if usage1.Used != 10 {
+		t.Errorf("Expected used 10, got %d", usage1.Used)
+	}
+	if usage1.Tier != "premium" {
+		t.Errorf("Expected tier premium, got %s", usage1.Tier)
+	}
+
+	// Step 4: Get quota again to ensure it's cached (should hit cache)
+	usage1b, err := manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota (premium tier, second call) failed: %v", err)
+	}
+	if usage1b.Limit != 100 {
+		t.Errorf("Expected limit 100 (cached), got %d", usage1b.Limit)
+	}
+
+	// Step 5: Downgrade to free tier
+	err = manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "free",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement (free) failed: %v", err)
+	}
+
+	// Step 6: Get quota again - should return free tier limit (5) but bug preserves cached limit (100)
+	// The bug: cached usage has limit=100 (from premium tier), and the condition
+	// "cached.Limit > tierConfigLimit && tierConfigLimit > 0" (100 > 5 && 5 > 0) is true,
+	// so it incorrectly preserves the old limit=100 instead of recalculating to 5
+	usage2, err := manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota (free tier) failed: %v", err)
+	}
+
+	// This is the bug: cached usage still has limit=100 instead of limit=5
+	// The cached Usage object has limit=100 (from premium tier), and since 100 > 5,
+	// the code incorrectly assumes it's prorated and preserves it
+	if usage2.Limit != 5 {
+		t.Errorf("BUG REPRODUCED: Expected limit 5 (free tier), got %d. "+
+			"The cached usage still has the old premium tier limit. "+
+			"Used=%d, Tier=%s", usage2.Limit, usage2.Used, usage2.Tier)
+	}
+	if usage2.Tier != "free" {
+		t.Errorf("Expected tier free, got %s", usage2.Tier)
+	}
+	// Usage should remain the same (10), only limit should change
+	if usage2.Used != 10 {
+		t.Errorf("Expected used 10 (unchanged), got %d", usage2.Used)
+	}
+}
+
+// TestManager_GetQuota_TierDowngrade_WithProratedLimit tests the case where a user
+// has a prorated limit from ApplyTierChange, then downgrades. The prorated limit
+// should not be preserved after downgrade.
+func TestManager_GetQuota_TierDowngrade_WithProratedLimit(t *testing.T) {
+	storage := memory.New()
+	config := goquota.Config{
+		DefaultTier: "free",
+		CacheTTL:    5 * time.Minute,
+		Tiers: map[string]goquota.TierConfig{
+			"free": {
+				Name:          "free",
+				MonthlyQuotas: map[string]int{"api_calls": 5},
+			},
+			"premium": {
+				Name:          "premium",
+				MonthlyQuotas: map[string]int{"api_calls": 100},
+			},
+		},
+		CacheConfig: &goquota.CacheConfig{
+			Enabled:         true,
+			EntitlementTTL:  5 * time.Minute,
+			UsageTTL:        5 * time.Minute,
+			MaxEntitlements: 1000,
+			MaxUsage:        10000,
+		},
+	}
+
+	manager, err := goquota.NewManager(storage, &config)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	ctx := context.Background()
+	userID := "prorated_downgrade_user"
+	resource := "api_calls"
+
+	// Step 1: Set up user with free tier
+	err = manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "free",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement (free) failed: %v", err)
+	}
+
+	// Step 2: Upgrade via ApplyTierChange (creates prorated limit, e.g., 150)
+	err = manager.ApplyTierChange(ctx, userID, "free", "premium", resource)
+	if err != nil {
+		t.Fatalf("ApplyTierChange failed: %v", err)
+	}
+
+	// Step 2b: Update entitlement to premium tier (ApplyTierChange doesn't update entitlement)
+	err = manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "premium",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement (premium) failed: %v", err)
+	}
+
+	// Step 3: Get quota to populate cache with prorated limit
+	usage1, err := manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota (after ApplyTierChange) failed: %v", err)
+	}
+	proratedLimit := usage1.Limit
+	// Prorated limit should be higher than tier config (100) because it includes used + remaining prorated amount
+	// But it might be less than 100 if we're late in the cycle, so just check it's reasonable
+	if proratedLimit < 5 {
+		t.Errorf("Expected prorated limit >= 5, got %d", proratedLimit)
+	}
+
+	// Step 4: Downgrade back to free tier
+	err = manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "free",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement (free, downgrade) failed: %v", err)
+	}
+
+	// Step 5: Get quota - should return free tier limit (5), not old prorated limit
+	usage2, err := manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota (free tier after downgrade) failed: %v", err)
+	}
+
+	// Should recalculate to free tier limit, not preserve prorated limit
+	if usage2.Limit != 5 {
+		t.Errorf("Expected limit 5 (free tier), got %d (old prorated limit was %d). "+
+			"Prorated limit should not be preserved after tier downgrade.",
+			usage2.Limit, proratedLimit)
+	}
+	if usage2.Tier != "free" {
+		t.Errorf("Expected tier free, got %s", usage2.Tier)
+	}
+}
+
 func TestManager_Consume_Success(t *testing.T) {
 	manager := newTestManager()
 	ctx := context.Background()
@@ -396,13 +614,14 @@ func TestManager_ApplyTierChange(t *testing.T) {
 		t.Fatalf("GetQuota failed: %v", err)
 	}
 
-	// Limit should be higher than scholar (3600) but not full fluent (18000)
+	// Limit should be higher than scholar (3600) but not exceed full fluent (18000)
 	// because it's prorated for remaining time in cycle
+	// Note: At the very start of a cycle, prorated limit may equal 18000 due to rounding
 	if usage.Limit <= 3600 {
 		t.Errorf("Expected prorated limit > 3600, got %d", usage.Limit)
 	}
-	if usage.Limit >= 18000 {
-		t.Errorf("Expected prorated limit < 18000, got %d", usage.Limit)
+	if usage.Limit > 18000 {
+		t.Errorf("Expected prorated limit <= 18000, got %d", usage.Limit)
 	}
 }
 
@@ -1108,12 +1327,13 @@ func TestManager_ApplyTierChange_MidCycle(t *testing.T) {
 		t.Fatalf("GetQuota failed: %v", err)
 	}
 
-	// Limit should be prorated (between 3600 and 18000)
+	// Limit should be prorated (between 3600 and 18000, inclusive)
+	// Note: At the very start of a cycle, prorated limit may equal 18000 due to rounding
 	if usage.Limit <= 3600 {
 		t.Errorf("Expected prorated limit > 3600, got %d", usage.Limit)
 	}
-	if usage.Limit >= 18000 {
-		t.Errorf("Expected prorated limit < 18000, got %d", usage.Limit)
+	if usage.Limit > 18000 {
+		t.Errorf("Expected prorated limit <= 18000, got %d", usage.Limit)
 	}
 	if usage.Used != 1000 {
 		t.Errorf("Expected used to remain 1000, got %d", usage.Used)
