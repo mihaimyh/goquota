@@ -169,3 +169,103 @@ func TestManager_Refund_Concurrency(t *testing.T) {
 		t.Errorf("expected usage 990 (idempotent), got %d", usage.Used)
 	}
 }
+
+func TestManager_Refund_PeriodTypeAuto(t *testing.T) {
+	// Setup
+	store := memory.New()
+	cfg := goquota.Config{
+		DefaultTier: "default",
+		Tiers: map[string]goquota.TierConfig{
+			"default": {
+				Name: "default",
+				MonthlyQuotas: map[string]int{
+					"receipt_scan": 100,
+				},
+				ConsumptionOrder: []goquota.PeriodType{goquota.PeriodTypeMonthly, goquota.PeriodTypeForever},
+			},
+		},
+		CacheTTL: time.Minute,
+	}
+
+	manager, err := goquota.NewManager(store, &cfg)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+
+	ctx := context.Background()
+	userID := "user123"
+	resource := "receipt_scan"
+	requestID := "req_abc"
+
+	// 1. Initial Consumption
+	_, err = manager.Consume(
+		ctx,
+		userID,
+		resource,
+		1,
+		goquota.PeriodTypeAuto,
+		goquota.WithIdempotencyKey(requestID),
+	)
+	if err != nil {
+		t.Fatalf("failed to consume quota: %v", err)
+	}
+
+	// 2. Refund using PeriodTypeAuto and convention (_refund suffix)
+	err = manager.Refund(ctx, &goquota.RefundRequest{
+		UserID:         userID,
+		Resource:       resource,
+		Amount:         1,
+		PeriodType:     goquota.PeriodTypeAuto,
+		IdempotencyKey: requestID + "_refund",
+		Reason:         "operation_failed",
+	})
+
+	if err != nil {
+		t.Errorf("expected no error, got '%v'", err)
+	}
+
+	// Verify usage is 0 again
+	usage, err := manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("failed to get usage: %v", err)
+	}
+	if usage.Used != 0 {
+		t.Errorf("expected usage 0 after refund, got %d", usage.Used)
+	}
+
+	// 3. Test with explicit RelatedIdempotencyKey
+	requestID2 := "req_def"
+	_, err = manager.Consume(ctx, userID, resource, 10, goquota.PeriodTypeAuto, goquota.WithIdempotencyKey(requestID2))
+	if err != nil {
+		t.Fatalf("failed to consume: %v", err)
+	}
+
+	err = manager.Refund(ctx, &goquota.RefundRequest{
+		UserID:                userID,
+		Resource:              resource,
+		Amount:                5,
+		PeriodType:            goquota.PeriodTypeAuto,
+		IdempotencyKey:        "refund_def",
+		RelatedIdempotencyKey: requestID2,
+	})
+	if err != nil {
+		t.Errorf("expected no error with explicit RelatedIdempotencyKey, got '%v'", err)
+	}
+
+	usage, _ = manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
+	if usage.Used != 5 {
+		t.Errorf("expected usage 5, got %d", usage.Used)
+	}
+
+	// 4. Test failure when it can't be resolved
+	err = manager.Refund(ctx, &goquota.RefundRequest{
+		UserID:         userID,
+		Resource:       resource,
+		Amount:         1,
+		PeriodType:     goquota.PeriodTypeAuto,
+		IdempotencyKey: "some_random_key", // No _refund suffix, no RelatedIdempotencyKey
+	})
+	if err == nil {
+		t.Error("expected error when resolving fails, got nil")
+	}
+}

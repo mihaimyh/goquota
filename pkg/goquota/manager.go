@@ -36,6 +36,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -1170,6 +1171,15 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 
 	// Calculate period
 	switch req.PeriodType {
+	case PeriodTypeAuto:
+		// Attempt to resolve the period type from the original consumption
+		resolvedType, resolvedPeriod, err := m.resolveRefundPeriod(ctx, req)
+		if err != nil {
+			return err
+		}
+		req.PeriodType = resolvedType
+		period = resolvedPeriod
+
 	case PeriodTypeMonthly:
 		var start, end time.Time
 		if err == nil {
@@ -1414,6 +1424,46 @@ func (m *Manager) getLimitForResource(resource, tier string, periodType PeriodTy
 	}
 
 	return 0
+}
+
+// resolveRefundPeriod attempts to determine which period was used for the original consumption.
+// It uses the RelatedIdempotencyKey if provided, or attempts to derive it from the refund's IdempotencyKey.
+func (m *Manager) resolveRefundPeriod(ctx context.Context, req *RefundRequest) (PeriodType, Period, error) {
+	searchKey := req.RelatedIdempotencyKey
+
+	// If no related key provided, try to derive it from the current idempotency key
+	// Common convention: refundKey = consumeKey + "_refund"
+	if searchKey == "" && req.IdempotencyKey != "" {
+		if strings.HasSuffix(req.IdempotencyKey, "_refund") {
+			searchKey = strings.TrimSuffix(req.IdempotencyKey, "_refund")
+		} else {
+			// Also try without suffix if it doesn't have one? No, too risky.
+			// Just use the key itself as a last resort? No.
+		}
+	}
+
+	if searchKey != "" {
+		record, err := m.storage.GetConsumptionRecord(ctx, searchKey)
+		if err != nil {
+			return "", Period{}, fmt.Errorf("failed to look up consumption record: %w", err)
+		}
+		if record != nil {
+			// Found the original consumption! Use its period.
+			m.logger.Info("resolved refund period from consumption record",
+				Field{"userId", req.UserID},
+				Field{"resource", req.Resource},
+				Field{"consumeId", searchKey},
+				Field{"periodType", record.Period.Type},
+			)
+			return record.Period.Type, record.Period, nil
+		}
+	}
+
+	// If we still haven't found a record, check if we can find ANY recent consumption for this user/resource
+	// But that's not supported by the current storage interface.
+
+	return "", Period{}, fmt.Errorf("could not resolve original consumption for PeriodTypeAuto; " +
+		"please provide RelatedIdempotencyKey or use specific PeriodType")
 }
 
 func (m *Manager) checkWarnings(ctx context.Context, userID, resource, tier string,

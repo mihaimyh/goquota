@@ -514,15 +514,16 @@ func WithDryRun(dryRun bool) ConsumeOption {
 
 // RefundRequest represents a quota refund request
 type RefundRequest struct {
-	UserID            string
-	Resource          string
-	Amount            int
-	PeriodType        PeriodType
-	Period            Period // Populated by Manager
-	IdempotencyKey    string
-	IdempotencyKeyTTL time.Duration // TTL for idempotency key expiration
-	Reason            string
-	Metadata          map[string]string
+	UserID                string
+	Resource              string
+	Amount                int
+	PeriodType            PeriodType
+	Period                Period // Populated by Manager
+	IdempotencyKey        string
+	RelatedIdempotencyKey string        // Optional: IdempotencyKey of the original consumption to refund
+	IdempotencyKeyTTL     time.Duration // TTL for idempotency key expiration
+	Reason                string
+	Metadata              map[string]string
 }
 
 // RefundRecord represents an audit record for a refund
