@@ -58,9 +58,15 @@ type Config struct {
 	CleanupEnabled  bool
 	CleanupInterval time.Duration // How often to run cleanup
 	RecordTTL       time.Duration // TTL for consumption/refund records
+
+	// Table names
+	EntitlementsTable       string // Default: "entitlements"
+	UsageTable              string // Default: "quota_usage"
+	ConsumptionRecordsTable string // Default: "consumption_records"
+	RefundRecordsTable      string // Default: "refund_records"
+	TopUpRecordsTable       string // Default: "top_up_records"
 }
 
-// DefaultConfig returns a Config with sensible defaults
 func DefaultConfig() Config {
 	return Config{
 		MaxConns:        10,
@@ -70,6 +76,12 @@ func DefaultConfig() Config {
 		CleanupEnabled:  true,
 		CleanupInterval: 1 * time.Hour,
 		RecordTTL:       7 * 24 * time.Hour, // 7 days default
+
+		EntitlementsTable:       "entitlements",
+		UsageTable:              "quota_usage",
+		ConsumptionRecordsTable: "consumption_records",
+		RefundRecordsTable:      "refund_records",
+		TopUpRecordsTable:       "top_up_records",
 	}
 }
 
@@ -111,6 +123,23 @@ func New(ctx context.Context, config Config) (*Storage, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	// Set default table names if not provided
+	if config.EntitlementsTable == "" {
+		config.EntitlementsTable = "entitlements"
+	}
+	if config.UsageTable == "" {
+		config.UsageTable = "quota_usage"
+	}
+	if config.ConsumptionRecordsTable == "" {
+		config.ConsumptionRecordsTable = "consumption_records"
+	}
+	if config.RefundRecordsTable == "" {
+		config.RefundRecordsTable = "refund_records"
+	}
+	if config.TopUpRecordsTable == "" {
+		config.TopUpRecordsTable = "top_up_records"
+	}
+
 	// Initialize embedded memory adapter for rate limiting
 	memStorage := memory.New()
 
@@ -148,8 +177,8 @@ func (s *Storage) GetEntitlement(ctx context.Context, userID string) (*goquota.E
 	var expiresAt *time.Time
 
 	err := s.pool.QueryRow(ctx,
-		`SELECT user_id, tier_id, subscription_start, expires_at, updated_at
-			FROM entitlements WHERE user_id = $1`,
+		fmt.Sprintf(`SELECT user_id, tier_id, subscription_start, expires_at, updated_at
+			FROM %s WHERE user_id = $1`, s.config.EntitlementsTable),
 		userID).Scan(
 		&ent.UserID,
 		&ent.Tier,
@@ -176,13 +205,13 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 	}
 
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO entitlements (user_id, tier_id, subscription_start, expires_at, updated_at)
+		fmt.Sprintf(`INSERT INTO %s (user_id, tier_id, subscription_start, expires_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (user_id) DO UPDATE SET
 				tier_id = EXCLUDED.tier_id,
 				subscription_start = EXCLUDED.subscription_start,
 				expires_at = EXCLUDED.expires_at,
-				updated_at = EXCLUDED.updated_at`,
+				updated_at = EXCLUDED.updated_at`, s.config.EntitlementsTable),
 		ent.UserID, ent.Tier, ent.SubscriptionStartDate, ent.ExpiresAt, time.Now().UTC(),
 	)
 
@@ -201,9 +230,9 @@ func (s *Storage) GetUsage(
 	var periodEnd *time.Time
 
 	err := s.pool.QueryRow(ctx,
-		`SELECT user_id, resource, usage_amount, limit_amount, period_start, period_end, period_type, tier, updated_at
-			FROM quota_usage
-			WHERE user_id = $1 AND resource = $2 AND period_start = $3`,
+		fmt.Sprintf(`SELECT user_id, resource, usage_amount, limit_amount, period_start, period_end, period_type, tier, updated_at
+			FROM %s
+			WHERE user_id = $1 AND resource = $2 AND period_start = $3`, s.config.UsageTable),
 		userID, resource, period.Start).Scan(
 		&usage.UserID,
 		&usage.Resource,
@@ -243,14 +272,14 @@ func (s *Storage) SetUsage(
 	}
 
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO quota_usage 
+		fmt.Sprintf(`INSERT INTO %s 
 				(user_id, resource, period_start, period_end, period_type, usage_amount, limit_amount, tier, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (user_id, resource, period_start) DO UPDATE SET
 				usage_amount = EXCLUDED.usage_amount,
 				limit_amount = EXCLUDED.limit_amount,
 				tier = EXCLUDED.tier,
-				updated_at = EXCLUDED.updated_at`,
+				updated_at = EXCLUDED.updated_at`, s.config.UsageTable),
 		userID, resource, period.Start, period.End, string(period.Type),
 		usage.Used, usage.Limit, usage.Tier, time.Now().UTC(),
 	)
@@ -288,9 +317,9 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 	if req.IdempotencyKey != "" {
 		var existingNewUsed int64
 		err := tx.QueryRow(ctx,
-			`SELECT new_used FROM consumption_records 
+			fmt.Sprintf(`SELECT new_used FROM %s 
 				WHERE user_id = $1 AND consumption_id = $2
-				FOR UPDATE`,
+				FOR UPDATE`, s.config.ConsumptionRecordsTable),
 			req.UserID, req.IdempotencyKey).Scan(&existingNewUsed)
 
 		if err == nil {
@@ -310,10 +339,10 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 	// Tip 1: Use UPSERT to avoid insert race condition
 	// Ensure row exists (creates if missing, does nothing if present)
 	_, err = tx.Exec(ctx,
-		`INSERT INTO quota_usage 
+		fmt.Sprintf(`INSERT INTO %s 
 				(user_id, resource, period_start, period_end, period_type, usage_amount, limit_amount, tier, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			ON CONFLICT (user_id, resource, period_start) DO NOTHING`,
+			ON CONFLICT (user_id, resource, period_start) DO NOTHING`, s.config.UsageTable),
 		req.UserID, req.Resource, req.Period.Start, req.Period.End,
 		string(req.Period.Type), 0, req.Limit, req.Tier, time.Now().UTC(),
 	)
@@ -325,10 +354,10 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 	var currentUsed int64
 	var limitAmount int64
 	err = tx.QueryRow(ctx,
-		`SELECT usage_amount, limit_amount 
-			FROM quota_usage 
+		fmt.Sprintf(`SELECT usage_amount, limit_amount 
+			FROM %s 
 			WHERE user_id = $1 AND resource = $2 AND period_start = $3
-			FOR UPDATE`,
+			FOR UPDATE`, s.config.UsageTable),
 		req.UserID, req.Resource, req.Period.Start).Scan(&currentUsed, &limitAmount)
 
 	if err != nil {
@@ -343,9 +372,9 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 
 	// Update usage
 	_, err = tx.Exec(ctx,
-		`UPDATE quota_usage 
+		fmt.Sprintf(`UPDATE %s 
 			SET usage_amount = $1, updated_at = NOW()
-			WHERE user_id = $2 AND resource = $3 AND period_start = $4`,
+			WHERE user_id = $2 AND resource = $3 AND period_start = $4`, s.config.UsageTable),
 		newUsed, req.UserID, req.Resource, req.Period.Start)
 	if err != nil {
 		return 0, fmt.Errorf("failed to update usage: %w", err)
@@ -358,9 +387,9 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 		// Double-check idempotency after consumption (another transaction might have inserted)
 		var existingNewUsed int64
 		err := tx.QueryRow(ctx,
-			`SELECT new_used FROM consumption_records 
+			fmt.Sprintf(`SELECT new_used FROM %s 
 				WHERE user_id = $1 AND consumption_id = $2
-				FOR UPDATE`,
+				FOR UPDATE`, s.config.ConsumptionRecordsTable),
 			req.UserID, req.IdempotencyKey).Scan(&existingNewUsed)
 
 		if err == nil {
@@ -383,11 +412,11 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 		// Note: ConsumeRequest doesn't have Metadata field, so we pass NULL
 		// Use NULL for empty metadata (JSONB column requires valid JSON or NULL)
 		_, err = tx.Exec(ctx,
-			`INSERT INTO consumption_records 
+			fmt.Sprintf(`INSERT INTO %s 
 				(consumption_id, user_id, resource, amount, period_start, 
 				period_end, period_type, new_used, expires_at, metadata)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL)
-				ON CONFLICT (user_id, consumption_id) DO NOTHING`,
+				ON CONFLICT (user_id, consumption_id) DO NOTHING`, s.config.ConsumptionRecordsTable),
 			req.IdempotencyKey, req.UserID, req.Resource, req.Amount,
 			req.Period.Start, req.Period.End, string(req.Period.Type),
 			newUsed, expiresAt)
@@ -449,8 +478,8 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 	if req.IdempotencyKey != "" {
 		var exists bool
 		err := tx.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM refund_records 
-				WHERE user_id = $1 AND refund_id = $2)`,
+			fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s 
+				WHERE user_id = $1 AND refund_id = $2)`, s.config.RefundRecordsTable),
 			req.UserID, req.IdempotencyKey).Scan(&exists)
 
 		if err != nil {
@@ -468,10 +497,10 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 	// Get current usage with lock
 	var currentUsed int64
 	err = tx.QueryRow(ctx,
-		`SELECT usage_amount 
-			FROM quota_usage 
+		fmt.Sprintf(`SELECT usage_amount 
+			FROM %s 
 			WHERE user_id = $1 AND resource = $2 AND period_start = $3
-			FOR UPDATE`,
+			FOR UPDATE`, s.config.UsageTable),
 		req.UserID, req.Resource, period.Start).Scan(&currentUsed)
 
 	if err == pgx.ErrNoRows {
@@ -496,11 +525,11 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 			}
 
 			_, err = tx.Exec(ctx,
-				`INSERT INTO refund_records 
+				fmt.Sprintf(`INSERT INTO %s 
 				 (refund_id, user_id, resource, amount, period_start, 
 				  period_end, period_type, expires_at, reason, metadata)
 				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-				 ON CONFLICT (user_id, refund_id) DO NOTHING`,
+				 ON CONFLICT (user_id, refund_id) DO NOTHING`, s.config.RefundRecordsTable),
 				req.IdempotencyKey, req.UserID, req.Resource, req.Amount,
 				period.Start, period.End, string(period.Type),
 				expiresAt, req.Reason, metadataVal)
@@ -526,9 +555,9 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 
 	// Update usage
 	_, err = tx.Exec(ctx,
-		`UPDATE quota_usage 
+		fmt.Sprintf(`UPDATE %s 
 			SET usage_amount = $1, updated_at = NOW()
-			WHERE user_id = $2 AND resource = $3 AND period_start = $4`,
+			WHERE user_id = $2 AND resource = $3 AND period_start = $4`, s.config.UsageTable),
 		newUsed, req.UserID, req.Resource, period.Start)
 	if err != nil {
 		return fmt.Errorf("failed to update usage: %w", err)
@@ -554,11 +583,11 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 		}
 
 		_, err = tx.Exec(ctx,
-			`INSERT INTO refund_records 
+			fmt.Sprintf(`INSERT INTO %s 
 			 (refund_id, user_id, resource, amount, period_start, 
 			  period_end, period_type, expires_at, reason, metadata)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			 ON CONFLICT (user_id, refund_id) DO NOTHING`,
+			 ON CONFLICT (user_id, refund_id) DO NOTHING`, s.config.RefundRecordsTable),
 			req.IdempotencyKey, req.UserID, req.Resource, req.Amount,
 			period.Start, period.End, string(period.Type),
 			expiresAt, req.Reason, metadataVal)
@@ -578,9 +607,9 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 // ApplyTierChange implements goquota.Storage
 func (s *Storage) ApplyTierChange(ctx context.Context, req *goquota.TierChangeRequest) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE quota_usage 
+		fmt.Sprintf(`UPDATE %s 
 			SET limit_amount = $1, tier = $2, updated_at = NOW()
-			WHERE user_id = $3 AND resource = $4 AND period_start = $5`,
+			WHERE user_id = $3 AND resource = $4 AND period_start = $5`, s.config.UsageTable),
 		req.NewLimit, req.NewTier, req.UserID, req.Resource, req.Period.Start)
 
 	if err != nil {
@@ -606,12 +635,12 @@ func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*
 	var metadataJSON []byte
 
 	err := s.pool.QueryRow(ctx,
-		`SELECT refund_id, user_id, resource, amount, period_start, period_end, 
+		fmt.Sprintf(`SELECT refund_id, user_id, resource, amount, period_start, period_end, 
 					period_type, timestamp, reason, metadata
-			FROM refund_records
+			FROM %s
 			WHERE refund_id = $1
 			ORDER BY timestamp DESC
-			LIMIT 1`,
+			LIMIT 1`, s.config.RefundRecordsTable),
 		idempotencyKey).Scan(
 		&record.RefundID,
 		&record.UserID,
@@ -659,12 +688,12 @@ func (s *Storage) GetConsumptionRecord(ctx context.Context, idempotencyKey strin
 	var metadataJSON []byte
 
 	err := s.pool.QueryRow(ctx,
-		`SELECT consumption_id, user_id, resource, amount, period_start, period_end,
+		fmt.Sprintf(`SELECT consumption_id, user_id, resource, amount, period_start, period_end,
 					period_type, new_used, timestamp, metadata
-			FROM consumption_records
+			FROM %s
 			WHERE consumption_id = $1
 			ORDER BY timestamp DESC
-			LIMIT 1`,
+			LIMIT 1`, s.config.ConsumptionRecordsTable),
 		idempotencyKey).Scan(
 		&record.ConsumptionID,
 		&record.UserID,
@@ -725,14 +754,14 @@ func (s *Storage) cleanupExpiredRecords(ctx context.Context) error {
 
 	// Delete expired consumption records
 	_, err := s.pool.Exec(ctx,
-		`DELETE FROM consumption_records WHERE expires_at < $1`, now)
+		fmt.Sprintf(`DELETE FROM %s WHERE expires_at < $1`, s.config.ConsumptionRecordsTable), now)
 	if err != nil {
 		return fmt.Errorf("failed to cleanup consumption records: %w", err)
 	}
 
 	// Delete expired refund records
 	_, err = s.pool.Exec(ctx,
-		`DELETE FROM refund_records WHERE expires_at < $1`, now)
+		fmt.Sprintf(`DELETE FROM %s WHERE expires_at < $1`, s.config.RefundRecordsTable), now)
 	if err != nil {
 		return fmt.Errorf("failed to cleanup refund records: %w", err)
 	}
@@ -767,12 +796,12 @@ func (s *Storage) AddLimit(
 	// 1. Check idempotency INSIDE transaction (if key provided)
 	if idempotencyKey != "" {
 		var existingID string
-		err := tx.QueryRow(ctx, `
-			INSERT INTO top_up_records (id, user_id, resource, amount, period_start, period_end, period_type, created_at)
+		err := tx.QueryRow(ctx, fmt.Sprintf(`
+			INSERT INTO %s (id, user_id, resource, amount, period_start, period_end, period_type, created_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
 			ON CONFLICT (id) DO NOTHING
 			RETURNING id
-		`, idempotencyKey, userID, resource, amount, period.Start, period.End, string(period.Type)).Scan(&existingID)
+		`, s.config.TopUpRecordsTable), idempotencyKey, userID, resource, amount, period.Start, period.End, string(period.Type)).Scan(&existingID)
 
 		if err == pgx.ErrNoRows {
 			// Idempotency key already exists - operation already processed
@@ -785,14 +814,14 @@ func (s *Storage) AddLimit(
 	}
 
 	// 2. Apply limit increment atomically
-	_, err = tx.Exec(ctx, `
-		INSERT INTO quota_usage (
+	_, err = tx.Exec(ctx, fmt.Sprintf(`
+		INSERT INTO %s (
 			user_id, resource, period_start, period_end, period_type, usage_amount, limit_amount, tier, updated_at
 		)
 		VALUES ($1, $2, $3, $4, $5, 0, $6, $7, NOW())
 		ON CONFLICT (user_id, resource, period_start) 
-		DO UPDATE SET limit_amount = quota_usage.limit_amount + $6, updated_at = NOW()
-	`, userID, resource, period.Start, period.End, string(period.Type), amount, "default")
+		DO UPDATE SET limit_amount = %s.limit_amount + $6, updated_at = NOW()
+	`, s.config.UsageTable, s.config.UsageTable), userID, resource, period.Start, period.End, string(period.Type), amount, "default")
 	if err != nil {
 		return fmt.Errorf("failed to increment limit: %w", err)
 	}
@@ -818,14 +847,14 @@ func (s *Storage) SubtractLimit(
 	// 1. Check idempotency INSIDE transaction (if key provided)
 	if idempotencyKey != "" {
 		var existingID string
-		err := tx.QueryRow(ctx, `
-			INSERT INTO refund_records (
+		err := tx.QueryRow(ctx, fmt.Sprintf(`
+			INSERT INTO %s (
 				refund_id, user_id, resource, amount, period_start, period_end, period_type, timestamp, expires_at, reason, metadata
 			)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW() + INTERVAL '24 hours', '', NULL)
 			ON CONFLICT (user_id, refund_id) DO NOTHING
 			RETURNING refund_id
-		`, idempotencyKey, userID, resource, amount, period.Start, period.End, string(period.Type)).Scan(&existingID)
+		`, s.config.RefundRecordsTable), idempotencyKey, userID, resource, amount, period.Start, period.End, string(period.Type)).Scan(&existingID)
 
 		if err == pgx.ErrNoRows {
 			// Idempotency key already exists - operation already processed
@@ -837,11 +866,11 @@ func (s *Storage) SubtractLimit(
 	}
 
 	// 2. Apply limit decrement atomically with clamp to 0
-	_, err = tx.Exec(ctx, `
-		UPDATE quota_usage 
+	_, err = tx.Exec(ctx, fmt.Sprintf(`
+		UPDATE %s 
 		SET limit_amount = GREATEST(0, limit_amount - $1), updated_at = NOW()
 		WHERE user_id = $2 AND resource = $3 AND period_start = $4
-	`, amount, userID, resource, period.Start)
+	`, s.config.UsageTable), amount, userID, resource, period.Start)
 	if err != nil {
 		return fmt.Errorf("failed to decrement limit: %w", err)
 	}

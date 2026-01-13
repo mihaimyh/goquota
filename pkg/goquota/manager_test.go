@@ -141,6 +141,119 @@ func TestManager_GetQuota_NoUsage(t *testing.T) {
 	}
 }
 
+// TestManager_GetQuota_TierUpgrade_CacheBug reproduces the bug where upgrading
+// from free tier to premium tier doesn't update the cached usage limit.
+// This test should fail before the fix and pass after.
+func TestManager_GetQuota_TierUpgrade_CacheBug(t *testing.T) {
+	storage := memory.New()
+	config := goquota.Config{
+		DefaultTier: "free",
+		CacheTTL:    5 * time.Minute, // Long TTL to ensure cache persists
+		Tiers: map[string]goquota.TierConfig{
+			"free": {
+				Name:          "free",
+				MonthlyQuotas: map[string]int{"api_calls": 5},
+			},
+			"premium": {
+				Name:          "premium",
+				MonthlyQuotas: map[string]int{"api_calls": -1}, // -1 = unlimited
+			},
+		},
+		CacheConfig: &goquota.CacheConfig{
+			Enabled:         true,
+			EntitlementTTL:  5 * time.Minute,
+			UsageTTL:        5 * time.Minute,
+			MaxEntitlements: 1000,
+			MaxUsage:        10000,
+		},
+	}
+
+	manager, err := goquota.NewManager(storage, &config)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	ctx := context.Background()
+	userID := "tier_upgrade_user"
+	resource := "api_calls"
+
+	// Step 1: Set up user with free tier
+	err = manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "free",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement (free) failed: %v", err)
+	}
+
+	// Step 2: Consume some quota to create usage record in storage
+	_, err = manager.Consume(ctx, userID, resource, 3, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("Consume failed: %v", err)
+	}
+
+	// Step 3: Get quota to populate cache with free tier limit (5) and usage (3)
+	usage1, err := manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota (free tier) failed: %v", err)
+	}
+	if usage1.Limit != 5 {
+		t.Errorf("Expected limit 5 (free tier), got %d", usage1.Limit)
+	}
+	if usage1.Used != 3 {
+		t.Errorf("Expected used 3, got %d", usage1.Used)
+	}
+	if usage1.Tier != "free" {
+		t.Errorf("Expected tier free, got %s", usage1.Tier)
+	}
+
+	// Step 4: Get quota again to ensure it's cached (should hit cache)
+	usage1b, err := manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota (free tier, second call) failed: %v", err)
+	}
+	if usage1b.Limit != 5 {
+		t.Errorf("Expected limit 5 (cached), got %d", usage1b.Limit)
+	}
+
+	// Step 5: Upgrade to premium tier
+	err = manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "premium",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SetEntitlement (premium) failed: %v", err)
+	}
+
+	// Step 6: Get quota again - should return premium limit (-1) but currently returns cached limit (5)
+	// The bug: usage cache still has the old limit=5, and GetQuota returns it without recalculating
+	// because the check "if cached.Limit <= 0" only fixes missing limits, not outdated limits
+	usage2, err := manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota (premium tier) failed: %v", err)
+	}
+
+	// This is the bug: cached usage still has limit=5 instead of limit=-1
+	// The cached Usage object has limit=5 (from free tier), and since 5 > 0,
+	// the code at line 313-315 doesn't recalculate it
+	if usage2.Limit != -1 {
+		t.Errorf("BUG REPRODUCED: Expected limit -1 (premium/unlimited), got %d. "+
+			"The cached usage still has the old free tier limit. "+
+			"Used=%d, Tier=%s", usage2.Limit, usage2.Used, usage2.Tier)
+	}
+	if usage2.Tier != "premium" {
+		t.Errorf("Expected tier premium, got %s", usage2.Tier)
+	}
+	// Usage should remain the same (3), only limit should change
+	if usage2.Used != 3 {
+		t.Errorf("Expected used 3 (unchanged), got %d", usage2.Used)
+	}
+}
+
 func TestManager_Consume_Success(t *testing.T) {
 	manager := newTestManager()
 	ctx := context.Background()

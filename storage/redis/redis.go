@@ -48,6 +48,14 @@ type Config struct {
 
 	// MaxRetries is the maximum number of retry attempts (default: 3)
 	MaxRetries int
+
+	// Key suffixes
+	EntitlementKeySuffix string // Default: "entitlement:"
+	UsageKeySuffix       string // Default: "usage:"
+	RefundKeySuffix      string // Default: "refund:"
+	ConsumptionKeySuffix string // Default: "consumption:"
+	RateLimitKeySuffix   string // Default: "ratelimit:"
+	TopUpKeySuffix       string // Default: "topup:"
 }
 
 // DefaultConfig returns a Config with sensible defaults
@@ -73,6 +81,26 @@ func New(client redis.UniversalClient, config Config) (*Storage, error) {
 	}
 	if config.MaxRetries == 0 {
 		config.MaxRetries = 3
+	}
+
+	// Set default suffixes
+	if config.EntitlementKeySuffix == "" {
+		config.EntitlementKeySuffix = "entitlement:"
+	}
+	if config.UsageKeySuffix == "" {
+		config.UsageKeySuffix = "usage:"
+	}
+	if config.RefundKeySuffix == "" {
+		config.RefundKeySuffix = "refund:"
+	}
+	if config.ConsumptionKeySuffix == "" {
+		config.ConsumptionKeySuffix = "consumption:"
+	}
+	if config.RateLimitKeySuffix == "" {
+		config.RateLimitKeySuffix = "ratelimit:"
+	}
+	if config.TopUpKeySuffix == "" {
+		config.TopUpKeySuffix = "topup:"
 	}
 
 	s := &Storage{
@@ -827,32 +855,32 @@ func (s *Storage) GetConsumptionRecord(ctx context.Context, idempotencyKey strin
 
 // entitlementKey generates the Redis key for an entitlement
 func (s *Storage) entitlementKey(userID string) string {
-	return fmt.Sprintf("%sentitlement:%s", s.config.KeyPrefix, userID)
+	return fmt.Sprintf("%s%s%s", s.config.KeyPrefix, s.config.EntitlementKeySuffix, userID)
 }
 
 // usageKey generates the Redis key for usage tracking
 func (s *Storage) usageKey(userID, resource string, period goquota.Period) string {
-	return fmt.Sprintf("%susage:%s:%s:%s", s.config.KeyPrefix, userID, resource, period.Key())
+	return fmt.Sprintf("%s%s%s:%s:%s", s.config.KeyPrefix, s.config.UsageKeySuffix, userID, resource, period.Key())
 }
 
 // refundKey generates the Redis key for refund records
 func (s *Storage) refundKey(idempotencyKey string) string {
-	return fmt.Sprintf("%srefund:%s", s.config.KeyPrefix, idempotencyKey)
+	return fmt.Sprintf("%s%s%s", s.config.KeyPrefix, s.config.RefundKeySuffix, idempotencyKey)
 }
 
 // consumptionKey generates the Redis key for consumption records
 func (s *Storage) consumptionKey(idempotencyKey string) string {
-	return fmt.Sprintf("%sconsumption:%s", s.config.KeyPrefix, idempotencyKey)
+	return fmt.Sprintf("%s%s%s", s.config.KeyPrefix, s.config.ConsumptionKeySuffix, idempotencyKey)
 }
 
 // rateLimitKey generates the Redis key for rate limiting
 func (s *Storage) rateLimitKey(userID, resource string) string {
-	return fmt.Sprintf("%sratelimit:%s:%s", s.config.KeyPrefix, userID, resource)
+	return fmt.Sprintf("%s%s%s:%s", s.config.KeyPrefix, s.config.RateLimitKeySuffix, userID, resource)
 }
 
 // topUpKey generates the Redis key for top-up idempotency records
 func (s *Storage) topUpKey(idempotencyKey string) string {
-	return fmt.Sprintf("%stopup:%s", s.config.KeyPrefix, idempotencyKey)
+	return fmt.Sprintf("%s%s%s", s.config.KeyPrefix, s.config.TopUpKeySuffix, idempotencyKey)
 }
 
 // AddLimit implements goquota.Storage

@@ -22,6 +22,10 @@ type Storage struct {
 	usageCollection        string
 	refundsCollection      string
 	consumptionsCollection string
+	rateLimitsCollection   string
+	timeQueryCollection    string
+	usagePeriodsSub        string
+	rateLimitTimestampsSub string
 }
 
 // Now returns the current time from Firestore server.
@@ -34,7 +38,7 @@ func (s *Storage) Now(ctx context.Context) (time.Time, error) {
 	// For better performance, we could cache this and refresh periodically.
 
 	// Create a temporary document reference
-	tempDoc := s.client.Collection("_goquota_temp").Doc("_time_query")
+	tempDoc := s.client.Collection(s.timeQueryCollection).Doc("_time_query")
 
 	// Write with ServerTimestamp
 	_, err := tempDoc.Set(ctx, map[string]interface{}{
@@ -92,6 +96,22 @@ type Config struct {
 	// ConsumptionsCollection is the Firestore collection for consumption audit logs
 	// Default: "billing_consumptions"
 	ConsumptionsCollection string
+
+	// RateLimitsCollection is the Firestore collection for rate limiting state
+	// Default: "rate_limits"
+	RateLimitsCollection string
+
+	// TimeQueryCollection is the Firestore collection for temporary time check documents
+	// Default: "_goquota_temp"
+	TimeQueryCollection string
+
+	// UsagePeriodsSubCollection is the sub-collection name for usage periods
+	// Default: "periods"
+	UsagePeriodsSubCollection string
+
+	// RateLimitTimestampsSubCollection is the sub-collection name for rate limit timestamps
+	// Default: "timestamps"
+	RateLimitTimestampsSubCollection string
 }
 
 // New creates a new Firestore storage adapter
@@ -113,6 +133,18 @@ func New(client *firestore.Client, config Config) (*Storage, error) {
 	if config.ConsumptionsCollection == "" {
 		config.ConsumptionsCollection = "billing_consumptions"
 	}
+	if config.RateLimitsCollection == "" {
+		config.RateLimitsCollection = "rate_limits"
+	}
+	if config.TimeQueryCollection == "" {
+		config.TimeQueryCollection = "_goquota_temp"
+	}
+	if config.UsagePeriodsSubCollection == "" {
+		config.UsagePeriodsSubCollection = "periods"
+	}
+	if config.RateLimitTimestampsSubCollection == "" {
+		config.RateLimitTimestampsSubCollection = "timestamps"
+	}
 
 	return &Storage{
 		client:                 client,
@@ -120,6 +152,10 @@ func New(client *firestore.Client, config Config) (*Storage, error) {
 		usageCollection:        config.UsageCollection,
 		refundsCollection:      config.RefundsCollection,
 		consumptionsCollection: config.ConsumptionsCollection,
+		rateLimitsCollection:   config.RateLimitsCollection,
+		timeQueryCollection:    config.TimeQueryCollection,
+		usagePeriodsSub:        config.UsagePeriodsSubCollection,
+		rateLimitTimestampsSub: config.RateLimitTimestampsSubCollection,
 	}, nil
 }
 
@@ -746,7 +782,7 @@ func (s *Storage) checkSlidingWindow(
 ) error {
 	// For sliding window, we need to query timestamps outside the transaction first
 	// Then use transaction to atomically add and verify
-	timestampsRef := doc.Collection("timestamps")
+	timestampsRef := doc.Collection(s.rateLimitTimestampsSub)
 	cutoff := req.Now.Add(-req.Window)
 
 	// Query timestamps within the window (outside transaction for read)
@@ -958,7 +994,7 @@ func (s *Storage) SubtractLimit(
 // rateLimitDoc returns the Firestore document reference for rate limiting
 func (s *Storage) rateLimitDoc(userID, resource string) *firestore.DocumentRef {
 	docID := fmt.Sprintf("%s_%s", userID, resource)
-	return s.client.Collection("rate_limits").Doc(docID)
+	return s.client.Collection(s.rateLimitsCollection).Doc(docID)
 }
 
 // intMin returns the minimum of two integers
@@ -977,7 +1013,7 @@ func (s *Storage) usageDoc(userID, resource string, period goquota.Period) *fire
 
 	return s.client.Collection(s.usageCollection).
 		Doc(userID).
-		Collection("periods").
+		Collection(s.usagePeriodsSub).
 		Doc(docID)
 }
 
