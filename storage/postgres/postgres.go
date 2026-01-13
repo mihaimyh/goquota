@@ -352,30 +352,33 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 
 	// Now perform SELECT FOR UPDATE (row is guaranteed to exist)
 	var currentUsed int64
-	var limitAmount int64
 	err = tx.QueryRow(ctx,
-		fmt.Sprintf(`SELECT usage_amount, limit_amount 
+		fmt.Sprintf(`SELECT usage_amount 
 			FROM %s 
 			WHERE user_id = $1 AND resource = $2 AND period_start = $3
 			FOR UPDATE`, s.config.UsageTable),
-		req.UserID, req.Resource, req.Period.Start).Scan(&currentUsed, &limitAmount)
+		req.UserID, req.Resource, req.Period.Start).Scan(&currentUsed)
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to get usage for update: %w", err)
 	}
 
+	// Always use request limit - Manager already calculated it correctly from current tier
+	// Stored limit may be stale from a previous tier
+	limit := int64(req.Limit)
+
 	// Check quota (skip check for unlimited quota -1)
 	newUsed := currentUsed + int64(req.Amount)
-	if limitAmount != -1 && newUsed > limitAmount {
+	if limit != -1 && newUsed > limit {
 		return int(currentUsed), goquota.ErrQuotaExceeded
 	}
 
-	// Update usage
+	// Update usage (also update limit to match request limit in case tier changed)
 	_, err = tx.Exec(ctx,
 		fmt.Sprintf(`UPDATE %s 
-			SET usage_amount = $1, updated_at = NOW()
-			WHERE user_id = $2 AND resource = $3 AND period_start = $4`, s.config.UsageTable),
-		newUsed, req.UserID, req.Resource, req.Period.Start)
+			SET usage_amount = $1, limit_amount = $2, tier = $3, updated_at = NOW()
+			WHERE user_id = $4 AND resource = $5 AND period_start = $6`, s.config.UsageTable),
+		newUsed, limit, req.Tier, req.UserID, req.Resource, req.Period.Start)
 	if err != nil {
 		return 0, fmt.Errorf("failed to update usage: %w", err)
 	}

@@ -285,15 +285,14 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 		snap, err := tx.Get(doc)
 
 		currentUsed := 0
+		// Always use request limit - Manager already calculated it correctly from current tier
+		// Stored limit may be stale from a previous tier
 		currentLimit := req.Limit
 
 		if err == nil && snap.Exists() {
 			data := snap.Data()
 			currentUsed = getInt(data, "used")
-			storedLimit := getInt(data, "limit")
-			if storedLimit > 0 {
-				currentLimit = storedLimit
-			}
+			// Don't overwrite request limit with stored limit - Manager handles tier changes
 		}
 
 		newUsed = currentUsed + req.Amount
@@ -302,11 +301,11 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 			return goquota.ErrQuotaExceeded
 		}
 
-		// 3. Update usage
+		// 3. Update usage (use request limit to ensure it matches current tier)
 		now := time.Now().UTC()
 		err = tx.Set(doc, map[string]interface{}{
 			"used":       newUsed,
-			"limit":      currentLimit,
+			"limit":      req.Limit, // Use request limit (Manager calculated from current tier)
 			"cycleStart": req.Period.Start,
 			"cycleEnd":   req.Period.End,
 			"tier":       req.Tier,

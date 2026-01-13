@@ -234,6 +234,91 @@ func TestFirestore_ConsumeQuota_Exceeds(t *testing.T) {
 	}
 }
 
+// TestFirestore_ConsumeQuota_UsesRequestLimitNotStoredLimit verifies that ConsumeQuota
+// uses the request limit (from Manager) instead of the stored limit (from database).
+// This fixes the bug where tier upgrades/downgrades fail because storage uses stale stored limits.
+func TestFirestore_ConsumeQuota_UsesRequestLimitNotStoredLimit(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("TestFirestore_ConsumeQuota_UsesRequestLimitNotStoredLimit")
+
+	storage, err := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	cleanupFirestore(t, client, "test_entitlements", "test_usage")
+	defer cleanupFirestore(t, client, "test_entitlements", "test_usage")
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Now().UTC(),
+		End:   time.Now().UTC().Add(30 * 24 * time.Hour),
+		Type:  goquota.PeriodTypeMonthly,
+	}
+
+	// Step 1: Create usage with old tier limit (5)
+	oldReq := &goquota.ConsumeRequest{
+		UserID:   "user_tier_change",
+		Resource: "api_calls",
+		Amount:   3,
+		Tier:     "free",
+		Period:   period,
+		Limit:    5, // Old tier limit
+	}
+	_, err = storage.ConsumeQuota(ctx, oldReq)
+	if err != nil {
+		t.Fatalf("Initial consume failed: %v", err)
+	}
+
+	// Step 2: Verify stored limit is 5
+	usage, err := storage.GetUsage(ctx, "user_tier_change", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if usage.Limit != 5 {
+		t.Errorf("Expected stored limit 5, got %d", usage.Limit)
+	}
+
+	// Step 3: Try to consume with new tier limit (-1, unlimited)
+	// This simulates a tier upgrade where Manager calculates limit=-1
+	// Storage should use request limit=-1, not stored limit=5
+	newReq := &goquota.ConsumeRequest{
+		UserID:   "user_tier_change",
+		Resource: "api_calls",
+		Amount:   100, // Should succeed even though stored limit is 5
+		Tier:     "premium",
+		Period:   period,
+		Limit:    -1, // New tier limit (unlimited) - Manager calculated this
+	}
+	newUsed, err := storage.ConsumeQuota(ctx, newReq)
+	if err != nil {
+		t.Fatalf("Consume with unlimited limit should succeed, got error: %v", err)
+	}
+	if newUsed != 103 { // 3 (old) + 100 (new) = 103
+		t.Errorf("Expected newUsed 103, got %d", newUsed)
+	}
+
+	// Step 4: Verify limit was updated to -1 in storage
+	usage, err = storage.GetUsage(ctx, "user_tier_change", "api_calls", period)
+	if err != nil {
+		t.Fatalf("GetUsage failed: %v", err)
+	}
+	if usage.Limit != -1 {
+		t.Errorf("Expected limit updated to -1 (unlimited), got %d", usage.Limit)
+	}
+	if usage.Tier != "premium" {
+		t.Errorf("Expected tier updated to premium, got %s", usage.Tier)
+	}
+	if usage.Used != 103 {
+		t.Errorf("Expected used 103, got %d", usage.Used)
+	}
+}
+
 func TestFirestore_ConsumeQuota_Concurrent(t *testing.T) {
 	client := setupFirestoreClient(t)
 	defer client.Close()
