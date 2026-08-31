@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -13,9 +12,7 @@ import (
 )
 
 func TestStorage_CheckRateLimit_TokenBucket_Allowed(t *testing.T) {
-	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
+	client := setupTestRedis(t)
 	defer client.Close()
 
 	ctx := context.Background()
@@ -40,9 +37,7 @@ func TestStorage_CheckRateLimit_TokenBucket_Allowed(t *testing.T) {
 }
 
 func TestStorage_CheckRateLimit_TokenBucket_Exceeded(t *testing.T) {
-	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
+	client := setupTestRedis(t)
 	defer client.Close()
 
 	ctx := context.Background()
@@ -77,9 +72,7 @@ func TestStorage_CheckRateLimit_TokenBucket_Exceeded(t *testing.T) {
 }
 
 func TestStorage_CheckRateLimit_TokenBucket_Refill(t *testing.T) {
-	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
+	client := setupTestRedis(t)
 	defer client.Close()
 
 	ctx := context.Background()
@@ -116,9 +109,7 @@ func TestStorage_CheckRateLimit_TokenBucket_Refill(t *testing.T) {
 }
 
 func TestStorage_CheckRateLimit_SlidingWindow_Allowed(t *testing.T) {
-	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
+	client := setupTestRedis(t)
 	defer client.Close()
 
 	ctx := context.Background()
@@ -143,9 +134,7 @@ func TestStorage_CheckRateLimit_SlidingWindow_Allowed(t *testing.T) {
 }
 
 func TestStorage_CheckRateLimit_SlidingWindow_Exceeded(t *testing.T) {
-	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
+	client := setupTestRedis(t)
 	defer client.Close()
 
 	ctx := context.Background()
@@ -191,9 +180,7 @@ func TestStorage_CheckRateLimit_SlidingWindow_Exceeded(t *testing.T) {
 }
 
 func TestStorage_CheckRateLimit_UnknownAlgorithm(t *testing.T) {
-	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
+	client := setupTestRedis(t)
 	defer client.Close()
 
 	ctx := context.Background()
@@ -215,9 +202,7 @@ func TestStorage_CheckRateLimit_UnknownAlgorithm(t *testing.T) {
 }
 
 func TestStorage_RecordRateLimitRequest(t *testing.T) {
-	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
+	client := setupTestRedis(t)
 	defer client.Close()
 
 	ctx := context.Background()
@@ -239,9 +224,7 @@ func TestStorage_RecordRateLimitRequest(t *testing.T) {
 }
 
 func TestStorage_CheckRateLimit_DifferentUsers(t *testing.T) {
-	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
+	client := setupTestRedis(t)
 	defer client.Close()
 
 	ctx := context.Background()
