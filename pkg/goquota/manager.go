@@ -287,9 +287,7 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
 
 	case PeriodTypeDaily:
-		start := startOfDayUTC(now)
-		end := start.Add(24 * time.Hour)
-		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
+		period = dailyPeriodForEntitlement(now, ent)
 
 	case PeriodTypeForever:
 		// Forever periods use a stable start time and sentinel end time
@@ -584,9 +582,7 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
 
 	case PeriodTypeDaily:
-		start := startOfDayUTC(now)
-		end := start.Add(24 * time.Hour)
-		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
+		period = dailyPeriodForEntitlement(now, ent)
 
 	case PeriodTypeForever:
 		// Forever periods use a stable start time and sentinel end time
@@ -1116,6 +1112,38 @@ func (m *Manager) SetEntitlement(ctx context.Context, ent *Entitlement) error {
 	return err
 }
 
+// UpdateTimezone stores the user's IANA timezone for daily quota boundaries.
+// Creates a default entitlement when none exists yet.
+func (m *Manager) UpdateTimezone(ctx context.Context, userID, timezone string) error {
+	normalized, ok := NormalizeIANATimezone(timezone)
+	if !ok {
+		return ErrInvalidTimezone
+	}
+
+	ent, err := m.GetEntitlement(ctx, userID)
+	if err != nil && err != ErrEntitlementNotFound {
+		return err
+	}
+
+	now := m.now(ctx)
+	if err == ErrEntitlementNotFound || ent == nil {
+		ent = &Entitlement{
+			UserID:                userID,
+			Tier:                  m.config.DefaultTier,
+			SubscriptionStartDate: startOfDayUTC(now),
+			UpdatedAt:             now,
+		}
+	}
+
+	if ent.Timezone == normalized {
+		return nil
+	}
+
+	ent.Timezone = normalized
+	ent.UpdatedAt = now
+	return m.SetEntitlement(ctx, ent)
+}
+
 // GetEntitlement retrieves a user's entitlement
 func (m *Manager) GetEntitlement(ctx context.Context, userID string) (*Entitlement, error) {
 	// Check cache first
@@ -1248,9 +1276,7 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
 
 	case PeriodTypeDaily:
-		start := startOfDayUTC(now)
-		end := start.Add(24 * time.Hour)
-		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
+		period = dailyPeriodForEntitlement(now, ent)
 
 	case PeriodTypeForever:
 		// Forever periods use a stable start time and sentinel end time
@@ -1658,9 +1684,7 @@ func (m *Manager) SetUsage(ctx context.Context, userID, resource string, periodT
 		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
 
 	case PeriodTypeDaily:
-		start := startOfDayUTC(now)
-		end := start.Add(24 * time.Hour)
-		period = Period{Start: start, End: end, Type: PeriodTypeDaily}
+		period = dailyPeriodForEntitlement(now, ent)
 
 	case PeriodTypeForever:
 		start := startOfDayUTC(now)

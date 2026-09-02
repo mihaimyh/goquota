@@ -180,6 +180,7 @@ func (s *Storage) GetEntitlement(ctx context.Context, userID string) (*goquota.E
 		Tier:                  getString(data, "tier"),
 		SubscriptionStartDate: getTime(data, "subscriptionStartDate"),
 		UpdatedAt:             getTime(data, "updatedAt"),
+		Timezone:              getString(data, "timezone"),
 	}
 
 	if expiresAt, ok := data["expiresAt"].(time.Time); ok && !expiresAt.IsZero() {
@@ -201,6 +202,10 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 		"tier":                  ent.Tier,
 		"subscriptionStartDate": ent.SubscriptionStartDate,
 		"updatedAt":             ent.UpdatedAt,
+	}
+
+	if ent.Timezone != "" {
+		data["timezone"] = ent.Timezone
 	}
 
 	if ent.ExpiresAt != nil {

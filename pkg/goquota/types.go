@@ -31,12 +31,18 @@ type Period struct {
 	Start time.Time
 	End   time.Time
 	Type  PeriodType
+	// Timezone is the IANA timezone used for daily period boundaries (optional).
+	Timezone string
 }
 
 // Key returns a stable string key for this period
 func (p Period) Key() string {
 	switch p.Type {
 	case PeriodTypeDaily:
+		if p.Timezone != "" {
+			loc := LoadLocationOrUTC(p.Timezone)
+			return p.Start.In(loc).Format("2006-01-02")
+		}
 		return p.Start.UTC().Format("2006-01-02")
 	case PeriodTypeMonthly:
 		return p.Start.UTC().Format("2006-01-02")
@@ -54,6 +60,8 @@ type Entitlement struct {
 	SubscriptionStartDate time.Time
 	ExpiresAt             *time.Time
 	UpdatedAt             time.Time
+	// Timezone is the user's IANA timezone for daily quota boundaries (optional).
+	Timezone string
 }
 
 // Usage represents quota usage for a specific resource and period
