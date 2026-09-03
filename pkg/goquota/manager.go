@@ -1316,13 +1316,19 @@ func (m *Manager) SetEntitlement(ctx context.Context, ent *Entitlement) error {
 
 // UpdateTimezone stores the user's IANA timezone for daily quota boundaries.
 // Creates a default entitlement when none exists yet.
+//
+// Reads from storage (not the in-process entitlement cache) so a stale cached
+// free tier cannot overwrite a premium upgrade written by another Cloud Run
+// instance (e.g. RevenueCat webhook) during GetUserQuota timezone sync.
 func (m *Manager) UpdateTimezone(ctx context.Context, userID, timezone string) error {
 	normalized, ok := NormalizeIANATimezone(timezone)
 	if !ok {
 		return ErrInvalidTimezone
 	}
 
-	ent, err := m.GetEntitlement(ctx, userID)
+	start := time.Now()
+	ent, err := m.storage.GetEntitlement(ctx, userID)
+	m.metrics.RecordStorageOperation("GetEntitlement", time.Since(start), err)
 	if err != nil && err != ErrEntitlementNotFound {
 		return err
 	}
@@ -1334,7 +1340,9 @@ func (m *Manager) UpdateTimezone(ctx context.Context, userID, timezone string) e
 			Tier:                  m.config.DefaultTier,
 			SubscriptionStartDate: startOfDayUTC(now),
 			UpdatedAt:             now,
+			Timezone:              normalized,
 		}
+		return m.SetEntitlement(ctx, ent)
 	}
 
 	if ent.Timezone == normalized {

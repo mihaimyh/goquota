@@ -133,6 +133,159 @@ func TestManager_UpdateTimezone_PersistsOnEntitlement(t *testing.T) {
 	}
 }
 
+// Reproduces the Cloud Run production failure:
+// instance B caches free → instance A (RevenueCat webhook) writes premium to shared
+// storage → instance B GetUserQuota syncDeviceTimezone → UpdateTimezone RMW from
+// stale cache overwrites premium back to free.
+func TestManager_UpdateTimezone_DoesNotClobberPremiumFromStaleCache(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	shared := memory.New()
+	cfg := cachedTwoTierConfig()
+
+	webhookInstance, err := goquota.NewManager(shared, cfg)
+	if err != nil {
+		t.Fatalf("webhook NewManager: %v", err)
+	}
+	quotaInstance, err := goquota.NewManager(shared, cfg)
+	if err != nil {
+		t.Fatalf("quota NewManager: %v", err)
+	}
+
+	userID := "user-tz-race"
+	now := time.Now().UTC()
+	oldExpires := now.Add(-4 * time.Hour)
+
+	if err := quotaInstance.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "free",
+		ExpiresAt:             &oldExpires,
+		SubscriptionStartDate: now.Add(-24 * time.Hour),
+		UpdatedAt:             now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("seed free entitlement: %v", err)
+	}
+
+	// Warm quota-instance cache the way GetUserQuota / GetEntitlement does in prod.
+	if _, err := quotaInstance.GetEntitlement(ctx, userID); err != nil {
+		t.Fatalf("warm free cache: %v", err)
+	}
+
+	premiumExpires := now.Add(30 * time.Minute)
+	if err := webhookInstance.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "premium",
+		ExpiresAt:             &premiumExpires,
+		SubscriptionStartDate: now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatalf("webhook premium upgrade: %v", err)
+	}
+
+	storedAfterWebhook, err := shared.GetEntitlement(ctx, userID)
+	if err != nil {
+		t.Fatalf("storage after webhook: %v", err)
+	}
+	if storedAfterWebhook.Tier != "premium" {
+		t.Fatalf("storage tier after webhook = %q, want premium", storedAfterWebhook.Tier)
+	}
+
+	// Quota instance still holds stale free entitlement in its local cache.
+	if err := quotaInstance.UpdateTimezone(ctx, userID, "Europe/Bucharest"); err != nil {
+		t.Fatalf("UpdateTimezone: %v", err)
+	}
+
+	stored, err := shared.GetEntitlement(ctx, userID)
+	if err != nil {
+		t.Fatalf("storage after UpdateTimezone: %v", err)
+	}
+	if stored.Tier != "premium" {
+		t.Fatalf("UpdateTimezone clobbered entitlement tier: got %q want premium (expires=%v timezone=%q)",
+			stored.Tier, stored.ExpiresAt, stored.Timezone)
+	}
+	if stored.Timezone != "Europe/Bucharest" {
+		t.Fatalf("timezone = %q, want Europe/Bucharest", stored.Timezone)
+	}
+	if stored.ExpiresAt == nil || !stored.ExpiresAt.Equal(premiumExpires) {
+		t.Fatalf("expiresAt = %v, want %v", stored.ExpiresAt, premiumExpires)
+	}
+}
+
+// Same hazard via shared storage write that does not invalidate this process cache
+// (another Cloud Run revision wrote premium directly to Firestore).
+func TestManager_UpdateTimezone_DoesNotClobberPremiumAfterExternalStorageWrite(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	shared := memory.New()
+	manager, err := goquota.NewManager(shared, cachedTwoTierConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	userID := "user-tz-external"
+	now := time.Now().UTC()
+	oldExpires := now.Add(-4 * time.Hour)
+
+	if err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "free",
+		ExpiresAt:             &oldExpires,
+		SubscriptionStartDate: now.Add(-24 * time.Hour),
+		UpdatedAt:             now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("seed free: %v", err)
+	}
+	if _, err := manager.GetEntitlement(ctx, userID); err != nil {
+		t.Fatalf("warm free cache: %v", err)
+	}
+
+	premiumExpires := now.Add(30 * time.Minute)
+	if err := shared.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "premium",
+		ExpiresAt:             &premiumExpires,
+		SubscriptionStartDate: now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatalf("external premium write: %v", err)
+	}
+
+	if err := manager.UpdateTimezone(ctx, userID, "Europe/Bucharest"); err != nil {
+		t.Fatalf("UpdateTimezone: %v", err)
+	}
+
+	stored, err := shared.GetEntitlement(ctx, userID)
+	if err != nil {
+		t.Fatalf("storage after UpdateTimezone: %v", err)
+	}
+	if stored.Tier != "premium" {
+		t.Fatalf("UpdateTimezone clobbered entitlement tier: got %q want premium (expires=%v timezone=%q)",
+			stored.Tier, stored.ExpiresAt, stored.Timezone)
+	}
+	if stored.Timezone != "Europe/Bucharest" {
+		t.Fatalf("timezone = %q, want Europe/Bucharest", stored.Timezone)
+	}
+}
+
+func cachedTwoTierConfig() *goquota.Config {
+	return &goquota.Config{
+		DefaultTier: "free",
+		Tiers: map[string]goquota.TierConfig{
+			"free":    {Name: "free"},
+			"premium": {Name: "premium"},
+		},
+		CacheConfig: &goquota.CacheConfig{
+			Enabled:         true,
+			EntitlementTTL:  5 * time.Minute,
+			MaxEntitlements: 100,
+			MaxUsage:        1000,
+		},
+	}
+}
+
+
 func TestManager_Consume_ResetsAtUserLocalMidnight(t *testing.T) {
 	t.Parallel()
 
