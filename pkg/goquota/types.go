@@ -564,9 +564,40 @@ type ConsumptionRecord struct {
 // This allows applications to trigger side-effects (emails/webhooks) without additional storage calls.
 type ConsumeResult struct {
 	NewUsed    int     // New total used amount after consumption
-	Limit      int     // Quota limit for the resource
-	Remaining  int     // Remaining quota (limit - newUsed)
+	Limit      int     // Quota limit for the resource (of the charged period)
+	Remaining  int     // Remaining quota (limit - newUsed) for the charged period
 	Percentage float64 // Usage percentage (newUsed / limit * 100)
+	// Period is the period type that was actually charged.
+	// For PeriodTypeAuto consumption, this is the concrete period that succeeded
+	// (e.g. PeriodTypeDaily or PeriodTypeForever), never PeriodTypeAuto.
+	// Prefer this over PeriodTypeAuto when calling Refund.
+	Period PeriodType
+}
+
+// EffectiveQuota is the merged view of a resource across a tier's ConsumptionOrder.
+// Used and Limit are sums of finite periods (Limit == -1 means unlimited overall).
+// Limit stays stable as forever/bonus credits are spent (unlike summing only Remaining).
+type EffectiveQuota struct {
+	UserID    string
+	Resource  string
+	Tier      string
+	Used      int
+	Limit     int
+	Remaining int
+	UpdatedAt time.Time
+}
+
+// RefundFromConsumeRequest refunds using the charged period from a ConsumeResult.
+// Prefer this over Refund with PeriodTypeAuto when ConsumeWithResult was used.
+type RefundFromConsumeRequest struct {
+	UserID         string
+	Resource       string
+	Amount         int
+	ConsumeResult  *ConsumeResult
+	ConsumeIdemKey string // Idempotency key used for the original consume (optional but recommended)
+	RefundIdemKey  string // Optional; defaults to ConsumeIdemKey + "_refund" when ConsumeIdemKey is set
+	Reason         string
+	Metadata       map[string]string
 }
 
 // TryConsumeResult represents the result of a TryConsume operation

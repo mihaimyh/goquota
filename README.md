@@ -679,7 +679,7 @@ if tier == "enterprise" {
 
 Get detailed usage information without extra storage calls, reducing Redis load by 50% for notification-heavy workloads.
 
-**ConsumeWithResult** - Returns detailed usage breakdown:
+**ConsumeWithResult** - Returns detailed usage breakdown, including the charged period:
 
 ```go
 result, err := manager.ConsumeWithResult(
@@ -687,7 +687,7 @@ result, err := manager.ConsumeWithResult(
     "user123",
     "api_calls",
     1,
-    goquota.PeriodTypeMonthly,
+    goquota.PeriodTypeAuto, // or Monthly/Daily/Forever
 )
 
 if err != nil {
@@ -695,17 +695,36 @@ if err != nil {
 }
 
 // Access detailed info without additional GetUsage() call
-fmt.Printf("Used: %d/%d (%.1f%% - %d remaining)\n",
+fmt.Printf("Used: %d/%d (%.1f%% - %d remaining) period=%s\n",
     result.NewUsed,
     result.Limit,
     result.Percentage,
     result.Remaining,
+    result.Period, // concrete period charged (never "auto")
 )
 
 // Trigger notifications based on percentage
 if result.Percentage >= 80.0 {
     sendWarningEmail(userID) // No extra storage call needed!
 }
+
+// Prefer refunding with the charged period (stable even if Auto lookup fails)
+_ = manager.RefundFromConsume(ctx, &goquota.RefundFromConsumeRequest{
+    UserID:         "user123",
+    Resource:       "api_calls",
+    Amount:         1,
+    ConsumeResult:  result,
+    ConsumeIdemKey: "req-123",
+    Reason:         "operation_failed",
+})
+```
+
+**GetEffectiveQuota** - Merged meter across `ConsumptionOrder` (stable Limit while bonus credits are spent):
+
+```go
+eff, err := manager.GetEffectiveQuota(ctx, "user123", "api_calls")
+// eff.Used / eff.Limit / eff.Remaining sum daily + forever (etc.)
+// Unlimited periods short-circuit to Limit/Remaining = -1
 ```
 
 **GetUsageAfterConsume** - Convenience wrapper:

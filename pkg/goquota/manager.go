@@ -539,20 +539,11 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 
 	// Handle cascading consumption for PeriodTypeAuto
 	if periodType == PeriodTypeAuto {
-		// Get consumption order from tier config
-		tierConfig, ok := m.config.Tiers[tier]
-		if !ok {
-			tierConfig, ok = m.config.Tiers[m.config.DefaultTier]
-		}
-
-		consumptionOrder := []PeriodType{PeriodTypeMonthly, PeriodTypeDaily}
-		if ok && len(tierConfig.ConsumptionOrder) > 0 {
-			consumptionOrder = tierConfig.ConsumptionOrder
-		}
-
-		// Try each period in order until one succeeds
 		var lastErr error
-		for _, pt := range consumptionOrder {
+		for _, pt := range m.consumptionOrderForTier(tier) {
+			if pt == PeriodTypeAuto {
+				continue
+			}
 			newUsed, err := m.Consume(ctx, userID, resource, amount, pt, opts...)
 			if err == nil {
 				return newUsed, nil
@@ -566,6 +557,9 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		}
 
 		// All periods exhausted
+		if lastErr == nil {
+			lastErr = ErrQuotaExceeded
+		}
 		return 0, lastErr
 	}
 
@@ -850,60 +844,268 @@ func calculateRemaining(limit, used int) int {
 
 // ConsumeWithResult consumes quota and returns a ConsumeResult with full quota information.
 // This allows applications to trigger side-effects (emails/webhooks) without additional storage calls.
-// The method has the same behavior as Consume but returns more detailed information.
+// The method has the same behavior as Consume but returns more detailed information,
+// including the concrete Period that was charged (especially useful with PeriodTypeAuto).
 func (m *Manager) ConsumeWithResult(ctx context.Context, userID, resource string, amount int,
 	periodType PeriodType, opts ...ConsumeOption) (*ConsumeResult, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	if amount < 0 {
+		return nil, ErrInvalidAmount
+	}
+	if amount == 0 {
+		return m.consumeResultZeroAmount(ctx, userID, resource, periodType)
+	}
+
+	consumeOpts := &ConsumeOptions{}
+	for _, opt := range opts {
+		opt(consumeOpts)
+	}
+
+	// Idempotent replay: rebuild result from the original charged period.
+	if consumeOpts.IdempotencyKey != "" {
+		existing, err := m.storage.GetConsumptionRecord(ctx, consumeOpts.IdempotencyKey)
+		if err != nil {
+			m.logger.Error("failed to check consumption idempotency",
+				Field{"userId", userID},
+				Field{"idempotencyKey", consumeOpts.IdempotencyKey},
+				Field{"error", err},
+			)
+			return nil, err
+		}
+		if existing != nil {
+			m.metrics.RecordIdempotencyHit("consume")
+			return m.consumeResultFromRecord(ctx, existing)
+		}
+	}
+
+	if periodType == PeriodTypeAuto {
+		return m.consumeAutoWithResult(ctx, userID, resource, amount, opts...)
+	}
+
 	newUsed, err := m.Consume(ctx, userID, resource, amount, periodType, opts...)
 	if err != nil {
 		return nil, err
 	}
+	return m.buildConsumeResult(ctx, userID, resource, periodType, newUsed)
+}
 
-	// Get usage to get the limit
+// consumeAutoWithResult cascades through ConsumptionOrder and reports the charged period.
+func (m *Manager) consumeAutoWithResult(ctx context.Context, userID, resource string, amount int,
+	opts ...ConsumeOption) (*ConsumeResult, error) {
+	ent, err := m.GetEntitlement(ctx, userID)
+	tier := m.config.DefaultTier
+	if err != nil && err != ErrEntitlementNotFound {
+		return nil, err
+	}
+	if err == nil {
+		tier = ent.Tier
+	}
+
+	var lastErr error
+	for _, pt := range m.consumptionOrderForTier(tier) {
+		if pt == PeriodTypeAuto {
+			continue // misconfiguration guard
+		}
+		result, consumeErr := m.ConsumeWithResult(ctx, userID, resource, amount, pt, opts...)
+		if consumeErr == nil {
+			return result, nil
+		}
+		if consumeErr != ErrQuotaExceeded {
+			return nil, consumeErr
+		}
+		lastErr = consumeErr
+	}
+	if lastErr == nil {
+		lastErr = ErrQuotaExceeded
+	}
+	return nil, lastErr
+}
+
+func (m *Manager) consumptionOrderForTier(tier string) []PeriodType {
+	tierConfig, ok := m.config.Tiers[tier]
+	if !ok {
+		tierConfig, ok = m.config.Tiers[m.config.DefaultTier]
+	}
+	if ok && len(tierConfig.ConsumptionOrder) > 0 {
+		return tierConfig.ConsumptionOrder
+	}
+	return []PeriodType{PeriodTypeMonthly, PeriodTypeDaily}
+}
+
+func (m *Manager) buildConsumeResult(ctx context.Context, userID, resource string,
+	periodType PeriodType, newUsed int) (*ConsumeResult, error) {
 	usage, err := m.GetQuota(ctx, userID, resource, periodType)
 	if err != nil {
-		// If we can't get usage, we still return what we know
-		// This shouldn't happen after a successful consume, but handle gracefully
 		return &ConsumeResult{
-			NewUsed:    newUsed,
-			Limit:      0,
-			Remaining:  0,
-			Percentage: 0,
+			NewUsed: newUsed,
+			Period:  periodType,
 		}, nil
 	}
+	return consumeResultFromUsage(usage, newUsed, periodType), nil
+}
 
-	limit := usage.Limit
-	remaining := limit - newUsed
-	if remaining < 0 {
-		remaining = 0
+func (m *Manager) consumeResultFromRecord(ctx context.Context, record *ConsumptionRecord) (*ConsumeResult, error) {
+	periodType := record.Period.Type
+	usage, err := m.GetQuota(ctx, record.UserID, record.Resource, periodType)
+	if err != nil {
+		return &ConsumeResult{
+			NewUsed: record.NewUsed,
+			Period:  periodType,
+		}, nil
 	}
+	return consumeResultFromUsage(usage, record.NewUsed, periodType), nil
+}
 
+func consumeResultFromUsage(usage *Usage, newUsed int, periodType PeriodType) *ConsumeResult {
+	limit := usage.Limit
+	remaining := calculateRemaining(limit, newUsed)
 	var percentage float64
 	if limit > 0 {
 		percentage = float64(newUsed) / float64(limit) * 100
-	} else if limit == -1 {
-		// Unlimited quota
-		percentage = 0
-		remaining = -1
 	}
-
 	return &ConsumeResult{
 		NewUsed:    newUsed,
 		Limit:      limit,
 		Remaining:  remaining,
 		Percentage: percentage,
-	}, nil
+		Period:     periodType,
+	}
 }
 
-// GetUsageAfterConsume is a convenience method that calls Consume and then GetQuota.
-// This reduces the need for applications to make two separate calls.
-// Note: This makes 2 storage calls, so ConsumeWithResult is more efficient.
-func (m *Manager) GetUsageAfterConsume(ctx context.Context, userID, resource string, amount int,
-	periodType PeriodType, opts ...ConsumeOption) (*Usage, error) {
-	_, err := m.Consume(ctx, userID, resource, amount, periodType, opts...)
+func (m *Manager) consumeResultZeroAmount(ctx context.Context, userID, resource string,
+	periodType PeriodType) (*ConsumeResult, error) {
+	if periodType == PeriodTypeAuto {
+		eff, err := m.GetEffectiveQuota(ctx, userID, resource)
+		if err != nil {
+			return nil, err
+		}
+		return &ConsumeResult{
+			NewUsed:    eff.Used,
+			Limit:      eff.Limit,
+			Remaining:  eff.Remaining,
+			Percentage: percentageOf(eff.Used, eff.Limit),
+			Period:     PeriodTypeAuto,
+		}, nil
+	}
+	usage, err := m.GetQuota(ctx, userID, resource, periodType)
 	if err != nil {
 		return nil, err
 	}
-	return m.GetQuota(ctx, userID, resource, periodType)
+	return consumeResultFromUsage(usage, usage.Used, periodType), nil
+}
+
+func percentageOf(used, limit int) float64 {
+	if limit > 0 {
+		return float64(used) / float64(limit) * 100
+	}
+	return 0
+}
+
+// GetEffectiveQuota returns a merged Used/Limit/Remaining view across the tier's
+// ConsumptionOrder. Finite periods are summed; the first unlimited period (-1)
+// short-circuits to Limit/Remaining = -1. Periods with Limit==0 and Used==0 are
+// skipped (not configured / no forever balance).
+func (m *Manager) GetEffectiveQuota(ctx context.Context, userID, resource string) (*EffectiveQuota, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	if userID == "" {
+		return nil, fmt.Errorf("userID is required")
+	}
+	if resource == "" {
+		return nil, fmt.Errorf("resource is required")
+	}
+
+	ent, err := m.GetEntitlement(ctx, userID)
+	tier := m.config.DefaultTier
+	if err != nil && err != ErrEntitlementNotFound {
+		return nil, err
+	}
+	if err == nil {
+		tier = ent.Tier
+	}
+
+	now := m.now(ctx)
+	eff := &EffectiveQuota{
+		UserID:    userID,
+		Resource:  resource,
+		Tier:      tier,
+		UpdatedAt: now,
+	}
+
+	for _, pt := range m.consumptionOrderForTier(tier) {
+		if pt == PeriodTypeAuto {
+			continue
+		}
+		usage, qErr := m.GetQuota(ctx, userID, resource, pt)
+		if qErr != nil {
+			return nil, qErr
+		}
+		if usage.Limit < 0 {
+			eff.Limit = -1
+			eff.Remaining = -1
+			// Keep any Used accumulated from earlier finite periods for observability.
+			return eff, nil
+		}
+		if usage.Limit == 0 && usage.Used == 0 {
+			continue
+		}
+		eff.Used += usage.Used
+		eff.Limit += usage.Limit
+	}
+
+	eff.Remaining = calculateRemaining(eff.Limit, eff.Used)
+	return eff, nil
+}
+
+// RefundFromConsume refunds using the concrete period reported by ConsumeWithResult.
+// This avoids PeriodTypeAuto lookup fragility when consumption-record TTLs expire.
+func (m *Manager) RefundFromConsume(ctx context.Context, req *RefundFromConsumeRequest) error {
+	if req == nil || req.ConsumeResult == nil {
+		return fmt.Errorf("consume result is required")
+	}
+	period := req.ConsumeResult.Period
+	if period == "" || period == PeriodTypeAuto {
+		return ErrInvalidPeriod
+	}
+
+	refundKey := req.RefundIdemKey
+	if refundKey == "" && req.ConsumeIdemKey != "" {
+		refundKey = req.ConsumeIdemKey + "_refund"
+	}
+
+	return m.Refund(ctx, &RefundRequest{
+		UserID:                req.UserID,
+		Resource:              req.Resource,
+		Amount:                req.Amount,
+		PeriodType:            period,
+		IdempotencyKey:        refundKey,
+		RelatedIdempotencyKey: req.ConsumeIdemKey,
+		Reason:                req.Reason,
+		Metadata:              req.Metadata,
+	})
+}
+
+// GetUsageAfterConsume is a convenience method that consumes and returns Usage for the
+// charged period. Prefer ConsumeWithResult when you only need Used/Limit/Remaining/Period.
+func (m *Manager) GetUsageAfterConsume(ctx context.Context, userID, resource string, amount int,
+	periodType PeriodType, opts ...ConsumeOption) (*Usage, error) {
+	result, err := m.ConsumeWithResult(ctx, userID, resource, amount, periodType, opts...)
+	if err != nil {
+		return nil, err
+	}
+	charged := result.Period
+	if charged == "" || charged == PeriodTypeAuto {
+		charged = periodType
+	}
+	return m.GetQuota(ctx, userID, resource, charged)
 }
 
 // TryConsume attempts to consume quota without throwing errors for quota exceeded scenarios.
