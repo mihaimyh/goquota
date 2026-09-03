@@ -41,11 +41,52 @@ func TestLRUCache_Entitlement(t *testing.T) {
 		t.Errorf("Cached entitlement mismatch: got %+v", cached)
 	}
 
+	// Mutating the returned copy must not clobber the cached pointer.
+	cached.Timezone = "UTC"
+	again, found := cache.GetEntitlement(testUserID1)
+	if !found {
+		t.Fatal("Expected cache hit after copy mutation")
+	}
+	if again.Timezone != "" {
+		t.Fatalf("cache leaked mutated timezone %q", again.Timezone)
+	}
+
 	// Test cache invalidation
 	cache.InvalidateEntitlement(testUserID1)
 	_, found = cache.GetEntitlement(testUserID1)
 	if found {
 		t.Error("Expected cache miss after invalidation")
+	}
+}
+
+func TestLRUCache_GetEntitlement_PreservesTimezone(t *testing.T) {
+	t.Parallel()
+
+	cache := goquota.NewLRUCache(10, 10)
+	ent := &goquota.Entitlement{
+		UserID:                testUserID1,
+		Tier:                  testTierFree,
+		Timezone:              "Europe/Bucharest",
+		SubscriptionStartDate: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC),
+		UpdatedAt:             time.Date(2026, 9, 3, 21, 1, 35, 0, time.UTC),
+	}
+	cache.SetEntitlement(testUserID1, ent, time.Minute)
+
+	cached, found := cache.GetEntitlement(testUserID1)
+	if !found {
+		t.Fatal("expected cache hit")
+	}
+	if cached.Timezone != "Europe/Bucharest" {
+		t.Fatalf("timezone = %q, want Europe/Bucharest (cache copy dropped Timezone)", cached.Timezone)
+	}
+
+	cached.Timezone = "UTC"
+	again, found := cache.GetEntitlement(testUserID1)
+	if !found {
+		t.Fatal("expected cache hit after copy mutation")
+	}
+	if again.Timezone != "Europe/Bucharest" {
+		t.Fatalf("timezone after mutating copy = %q, want Europe/Bucharest", again.Timezone)
 	}
 }
 

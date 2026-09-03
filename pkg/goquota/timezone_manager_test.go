@@ -285,6 +285,156 @@ func cachedTwoTierConfig() *goquota.Config {
 	}
 }
 
+func cachedDailyScanConfig() *goquota.Config {
+	return &goquota.Config{
+		DefaultTier: "free",
+		Tiers: map[string]goquota.TierConfig{
+			"free": {
+				Name: "free",
+				DailyQuotas: map[string]int{
+					"receipt_scan": 1,
+					"receipt_chat": 5,
+				},
+				ConsumptionOrder: []goquota.PeriodType{
+					goquota.PeriodTypeDaily,
+					goquota.PeriodTypeForever,
+				},
+			},
+		},
+		CacheConfig: &goquota.CacheConfig{
+			Enabled:         true,
+			EntitlementTTL:  5 * time.Minute,
+			UsageTTL:        5 * time.Second,
+			MaxEntitlements: 100,
+			MaxUsage:        1000,
+		},
+	}
+}
+
+// Reproduces production: GetUserQuota caches the entitlement, then Consume /
+// GetQuota on the same instance strips Timezone and keeps the UTC day.
+func TestManager_GetQuota_CacheHitKeepsLocalMidnight(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	loc, err := time.LoadLocation("Europe/Bucharest")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+
+	// 00:30 local Sept 4 == 21:30 UTC Sept 3 (still Sept 3 in UTC).
+	afterMidnight := time.Date(2026, 9, 4, 0, 30, 0, 0, loc)
+	storage := &fixedNowStorage{
+		Storage: memory.New(),
+		now:     afterMidnight.UTC(),
+	}
+	manager, err := goquota.NewManager(storage, cachedDailyScanConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	userID := "tz-cache-hit-user"
+	if err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "free",
+		Timezone:              "Europe/Bucharest",
+		SubscriptionStartDate: afterMidnight.UTC(),
+		UpdatedAt:             afterMidnight.UTC(),
+	}); err != nil {
+		t.Fatalf("SetEntitlement: %v", err)
+	}
+
+	warmed, err := manager.GetEntitlement(ctx, userID)
+	if err != nil {
+		t.Fatalf("warm GetEntitlement: %v", err)
+	}
+	if warmed.Timezone != "Europe/Bucharest" {
+		t.Fatalf("storage/miss timezone = %q, want Europe/Bucharest", warmed.Timezone)
+	}
+
+	cached, err := manager.GetEntitlement(ctx, userID)
+	if err != nil {
+		t.Fatalf("cached GetEntitlement: %v", err)
+	}
+	if cached.Timezone != "Europe/Bucharest" {
+		t.Fatalf("cache-hit timezone = %q, want Europe/Bucharest", cached.Timezone)
+	}
+
+	usage, err := manager.GetQuota(ctx, userID, "receipt_chat", goquota.PeriodTypeDaily)
+	if err != nil {
+		t.Fatalf("GetQuota after cache hit: %v", err)
+	}
+
+	wantEnd := time.Date(2026, 9, 5, 0, 0, 0, 0, loc).UTC()
+	if !usage.Period.End.Equal(wantEnd) {
+		t.Fatalf("cache-hit period end = %v, want local midnight %v (UTC fallback keeps Sept 3)", usage.Period.End, wantEnd)
+	}
+	if usage.Period.Key() != "2026-09-04" {
+		t.Fatalf("cache-hit period key = %q, want 2026-09-04", usage.Period.Key())
+	}
+}
+
+func TestManager_Consume_CacheHitResetsAtLocalMidnight(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	loc, err := time.LoadLocation("Europe/Bucharest")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+
+	beforeMidnight := time.Date(2026, 9, 3, 23, 30, 0, 0, loc)
+	storage := &fixedNowStorage{
+		Storage: memory.New(),
+		now:     beforeMidnight.UTC(),
+	}
+	manager, err := goquota.NewManager(storage, cachedDailyScanConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	userID := "consume-tz-cache-user"
+	if err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "free",
+		Timezone:              "Europe/Bucharest",
+		SubscriptionStartDate: beforeMidnight.UTC(),
+		UpdatedAt:             beforeMidnight.UTC(),
+	}); err != nil {
+		t.Fatalf("SetEntitlement: %v", err)
+	}
+
+	if _, err := manager.Consume(ctx, userID, "receipt_chat", 5, goquota.PeriodTypeDaily); err != nil {
+		t.Fatalf("Consume before midnight: %v", err)
+	}
+
+	if _, err := manager.GetEntitlement(ctx, userID); err != nil {
+		t.Fatalf("warm entitlement cache: %v", err)
+	}
+
+	_, err = manager.Consume(ctx, userID, "receipt_chat", 1, goquota.PeriodTypeDaily)
+	if err != goquota.ErrQuotaExceeded {
+		t.Fatalf("expected quota exceeded before local reset, got %v", err)
+	}
+
+	afterMidnight := time.Date(2026, 9, 4, 0, 30, 0, 0, loc)
+	storage.now = afterMidnight.UTC()
+
+	if _, err := manager.Consume(ctx, userID, "receipt_chat", 1, goquota.PeriodTypeDaily); err != nil {
+		t.Fatalf("Consume after local midnight with warm cache: %v", err)
+	}
+
+	usage, err := manager.GetQuota(ctx, userID, "receipt_chat", goquota.PeriodTypeDaily)
+	if err != nil {
+		t.Fatalf("GetQuota after reset: %v", err)
+	}
+	if usage.Used != 1 {
+		t.Fatalf("used after local reset = %d, want 1", usage.Used)
+	}
+	if usage.Period.Key() != "2026-09-04" {
+		t.Fatalf("period key after local reset = %q, want 2026-09-04", usage.Period.Key())
+	}
+}
 
 func TestManager_Consume_ResetsAtUserLocalMidnight(t *testing.T) {
 	t.Parallel()

@@ -134,18 +134,15 @@ func (c *LRUCache) GetEntitlement(userID string) (*Entitlement, bool) {
 	entry.accessTime = time.Now()
 
 	c.entitlementHits++
-	// Return a copy to prevent external modifications
+	// Return a shallow copy so callers cannot mutate the cached entry.
+	// Copy the full struct; omitting fields (e.g. Timezone) makes cache hits
+	// silently fall back to UTC daily boundaries.
 	ent, ok := entry.value.(*Entitlement)
 	if !ok {
 		return nil, false
 	}
-	return &Entitlement{
-		UserID:                ent.UserID,
-		Tier:                  ent.Tier,
-		SubscriptionStartDate: ent.SubscriptionStartDate,
-		ExpiresAt:             ent.ExpiresAt,
-		UpdatedAt:             ent.UpdatedAt,
-	}, true
+	cp := *ent
+	return &cp, true
 }
 
 func (c *LRUCache) SetEntitlement(userID string, ent *Entitlement, ttl time.Duration) {

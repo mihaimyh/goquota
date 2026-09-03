@@ -9,10 +9,10 @@ func TestNormalizeIANATimezone(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		input   string
-		want    string
-		wantOK  bool
+		name   string
+		input  string
+		want   string
+		wantOK bool
 	}{
 		{name: "valid timezone", input: "Europe/Bucharest", want: "Europe/Bucharest", wantOK: true},
 		{name: "trims whitespace", input: "  Europe/Bucharest  ", want: "Europe/Bucharest", wantOK: true},
