@@ -58,7 +58,7 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	resources := h.discoverResourcesWithMetrics(ctx, userID)
 
 	// 4. Build response for each resource
-	resourceUsage := h.buildResourceUsageMap(ctx, userID, resources, tier, ent, &errorType)
+	resourceUsage := h.buildResourceUsageMap(ctx, userID, resources, ent, &errorType)
 
 	// 5. Send response
 	h.sendUsageResponse(w, userID, tier, status, resourceUsage, &status, &errorType)
@@ -135,11 +135,11 @@ func (h *Handler) discoverResourcesWithMetrics(ctx context.Context, userID strin
 // buildResourceUsageMap builds the resource usage map
 func (h *Handler) buildResourceUsageMap(
 	ctx context.Context, userID string, resources []string,
-	tier string, ent *goquota.Entitlement, errorType *string,
+	ent *goquota.Entitlement, errorType *string,
 ) map[string]ResourceUsage {
 	resourceUsage := make(map[string]ResourceUsage)
 	for _, resource := range resources {
-		usage, err := h.buildResourceUsage(ctx, userID, resource, tier, ent)
+		usage, err := h.buildResourceUsage(ctx, userID, resource, ent)
 		if err != nil {
 			if h.config.Metrics != nil && *errorType == "" {
 				*errorType = "partial_error"
@@ -257,155 +257,46 @@ func (h *Handler) hasActiveQuota(ctx context.Context, userID, resource string) b
 
 // buildResourceUsage builds the ResourceUsage for a single resource.
 func (h *Handler) buildResourceUsage(
-	ctx context.Context, userID, resource, tier string, ent *goquota.Entitlement,
+	ctx context.Context, userID, resource string, ent *goquota.Entitlement,
 ) (*ResourceUsage, error) {
-	// Query monthly quota
-	monthlyUsage, err := h.config.Manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
+	meter, err := h.config.Manager.GetMeterQuota(ctx, userID, resource)
 	if err != nil {
-		// If error is not "not found", it's a real error
-		if err != goquota.ErrEntitlementNotFound {
-			return nil, fmt.Errorf("failed to get monthly quota: %w", err)
-		}
-		// Create zero usage for monthly
-		monthlyUsage = &goquota.Usage{
-			UserID:   userID,
-			Resource: resource,
-			Used:     0,
-			Limit:    0,
-			Tier:     tier,
-		}
+		return nil, fmt.Errorf("failed to get meter quota: %w", err)
 	}
 
-	// Query forever credits
-	foreverUsage, err := h.config.Manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeForever)
-	if err != nil {
-		// If error is not "not found", it's a real error
-		if err != goquota.ErrEntitlementNotFound {
-			return nil, fmt.Errorf("failed to get forever quota: %w", err)
-		}
-		// Create zero usage for forever
-		foreverUsage = &goquota.Usage{
-			UserID:   userID,
-			Resource: resource,
-			Used:     0,
-			Limit:    0,
-			Tier:     tier,
-		}
-	}
-
-	// Get current cycle for reset time
 	var resetAt *time.Time
 	if ent != nil {
-		period, err := h.config.Manager.GetCurrentCycle(ctx, userID)
-		if err == nil {
+		period, cycleErr := h.config.Manager.GetCurrentCycle(ctx, userID)
+		if cycleErr == nil {
 			resetAt = &period.End
 		}
 	}
 
-	// Calculate combined view with unlimited handling
-	combined := h.calculateCombinedQuota(monthlyUsage, foreverUsage, tier)
-
-	// Build breakdown respecting ConsumptionOrder
-	breakdown := h.buildBreakdown(monthlyUsage, foreverUsage, tier)
-
 	return &ResourceUsage{
-		Limit:     combined.Limit,
-		Used:      combined.Used,
-		Remaining: combined.Remaining,
+		Limit:     meter.Limit,
+		Used:      meter.Used,
+		Remaining: meter.Remaining,
 		ResetAt:   resetAt,
-		Breakdown: breakdown,
+		Breakdown: breakdownFromMeter(meter),
 	}, nil
 }
 
-// combinedQuota holds the calculated combined quota values
-type combinedQuota struct {
-	Limit     int
-	Used      int
-	Remaining int
-}
-
-// calculateCombinedQuota calculates the combined quota respecting unlimited logic.
-func (h *Handler) calculateCombinedQuota(monthly, forever *goquota.Usage, _ string) combinedQuota {
-	// CRITICAL: Handle unlimited (-1) logic
-	// If monthly limit is unlimited, combined is unlimited
-	if monthly.Limit == -1 {
-		return combinedQuota{
-			Limit:     -1,
-			Used:      monthly.Used,
-			Remaining: -1,
+func breakdownFromMeter(meter *goquota.MeterQuota) []QuotaBreakdown {
+	if meter == nil || len(meter.Periods) == 0 {
+		return []QuotaBreakdown{}
+	}
+	breakdown := make([]QuotaBreakdown, 0, len(meter.Periods))
+	for _, period := range meter.Periods {
+		item := QuotaBreakdown{
+			Source: string(period.Period),
+			Limit:  period.Limit,
+			Used:   period.Used,
 		}
-	}
-
-	// Calculate forever balance (limit - used)
-	foreverBalance := forever.Limit - forever.Used
-	if foreverBalance < 0 {
-		foreverBalance = 0
-	}
-
-	// Combined limit = monthly limit + forever balance
-	combinedLimit := monthly.Limit + foreverBalance
-
-	// Combined used = monthly used (forever credits are consumed, not "used" in the traditional sense)
-	combinedUsed := monthly.Used
-
-	// Remaining = combined limit - combined used
-	combinedRemaining := combinedLimit - combinedUsed
-	if combinedRemaining < 0 {
-		combinedRemaining = 0
-	}
-
-	return combinedQuota{
-		Limit:     combinedLimit,
-		Used:      combinedUsed,
-		Remaining: combinedRemaining,
-	}
-}
-
-// buildBreakdown builds the breakdown array respecting ConsumptionOrder.
-func (h *Handler) buildBreakdown(monthly, forever *goquota.Usage, _ string) []QuotaBreakdown {
-	breakdown := make([]QuotaBreakdown, 0, 2)
-
-	// Get ConsumptionOrder from tier config
-	// Since we can't access tier config directly, we'll use a default order
-	// Monthly first, then forever (most common pattern)
-	consumptionOrder := []goquota.PeriodType{goquota.PeriodTypeMonthly, goquota.PeriodTypeForever}
-
-	// Try to get actual ConsumptionOrder if possible
-	// For now, use default order
-
-	// Build breakdown in ConsumptionOrder
-	for _, periodType := range consumptionOrder {
-		switch periodType {
-		case goquota.PeriodTypeMonthly:
-			if monthly.Limit > 0 || monthly.Used > 0 || monthly.Limit == -1 {
-				bd := QuotaBreakdown{
-					Source: sourceMonthly,
-					Limit:  monthly.Limit,
-					Used:   monthly.Used,
-				}
-				breakdown = append(breakdown, bd)
-			}
-
-		case goquota.PeriodTypeForever:
-			foreverBalance := forever.Limit - forever.Used
-			if foreverBalance < 0 {
-				foreverBalance = 0
-			}
-			if forever.Limit > 0 || foreverBalance > 0 {
-				bd := QuotaBreakdown{
-					Source:  sourceForever,
-					Balance: foreverBalance,
-				}
-				// Also include limit and used for transparency
-				if forever.Limit > 0 {
-					bd.Limit = forever.Limit
-					bd.Used = forever.Used
-				}
-				breakdown = append(breakdown, bd)
-			}
+		if period.Period == goquota.PeriodTypeForever {
+			item.Balance = period.Remaining
 		}
+		breakdown = append(breakdown, item)
 	}
-
 	return breakdown
 }
 

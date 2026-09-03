@@ -1006,63 +1006,153 @@ func percentageOf(used, limit int) float64 {
 	return 0
 }
 
-// GetEffectiveQuota returns a merged Used/Limit/Remaining view across the tier's
-// ConsumptionOrder. Finite periods are summed; the first unlimited period (-1)
-// short-circuits to Limit/Remaining = -1. Periods with Limit==0 and Used==0 are
-// skipped (not configured / no forever balance).
-func (m *Manager) GetEffectiveQuota(ctx context.Context, userID, resource string) (*EffectiveQuota, error) {
+type orderedUsage struct {
+	period PeriodType
+	usage  *Usage
+}
+
+func (m *Manager) loadOrderedUsages(ctx context.Context, userID, resource string) (string, []orderedUsage, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return "", nil, ctx.Err()
 	default:
 	}
 	if userID == "" {
-		return nil, fmt.Errorf("userID is required")
+		return "", nil, fmt.Errorf("userID is required")
 	}
 	if resource == "" {
-		return nil, fmt.Errorf("resource is required")
+		return "", nil, fmt.Errorf("resource is required")
 	}
 
 	ent, err := m.GetEntitlement(ctx, userID)
 	tier := m.config.DefaultTier
 	if err != nil && err != ErrEntitlementNotFound {
-		return nil, err
+		return "", nil, err
 	}
 	if err == nil {
 		tier = ent.Tier
 	}
 
-	now := m.now(ctx)
-	eff := &EffectiveQuota{
-		UserID:    userID,
-		Resource:  resource,
-		Tier:      tier,
-		UpdatedAt: now,
-	}
-
-	for _, pt := range m.consumptionOrderForTier(tier) {
+	order := m.consumptionOrderForTier(tier)
+	usages := make([]orderedUsage, 0, len(order))
+	for _, pt := range order {
 		if pt == PeriodTypeAuto {
 			continue
 		}
 		usage, qErr := m.GetQuota(ctx, userID, resource, pt)
 		if qErr != nil {
-			return nil, qErr
+			return "", nil, qErr
 		}
 		if usage.Limit < 0 {
-			eff.Limit = -1
-			eff.Remaining = -1
-			// Keep any Used accumulated from earlier finite periods for observability.
-			return eff, nil
+			usages = append(usages, orderedUsage{period: pt, usage: usage})
+			return tier, usages, nil
 		}
 		if usage.Limit == 0 && usage.Used == 0 {
 			continue
 		}
-		eff.Used += usage.Used
-		eff.Limit += usage.Limit
+		// Recurring period with no configured cap: skip. Used can be a
+		// stale cache hit when daily and monthly share a date-only key.
+		if pt != PeriodTypeForever && usage.Limit == 0 {
+			continue
+		}
+		usages = append(usages, orderedUsage{period: pt, usage: usage})
+	}
+	return tier, usages, nil
+}
+
+func (m *Manager) appendForeverIfMissing(
+	ctx context.Context,
+	userID, resource string,
+	usages []orderedUsage,
+) ([]orderedUsage, error) {
+	for _, item := range usages {
+		if item.period == PeriodTypeForever {
+			return usages, nil
+		}
+	}
+	usage, err := m.GetQuota(ctx, userID, resource, PeriodTypeForever)
+	if err != nil {
+		return nil, err
+	}
+	if usage == nil || (usage.Limit == 0 && usage.Used == 0) {
+		return usages, nil
+	}
+	return append(usages, orderedUsage{period: PeriodTypeForever, usage: usage}), nil
+}
+
+// GetEffectiveQuota returns a merged ledger view across the tier's
+// ConsumptionOrder. Finite periods are summed; the first unlimited period (-1)
+// short-circuits to Limit/Remaining = -1. Periods with Limit==0 and Used==0 are
+// skipped (not configured / no forever balance). Limit stays stable while
+// forever bonus credits are spent.
+func (m *Manager) GetEffectiveQuota(ctx context.Context, userID, resource string) (*EffectiveQuota, error) {
+	tier, usages, err := m.loadOrderedUsages(ctx, userID, resource)
+	if err != nil {
+		return nil, err
 	}
 
+	eff := &EffectiveQuota{
+		UserID:    userID,
+		Resource:  resource,
+		Tier:      tier,
+		UpdatedAt: m.now(ctx),
+	}
+	for _, item := range usages {
+		if item.usage.Limit < 0 {
+			eff.Limit = -1
+			eff.Remaining = -1
+			return eff, nil
+		}
+		eff.Used += item.usage.Used
+		eff.Limit += item.usage.Limit
+	}
 	eff.Remaining = calculateRemaining(eff.Limit, eff.Used)
 	return eff, nil
+}
+
+// GetMeterQuota returns the UI-facing merge across ConsumptionOrder.
+// Recurring periods fill Used/Limit. Forever overflow adds only Remaining to
+// Limit so spent bonus credits drop off the meter instead of sitting filled.
+func (m *Manager) GetMeterQuota(ctx context.Context, userID, resource string) (*MeterQuota, error) {
+	tier, usages, err := m.loadOrderedUsages(ctx, userID, resource)
+	if err != nil {
+		return nil, err
+	}
+	usages, err = m.appendForeverIfMissing(ctx, userID, resource, usages)
+	if err != nil {
+		return nil, err
+	}
+
+	meter := &MeterQuota{
+		UserID:    userID,
+		Resource:  resource,
+		Tier:      tier,
+		UpdatedAt: m.now(ctx),
+		Periods:   make([]MeterPeriod, 0, len(usages)),
+	}
+	for _, item := range usages {
+		remaining := calculateRemaining(item.usage.Limit, item.usage.Used)
+		meter.Periods = append(meter.Periods, MeterPeriod{
+			Period:    item.period,
+			Used:      item.usage.Used,
+			Limit:     item.usage.Limit,
+			Remaining: remaining,
+		})
+		if item.usage.Limit < 0 {
+			meter.Limit = -1
+			meter.Remaining = -1
+			return meter, nil
+		}
+		if item.period == PeriodTypeForever {
+			meter.Limit += remaining
+			meter.Remaining += remaining
+			continue
+		}
+		meter.Used += item.usage.Used
+		meter.Limit += item.usage.Limit
+		meter.Remaining += remaining
+	}
+	return meter, nil
 }
 
 // RefundFromConsume refunds using the concrete period reported by ConsumeWithResult.

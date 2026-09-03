@@ -233,6 +233,61 @@ func TestHandler_GetUsage_HappyPath_MonthlyAndForever(t *testing.T) {
 	}
 }
 
+func TestHandler_GetUsage_SpentForeverDropsOffLimit(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+	userID := testUserID
+
+	_ = manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "pro",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	})
+	_ = manager.TopUpLimit(ctx, userID, "api_calls", 500, goquota.WithTopUpIdempotencyKey("topup-spent"))
+	_, _ = manager.Consume(ctx, userID, "api_calls", 1000, goquota.PeriodTypeForever)
+
+	handler, err := NewHandler(Config{
+		Manager:        manager,
+		GetUserID:      func(_ *http.Request) string { return userID },
+		KnownResources: []string{"api_calls"},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create handler: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/usage", http.NoBody)
+	w := httptest.NewRecorder()
+	handler.GetUsage(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var response UsageResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+	resourceUsage, ok := response.Resources["api_calls"]
+	if !ok {
+		t.Fatal("Expected 'api_calls' resource in response")
+	}
+	if resourceUsage.Used != 0 {
+		t.Errorf("Expected used 0, got %d", resourceUsage.Used)
+	}
+	if resourceUsage.Limit != 1000 {
+		t.Errorf("Expected monthly-only limit 1000 after spent bonus, got %d", resourceUsage.Limit)
+	}
+	if resourceUsage.Remaining != 1000 {
+		t.Errorf("Expected remaining 1000, got %d", resourceUsage.Remaining)
+	}
+	if len(resourceUsage.Breakdown) != 2 {
+		t.Fatalf("Expected 2 breakdown items, got %d", len(resourceUsage.Breakdown))
+	}
+	if resourceUsage.Breakdown[1].Source != sourceForever || resourceUsage.Breakdown[1].Balance != 0 {
+		t.Errorf("Expected spent forever balance 0, got %+v", resourceUsage.Breakdown[1])
+	}
+}
+
 func TestHandler_GetUsage_Unlimited_MonthlyUnlimited(t *testing.T) {
 	manager := newTestManager()
 	ctx := context.Background()

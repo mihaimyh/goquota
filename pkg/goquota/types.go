@@ -574,9 +574,9 @@ type ConsumeResult struct {
 	Period PeriodType
 }
 
-// EffectiveQuota is the merged view of a resource across a tier's ConsumptionOrder.
+// EffectiveQuota is the merged ledger view of a resource across a tier's ConsumptionOrder.
 // Used and Limit are sums of finite periods (Limit == -1 means unlimited overall).
-// Limit stays stable as forever/bonus credits are spent (unlike summing only Remaining).
+// Limit stays stable as forever/bonus credits are spent (unlike MeterQuota).
 type EffectiveQuota struct {
 	UserID    string
 	Resource  string
@@ -585,6 +585,28 @@ type EffectiveQuota struct {
 	Limit     int
 	Remaining int
 	UpdatedAt time.Time
+}
+
+// MeterPeriod is one ConsumptionOrder period in a UI meter breakdown.
+type MeterPeriod struct {
+	Period    PeriodType
+	Used      int
+	Limit     int
+	Remaining int
+}
+
+// MeterQuota is the UI-facing merge of a resource across ConsumptionOrder.
+// Recurring periods contribute Used and Limit. Forever overflow contributes
+// only Remaining to Limit, so spent bonus segments drop off the bar.
+type MeterQuota struct {
+	UserID    string
+	Resource  string
+	Tier      string
+	Used      int
+	Limit     int
+	Remaining int
+	UpdatedAt time.Time
+	Periods   []MeterPeriod
 }
 
 // RefundFromConsumeRequest refunds using the charged period from a ConsumeResult.

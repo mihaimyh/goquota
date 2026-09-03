@@ -29,7 +29,7 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Observability** - Built-in Prometheus metrics and structured logging
 - **HTTP Middlewares** - Easy integration with standard `net/http` servers, Gin, Echo, and Fiber frameworks with rate limit headers
 - **Billing Provider Integration** - Unified interface for RevenueCat, Stripe, and other payment providers with automatic webhook processing
-- **Standardized Usage API** - Pre-built HTTP endpoints for exposing quota state to frontend applications with unified monthly + forever credits view
+- **Standardized Usage API** - Pre-built HTTP endpoints for exposing quota state to frontend applications (`GetMeterQuota`: spent forever credits drop off the bar)
 
 ## Installation
 
@@ -719,12 +719,24 @@ _ = manager.RefundFromConsume(ctx, &goquota.RefundFromConsumeRequest{
 })
 ```
 
-**GetEffectiveQuota** - Merged meter across `ConsumptionOrder` (stable Limit while bonus credits are spent):
+**GetEffectiveQuota** vs **GetMeterQuota** — pick the merge that matches the caller:
+
+| Caller | Method | Limit while bonus is spent |
+| --- | --- | --- |
+| Ledger / billing / "how much was granted" | `GetEffectiveQuota` | Stays at daily + forever caps |
+| Progress bars / home meters / `/api/v1/me/usage` | `GetMeterQuota` | Shrinks as forever remaining drops |
+
+Both walk `ConsumptionOrder`. Unconfigured recurring periods (`Limit == 0`) are skipped. Unlimited (`-1`) short-circuits. `GetMeterQuota` also appends orphan forever credits (purchased balance after a tier drop) even when forever is not in `ConsumptionOrder`.
 
 ```go
 eff, err := manager.GetEffectiveQuota(ctx, "user123", "api_calls")
-// eff.Used / eff.Limit / eff.Remaining sum daily + forever (etc.)
-// Unlimited periods short-circuit to Limit/Remaining = -1
+// Daily 5/5 + spent forever 5/5 → Used=10 Limit=10 Remaining=0
+
+meter, err := manager.GetMeterQuota(ctx, "user123", "api_calls")
+// Same ledger → Used=5 Limit=5 Remaining=0 (spent bonus is gone from the bar)
+// Daily 0/5 + unused forever 0/5 → Used=0 Limit=10 Remaining=10
+// Daily 5/5 + leftover forever 2/5 → Used=5 Limit=8 Remaining=3
+// meter.Periods is the daily/monthly/forever breakdown.
 ```
 
 **GetUsageAfterConsume** - Convenience wrapper:
@@ -993,7 +1005,8 @@ The `pkg/api` package provides a standardized HTTP API for exposing user quota s
 
 ### Features
 
-- **Unified Quota View**: Combines monthly limits and forever credits into a single JSON response
+- **Unified Quota View**: `GetMeterQuota` merge of recurring + forever into a single JSON response
+- **Spent bonus drops off**: forever remaining widens Limit; spent forever credits shrink the bar back to the recurring cap
 - **Orphaned Credits Detection**: Automatically discovers and displays purchased credits even when users downgrade tiers
 - **Unlimited Quota Handling**: Properly handles unlimited (-1) quotas
 - **Resource Filtering**: Optional resource filtering for performance optimization
@@ -1050,7 +1063,7 @@ The API returns a standardized JSON response:
 }
 ```
 
-The breakdown shows quota sources (monthly, forever) with their individual limits, usage, and balances, making it easy for frontend applications to display progress bars and usage details.
+Totals come from `GetMeterQuota`: recurring `used` fills the bar, forever adds only remaining to `limit`. The breakdown lists each source (daily/monthly/forever) with its own limit, used, and forever `balance`. Use `GetEffectiveQuota` in application code when you need the ledger (stable Limit) instead of the meter.
 
 ### Key Benefits
 
@@ -1445,6 +1458,8 @@ See the [examples](examples/) directory:
 Consume(ctx, userID, resource, amount, periodType, opts ...ConsumeOption) (int, error)
 Refund(ctx, req *RefundRequest) error
 GetQuota(ctx, userID, resource, periodType) (*Usage, error)
+GetEffectiveQuota(ctx, userID, resource) (*EffectiveQuota, error) // ledger merge
+GetMeterQuota(ctx, userID, resource) (*MeterQuota, error)         // UI meter merge
 
 // Management
 SetEntitlement(ctx, entitlement) error

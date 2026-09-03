@@ -4,7 +4,8 @@ The `pkg/api` package provides a standardized HTTP API for exposing user quota s
 
 ## Features
 
-- **Unified Quota View**: Combines monthly limits and forever credits into a single, easy-to-consume JSON response
+- **Unified Quota View**: `GetMeterQuota` merge of recurring + forever into a single JSON response
+- **Spent bonus drops off**: forever remaining widens `limit`; spent forever credits shrink the bar back to the recurring cap
 - **Orphaned Credits Detection**: Automatically discovers and displays purchased credits even when user downgrades to a tier without that resource
 - **Unlimited Quota Handling**: Properly handles unlimited (-1) quotas
 - **Resource Filtering**: Optional resource filtering for performance optimization
@@ -139,15 +140,17 @@ The API returns a JSON response with the following structure:
 - **tier**: Current subscription tier
 - **status**: One of "active", "expired", or "default"
 - **resources**: Map of resource names to quota information
-  - **limit**: Combined limit (monthly + forever credits, or -1 for unlimited)
-  - **used**: Combined used amount (from monthly quota)
-  - **remaining**: Combined remaining quota (or -1 for unlimited)
+  - **limit**: Meter limit (recurring cap + forever *remaining*, or -1 for unlimited)
+  - **used**: Recurring used amount (forever spend does not stay on the bar)
+  - **remaining**: Meter remaining (or -1 for unlimited)
   - **reset_at**: Reset time for monthly quota (ISO 8601 format)
   - **breakdown**: Array of quota sources
     - **source**: "monthly", "forever", or "daily"
     - **limit**: Limit for this source (-1 for unlimited)
     - **used**: Used amount for this source
     - **balance**: Balance for forever credits (limit - used)
+
+Totals use `GetMeterQuota`. For a ledger view (stable Limit while bonus is spent), call `Manager.GetEffectiveQuota` in application code instead of this HTTP API.
 
 ## Resource Filtering
 
