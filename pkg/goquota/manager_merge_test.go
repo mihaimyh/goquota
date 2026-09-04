@@ -222,3 +222,21 @@ func TestManagerDrainRemaining_MissingUsage(t *testing.T) {
 		t.Fatalf("drain missing usage: %v", err)
 	}
 }
+
+func TestSetUsageGetQuota_MonthlyAgreesWithZeroSubscriptionStart(t *testing.T) {
+	mgr, _ := testMergeManager(t)
+	ctx := context.Background()
+	if err := mgr.SetEntitlement(ctx, &goquota.Entitlement{UserID: "u-monthly", Tier: "explorer"}); err != nil {
+		t.Fatalf("SetEntitlement: %v", err)
+	}
+	if err := mgr.SetUsage(ctx, "u-monthly", "scans", goquota.PeriodTypeMonthly, 10); err != nil {
+		t.Fatalf("SetUsage: %v", err)
+	}
+	usage, err := mgr.GetQuota(ctx, "u-monthly", "scans", goquota.PeriodTypeMonthly)
+	if err != nil {
+		t.Fatalf("GetQuota: %v", err)
+	}
+	if usage == nil || usage.Used != 10 {
+		t.Fatalf("used=%v want 10", usage)
+	}
+}

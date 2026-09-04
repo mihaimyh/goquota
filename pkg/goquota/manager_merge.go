@@ -10,7 +10,10 @@ func periodForType(now time.Time, ent *Entitlement, periodType PeriodType) (Peri
 	switch periodType {
 	case PeriodTypeMonthly:
 		var start, end time.Time
-		if ent != nil && !ent.SubscriptionStartDate.IsZero() {
+		// Match GetQuota/Consume: an existing entitlement (even with a zero
+		// SubscriptionStartDate) owns the cycle. Only a missing entitlement
+		// falls back to today's start-of-day.
+		if ent != nil {
 			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, now)
 		} else {
 			start, end = CurrentCycleForStart(startOfDayUTC(now), now)
