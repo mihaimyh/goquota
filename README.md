@@ -19,7 +19,7 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Refund Support** - Gracefully handle failed operations with idempotency and audit trails
 - **Rate Limiting** - Time-based request frequency limits (requests per second/minute/hour) with token bucket and sliding window algorithms
 - **Soft Limits & Warnings** - Trigger callbacks when usage approaches limits (e.g. 80%)
-- **Admin Operations** - Manual quota management for incident response (SetUsage, GrantOneTimeCredit, ResetUsage)
+- **Admin Operations** - Manual quota management for incident response (SetUsage, GrantOneTimeCredit, ResetUsage, DrainRemaining, MergeUser)
 - **Dry-Run Mode** - Test quota rules without blocking traffic for safe deployments
 - **Audit Trail** - Comprehensive logging of all quota changes for compliance and debugging
 - **Clock Skew Protection** - Uses storage server time to prevent quota double-spending at reset boundaries
@@ -632,6 +632,31 @@ err := manager.ResetUsage(ctx, "user123", "api_calls", goquota.PeriodTypeMonthly
 err = manager.ResetUsage(ctx, "user123", "api_calls", goquota.PeriodTypeForever)
 ```
 
+**Drain Remaining** - Set `Limit = Used` without touching `Used` (single document, all backends):
+
+```go
+err := manager.DrainRemaining(ctx, "guest-uid", "scans", goquota.PeriodTypeForever)
+```
+
+**Merge User** - Atomically move quota from one identity to another. Implemented on
+memory, Firestore, and Postgres. Redis and tiered (Redis+Firestore) return
+`ErrUnsupportedOperation`.
+
+```go
+result, err := manager.MergeUser(ctx, &goquota.MergeUserRequest{
+    SourceUserID:   "guest-uid",
+    TargetUserID:   "auth-uid",
+    Resources:      []string{"scans", "chat"},
+    Periods:        []goquota.PeriodType{goquota.PeriodTypeDaily, goquota.PeriodTypeForever},
+    IdempotencyKey: "migrate-guest-uid-auth-uid",
+    SealSource:     true, // 30-day tombstone; sealed UIDs cannot Consume
+})
+```
+
+Daily/monthly: target `Used` increases by source `Used`, then source `Used` is zeroed.
+Forever: only remaining credits (`Limit - Used`) are added to the target limit; source is drained (`Limit = Used`).
+Merge idempotency is durable (not a 24h consume TTL).
+
 All admin operations are automatically logged if an audit logger is configured.
 
 ### Dry-Run / Shadow Mode
@@ -814,7 +839,7 @@ for _, log := range logs {
 
 - Quota consumption (with idempotency key)
 - Refunds (with reason)
-- Admin operations (SetUsage, GrantOneTimeCredit, ResetUsage)
+- Admin operations (SetUsage, GrantOneTimeCredit, ResetUsage, DrainRemaining, MergeUser)
 - Tier changes (with proration details)
 
 ### Clock Skew Protection

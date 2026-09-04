@@ -39,6 +39,19 @@ var (
 	// ErrIdempotencyKeyExists is returned when an idempotency key already exists
 	// indicating the operation was already processed
 	ErrIdempotencyKeyExists = errors.New("idempotency key already exists - operation already processed")
+
+	// ErrUnsupportedOperation is returned when the storage backend cannot
+	// implement the requested operation (for example MergeUser on Redis or tiered storage).
+	ErrUnsupportedOperation = errors.New("unsupported operation")
+
+	// ErrSameUser is returned when MergeUser source and target are the same identity.
+	ErrSameUser = errors.New("source and target user are the same")
+
+	// ErrUserSealed is returned when the identity has an active migration tombstone.
+	ErrUserSealed = errors.New("user identity is sealed")
+
+	// ErrInvalidMergeRequest is returned when MergeUser is missing required fields.
+	ErrInvalidMergeRequest = errors.New("invalid merge request")
 )
 
 // RateLimitExceededError provides detailed information about a rate limit exceeded error

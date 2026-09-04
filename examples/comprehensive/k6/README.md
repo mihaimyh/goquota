@@ -13,6 +13,52 @@ This directory contains k6 load testing scripts to validate all goquota features
 
 ## Test Scripts
 
+### 0. `guest-elevation-merge.js` - FlickAI guest → auth merge
+
+**Purpose**: Stress `MergeUser` / `DrainRemaining` the way Portmoneo elevates an anonymous guest onto a Google account.
+
+Uses the **Postgres or Firestore** merge API (`/merge/*`), not tiered Redis+Postgres (tiered cannot commit a cross-UID merge).
+
+**Firestore emulator** (host `:8080` is the emulator, so publish the example on another port):
+
+```bash
+MERGE_STORAGE=firestore \
+FIRESTORE_EMULATOR_HOST=host.docker.internal:8080 \
+FIRESTORE_PROJECT_ID=play-console-api-access-452212 \
+EXAMPLE_HTTP_PORT=18080 EXAMPLE_METRICS_PORT=19090 \
+docker compose up -d --build comprehensive-example
+```
+
+**What it hits:**
+- Profile-setup forever credits (`receipt_chat` +5, `receipt_scan` +1)
+- Guest daily + forever consume, then atomic merge + 30-day source seal
+- Durable idempotency replay and 8-way retry storms
+- Sign-out churn: a second guest absorbed onto the same auth UID
+- Ledger invariants (daily used summed, forever remaining-only, no double-add)
+
+```bash
+docker compose up -d --build comprehensive-example
+# Git Bash: MSYS_NO_PATHCONV=1  and --no-deps so compose does not rebind host :8080
+MSYS_NO_PATHCONV=1 docker compose run --rm --no-deps k6-load-test run /scripts/guest-elevation-merge.js
+```
+
+Compose sets `K6_VUS`/`K6_DURATION`, which runs elevation-only. For the full scenario set (retry storm + abuse churn):
+
+```bash
+docker run --rm --network goquota_default \
+  -v "$PWD/examples/comprehensive/k6:/scripts" \
+  -e BASE_URL=http://comprehensive-example:8080 \
+  grafana/k6:latest run /scripts/guest-elevation-merge.js
+```
+
+**Heavier elevation-only run:**
+```bash
+MSYS_NO_PATHCONV=1 docker compose run --rm --no-deps \
+  -e K6_VUS=40 -e K6_DURATION=60s k6-load-test run /scripts/guest-elevation-merge.js
+```
+
+Thresholds fail the test on `ledger_mismatch`, `sealed_consume_allowed`, or `merge_replay_miss`.
+
 ### 1. `load-test.js` - Comprehensive Load Test
 
 **Purpose**: Full integration test with mixed workloads across all tiers and endpoints.

@@ -37,7 +37,7 @@ func setupTestStorage(t *testing.T) *Storage {
 	}
 
 	// Clean up test data
-	_, _ = storage.pool.Exec(ctx, "TRUNCATE TABLE entitlements, quota_usage, consumption_records, refund_records CASCADE")
+	_, _ = storage.pool.Exec(ctx, "TRUNCATE TABLE entitlements, quota_usage, consumption_records, refund_records, merge_records, identity_seals CASCADE")
 
 	return storage
 }

@@ -59,11 +59,16 @@ services:
       dockerfile: examples/comprehensive/Dockerfile
     container_name: goquota-comprehensive-example
     ports:
-      - "8080:8080"  # HTTP server
-      - "9090:9090"  # Prometheus metrics
+      - "${EXAMPLE_HTTP_PORT:-8080}:8080"  # HTTP server
+      - "${EXAMPLE_METRICS_PORT:-9090}:9090"  # Prometheus metrics
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - REDIS_HOST=redis:6379
       - POSTGRES_DSN=postgres://postgres:postgres@postgres:5432/goquota?sslmode=disable
+      - MERGE_STORAGE=${MERGE_STORAGE:-postgres}
+      - FIRESTORE_EMULATOR_HOST=${FIRESTORE_EMULATOR_HOST:-}
+      - FIRESTORE_PROJECT_ID=${FIRESTORE_PROJECT_ID:-play-console-api-access-452212}
       # RevenueCat billing integration (optional)
       # Set these environment variables on the host before running docker-compose
       - REVENUECAT_WEBHOOK_SECRET=${REVENUECAT_WEBHOOK_SECRET:-}
@@ -101,6 +106,7 @@ services:
     # Default command can be overridden when running:
     # docker-compose run --rm k6-load-test run /scripts/load-test.js
     # docker-compose run --rm k6-load-test run /scripts/tiered-storage-edge-cases.js
+    # docker-compose run --rm k6-load-test run /scripts/guest-elevation-merge.js
     command: run /scripts/load-test.js
 
   prometheus:

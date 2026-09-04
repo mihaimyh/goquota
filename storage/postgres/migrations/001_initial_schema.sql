@@ -26,7 +26,7 @@ CREATE TABLE quota_usage (
     limit_amount BIGINT NOT NULL,
     tier VARCHAR(50) NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(user_id, resource, period_start)
+    UNIQUE(user_id, resource, period_type, period_start)
 );
 
 CREATE INDEX idx_quota_usage_user_resource ON quota_usage(user_id, resource);

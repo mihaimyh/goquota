@@ -53,7 +53,7 @@ func main() {
 	// 2. Setup Storage (Tiered: Redis Hot + PostgreSQL Cold)
 	// ============================================================
 	fmt.Println("2. Setting up tiered storage backends...")
-	
+
 	// 2a. Setup Hot Store (Redis)
 	redisHost := os.Getenv("REDIS_HOST")
 	if redisHost == "" {
@@ -90,7 +90,7 @@ func main() {
 	if postgresDSN == "" {
 		postgresDSN = "postgres://postgres:postgres@localhost:5432/goquota?sslmode=disable"
 	}
-	
+
 	pgConfig := postgresStorage.DefaultConfig()
 	pgConfig.ConnectionString = postgresDSN
 	pgConfig.CleanupEnabled = true
@@ -540,6 +540,17 @@ func main() {
 		c.Next()
 	})
 
+	mergeStore, mergeBackend, err := openMergeStorage(ctx, coldStore)
+	if err != nil {
+		log.Fatalf("Failed to open merge storage: %v", err)
+	}
+	mergeMgr, err := newFlickAIMergeManager(ctx, mergeStore)
+	if err != nil {
+		log.Fatalf("Failed to create merge manager: %v", err)
+	}
+	registerMergeRoutes(r, mergeMgr, mergeBackend)
+	fmt.Printf("   ✓ MergeUser backend: %s\n", mergeBackend)
+
 	// Health check endpoint
 	r.GET("/health", func(c *gin.Context) {
 		c.String(http.StatusOK, "OK")
@@ -775,6 +786,7 @@ func main() {
 	fmt.Println("   ✓ HTTP server configured with:")
 	fmt.Println("     - Health check endpoint: GET /health")
 	fmt.Println("     - Quota status endpoint: GET /api/quota")
+	fmt.Println("     - Guest elevation (Postgres MergeUser): POST /merge/merge, GET /merge/snapshot")
 	fmt.Println("     - Protected endpoints: GET /api/data, POST /api/write, POST /api/expensive")
 	fmt.Println("     - Dynamic cost calculation")
 	fmt.Println("     - Custom error handlers")

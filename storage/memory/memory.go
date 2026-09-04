@@ -37,6 +37,7 @@ type Storage struct {
 	refunds        map[string]*goquota.RefundRecord      // keyed by idempotency key
 	consumptions   map[string]*goquota.ConsumptionRecord // keyed by idempotency key
 	topUps         map[string]bool                       // keyed by idempotency key (for idempotency checks)
+	mergeRecords   map[string]*goquota.MergeUserResult   // keyed by idempotency key (durable)
 	tokenBuckets   map[string]*tokenBucketState          // keyed by userID:resource
 	slidingWindows map[string]*slidingWindowState        // keyed by userID:resource
 }
@@ -56,6 +57,7 @@ func New() *Storage {
 		refunds:        make(map[string]*goquota.RefundRecord),
 		consumptions:   make(map[string]*goquota.ConsumptionRecord),
 		topUps:         make(map[string]bool),
+		mergeRecords:   make(map[string]*goquota.MergeUserResult),
 		tokenBuckets:   make(map[string]*tokenBucketState),
 		slidingWindows: make(map[string]*slidingWindowState),
 	}

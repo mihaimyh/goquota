@@ -794,3 +794,35 @@ func TestStorage_SubtractLimit_WriteThrough(t *testing.T) {
 	assert.NotNil(t, coldUsage)
 	assert.Equal(t, 70, coldUsage.Limit)
 }
+
+func TestStorage_DoesNotImplementUserMerger(t *testing.T) {
+	hot := memory.New()
+	cold := memory.New()
+	storage, err := New(Config{Hot: hot, Cold: cold})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storage.Close() })
+
+	if _, ok := any(storage).(goquota.UserMerger); ok {
+		t.Fatal("tiered storage must not implement UserMerger")
+	}
+}
+
+func TestStorage_DrainRemaining_WriteThrough(t *testing.T) {
+	hot := memory.New()
+	cold := memory.New()
+	storage, err := New(Config{Hot: hot, Cold: cold})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storage.Close() })
+
+	ctx := context.Background()
+	period := goquota.Period{Type: goquota.PeriodTypeForever, Start: time.Now().UTC()}
+	usage := &goquota.Usage{Used: 2, Limit: 9, Period: period}
+	require.NoError(t, storage.SetUsage(ctx, "u1", "scans", usage, period))
+	require.NoError(t, storage.DrainRemaining(ctx, "u1", "scans", period))
+
+	coldUsage, err := cold.GetUsage(ctx, "u1", "scans", period)
+	require.NoError(t, err)
+	require.NotNil(t, coldUsage)
+	assert.Equal(t, 2, coldUsage.Used)
+	assert.Equal(t, 2, coldUsage.Limit)
+}

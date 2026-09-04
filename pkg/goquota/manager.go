@@ -5,7 +5,7 @@
 //   - Multiple quota types: daily, monthly, and forever (pre-paid credits)
 //   - Pluggable storage: Redis (recommended), PostgreSQL, Firestore, In-Memory
 //   - Rate limiting: Token bucket and sliding window algorithms
-//   - Admin operations: SetUsage, GrantOneTimeCredit, ResetUsage
+//   - Admin operations: SetUsage, GrantOneTimeCredit, ResetUsage, DrainRemaining, MergeUser
 //   - Dry-run mode: Test quota rules without blocking traffic
 //   - Audit trail: Comprehensive logging for compliance
 //   - Clock skew protection: Uses storage server time for consistency
@@ -536,6 +536,10 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 
 	// Get current time (using TimeSource if available)
 	now := m.now(ctx)
+
+	if err == nil && ent.IsSealed(now) {
+		return 0, ErrUserSealed
+	}
 
 	// Handle cascading consumption for PeriodTypeAuto
 	if periodType == PeriodTypeAuto {
@@ -1971,28 +1975,9 @@ func (m *Manager) SetUsage(ctx context.Context, userID, resource string, periodT
 	// Get current time (using TimeSource if available)
 	now := m.now(ctx)
 
-	// Calculate period based on type
-	var period Period
-	switch periodType {
-	case PeriodTypeMonthly:
-		var start, end time.Time
-		if err == nil && ent != nil {
-			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, now)
-		} else {
-			start, end = CurrentCycleForStart(startOfDayUTC(now), now)
-		}
-		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
-
-	case PeriodTypeDaily:
-		period = dailyPeriodForEntitlement(now, ent)
-
-	case PeriodTypeForever:
-		start := startOfDayUTC(now)
-		end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
-		period = Period{Start: start, End: end, Type: PeriodTypeForever}
-
-	default:
-		return ErrInvalidPeriod
+	period, perr := periodForType(now, entitlementOrNil(ent, err), periodType)
+	if perr != nil {
+		return perr
 	}
 
 	// Get limit for resource

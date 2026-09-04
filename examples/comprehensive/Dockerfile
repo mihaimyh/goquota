@@ -15,7 +15,7 @@ COPY . .
 
 # Build the comprehensive example
 WORKDIR /build/examples/comprehensive
-RUN CGO_ENABLED=0 GOOS=linux go build -o comprehensive-example main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o comprehensive-example .
 
 # Final stage
 FROM alpine:latest

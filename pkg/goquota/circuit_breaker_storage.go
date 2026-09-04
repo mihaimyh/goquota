@@ -131,3 +131,29 @@ func (s *CircuitBreakerStorage) SubtractLimit(
 		return s.storage.SubtractLimit(ctx, userID, resource, amount, period, idempotencyKey)
 	})
 }
+
+// DrainRemaining forwards to the inner storage when it implements RemainingDrainer.
+func (s *CircuitBreakerStorage) DrainRemaining(ctx context.Context, userID, resource string, period Period) error {
+	drainer, ok := s.storage.(RemainingDrainer)
+	if !ok {
+		return ErrUnsupportedOperation
+	}
+	return s.cb.Execute(ctx, func() error {
+		return drainer.DrainRemaining(ctx, userID, resource, period)
+	})
+}
+
+// MergeUser forwards to the inner storage when it implements UserMerger.
+func (s *CircuitBreakerStorage) MergeUser(ctx context.Context, req *StorageMergeRequest) (*MergeUserResult, error) {
+	merger, ok := s.storage.(UserMerger)
+	if !ok {
+		return nil, ErrUnsupportedOperation
+	}
+	var result *MergeUserResult
+	err := s.cb.Execute(ctx, func() error {
+		var e error
+		result, e = merger.MergeUser(ctx, req)
+		return e
+	})
+	return result, err
+}

@@ -62,6 +62,26 @@ type Entitlement struct {
 	UpdatedAt             time.Time
 	// Timezone is the user's IANA timezone for daily quota boundaries (optional).
 	Timezone string
+
+	// Sealed is true when this identity was tombstoned after a successful MergeUser.
+	// Consume must reject an active seal. Expiry is evaluated by IsSealed.
+	Sealed bool
+	// MigratedTo is the target user ID written with the tombstone (optional).
+	MigratedTo string
+	// ExpireAt is when the tombstone stops sealing this identity. Nil means permanent.
+	ExpireAt *time.Time
+}
+
+// IsSealed reports whether the identity is currently sealed at now.
+// A tombstone with ExpireAt in the past (now >= ExpireAt) is not sealed.
+func (e *Entitlement) IsSealed(now time.Time) bool {
+	if e == nil || !e.Sealed {
+		return false
+	}
+	if e.ExpireAt == nil {
+		return true
+	}
+	return now.Before(*e.ExpireAt)
 }
 
 // Usage represents quota usage for a specific resource and period

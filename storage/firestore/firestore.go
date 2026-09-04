@@ -26,6 +26,7 @@ type Storage struct {
 	timeQueryCollection    string
 	usagePeriodsSub        string
 	rateLimitTimestampsSub string
+	mergeRecordsCollection string
 }
 
 // Now returns the current time from Firestore server.
@@ -112,6 +113,10 @@ type Config struct {
 	// RateLimitTimestampsSubCollection is the sub-collection name for rate limit timestamps
 	// Default: "timestamps"
 	RateLimitTimestampsSubCollection string
+
+	// MergeRecordsCollection is the collection for durable MergeUser idempotency records.
+	// Default: "billing_merge_records"
+	MergeRecordsCollection string
 }
 
 // New creates a new Firestore storage adapter
@@ -145,6 +150,9 @@ func New(client *firestore.Client, config Config) (*Storage, error) {
 	if config.RateLimitTimestampsSubCollection == "" {
 		config.RateLimitTimestampsSubCollection = "timestamps"
 	}
+	if config.MergeRecordsCollection == "" {
+		config.MergeRecordsCollection = "billing_merge_records"
+	}
 
 	return &Storage{
 		client:                 client,
@@ -156,6 +164,7 @@ func New(client *firestore.Client, config Config) (*Storage, error) {
 		timeQueryCollection:    config.TimeQueryCollection,
 		usagePeriodsSub:        config.UsagePeriodsSubCollection,
 		rateLimitTimestampsSub: config.RateLimitTimestampsSubCollection,
+		mergeRecordsCollection: config.MergeRecordsCollection,
 	}, nil
 }
 
@@ -185,6 +194,12 @@ func (s *Storage) GetEntitlement(ctx context.Context, userID string) (*goquota.E
 
 	if expiresAt, ok := data["expiresAt"].(time.Time); ok && !expiresAt.IsZero() {
 		ent.ExpiresAt = &expiresAt
+	}
+
+	ent.Sealed = getBool(data, "sealed")
+	ent.MigratedTo = getString(data, "migratedTo")
+	if expireAt := getTime(data, "expireAt"); !expireAt.IsZero() {
+		ent.ExpireAt = &expireAt
 	}
 
 	return ent, nil
@@ -1048,4 +1063,11 @@ func getTime(data map[string]interface{}, key string) time.Time {
 		return v
 	}
 	return time.Time{}
+}
+
+func getBool(data map[string]interface{}, key string) bool {
+	if v, ok := data[key].(bool); ok {
+		return v
+	}
+	return false
 }
