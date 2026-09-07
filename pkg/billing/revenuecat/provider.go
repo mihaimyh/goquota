@@ -227,13 +227,6 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := strings.TrimSpace(payload.Event.AppUserID)
-	if userID == "" {
-		http.Error(w, "missing user id", http.StatusBadRequest)
-		p.metrics.RecordWebhookError(providerName, "missing_user_id")
-		return
-	}
-
 	eventType := strings.TrimSpace(payload.Event.Type)
 	if eventType == "" {
 		eventType = "UNKNOWN"
@@ -247,6 +240,31 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		p.metrics.RecordWebhookEvent(providerName, "TEST", "success")
 		p.metrics.RecordWebhookProcessingDuration(providerName, "TEST", time.Since(startTime))
+		return
+	}
+
+	// TRANSFER omits app_user_id; identities are transferred_from / transferred_to.
+	if strings.EqualFold(eventType, "TRANSFER") {
+		if err := p.processTransferEvent(r.Context(), &payload, body); err != nil {
+			http.Error(w, "failed to process webhook", http.StatusInternalServerError)
+			p.metrics.RecordWebhookEvent(providerName, eventType, "error")
+			p.metrics.RecordWebhookError(providerName, "processing_error")
+			p.metrics.RecordWebhookProcessingDuration(providerName, eventType, time.Since(startTime))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte("ok")); err != nil {
+			return
+		}
+		p.metrics.RecordWebhookEvent(providerName, eventType, "success")
+		p.metrics.RecordWebhookProcessingDuration(providerName, eventType, time.Since(startTime))
+		return
+	}
+
+	userID := strings.TrimSpace(payload.Event.AppUserID)
+	if userID == "" {
+		http.Error(w, "missing user id", http.StatusBadRequest)
+		p.metrics.RecordWebhookError(providerName, "missing_user_id")
 		return
 	}
 
