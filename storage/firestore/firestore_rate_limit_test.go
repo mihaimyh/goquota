@@ -56,10 +56,13 @@ func TestStorage_CheckRateLimit_TokenBucket_Exceeded(t *testing.T) {
 		UserID:    userID,
 		Resource:  "api_calls",
 		Algorithm: "token_bucket",
-		Rate:      10,
-		Window:    time.Second,
-		Burst:     10,
-		Now:       time.Now().UTC(),
+		Rate: 10,
+		// Long window so the 11 transactions below cannot refill a token
+		// (refill = floor(rate*elapsed/window) = 0), keeping the denial
+		// assertion deterministic under load.
+		Window: time.Hour,
+		Burst:  10,
+		Now:    time.Now().UTC(),
 	}
 
 	// Consume all tokens
