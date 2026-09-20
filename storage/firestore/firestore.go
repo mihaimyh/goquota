@@ -376,7 +376,7 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 // ApplyTierChange implements goquota.Storage with prorated quota adjustment
 func (s *Storage) ApplyTierChange(ctx context.Context, req *goquota.TierChangeRequest) error {
 	// Calculate prorated limit (already done by Manager, just store it)
-	doc := s.usageDoc(req.UserID, "audio_seconds", req.Period) // Assuming audio_seconds resource
+	doc := s.usageDoc(req.UserID, req.Resource, req.Period)
 
 	return s.client.RunTransaction(ctx, func(_ context.Context, tx *firestore.Transaction) error {
 		snap, err := tx.Get(doc)
@@ -396,7 +396,7 @@ func (s *Storage) ApplyTierChange(ctx context.Context, req *goquota.TierChangeRe
 			"tier":          req.NewTier,
 			"previousTier":  req.OldTier,
 			"tierChangedAt": now,
-			"resource":      "audio_seconds",
+			"resource":      req.Resource,
 			"updatedAt":     now,
 		}, firestore.MergeAll)
 	})

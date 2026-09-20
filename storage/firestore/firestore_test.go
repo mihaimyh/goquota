@@ -1560,3 +1560,60 @@ func TestFirestore_IdempotencyKeyTTL(t *testing.T) {
 		}
 	})
 }
+
+// TestApplyTierChange_NonAudioResource_Firestore is a regression test for the
+// hardcoded "audio_seconds" resource bug in ApplyTierChange: the operation must
+// target req.Resource and must not create a phantom audio_seconds document.
+func TestApplyTierChange_NonAudioResource_Firestore(t *testing.T) {
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	entColl, usageColl := getTestCollections("apply_tier_non_audio")
+	store, err := New(client, Config{
+		EntitlementsCollection: entColl,
+		UsageCollection:        usageColl,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Type:  goquota.PeriodTypeMonthly,
+		Start: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:   time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+	}
+
+	err = store.ApplyTierChange(ctx, &goquota.TierChangeRequest{
+		UserID:      "tier_user",
+		Resource:    "videos",
+		OldTier:     "free",
+		NewTier:     "pro",
+		Period:      period,
+		OldLimit:    10,
+		NewLimit:    100,
+		CurrentUsed: 3,
+	})
+	if err != nil {
+		t.Fatalf("ApplyTierChange failed: %v", err)
+	}
+
+	usage, err := store.GetUsage(ctx, "tier_user", "videos", period)
+	if err != nil {
+		t.Fatalf("GetUsage(videos) failed: %v", err)
+	}
+	if usage == nil {
+		t.Fatal("ApplyTierChange(resource=videos) did not create the videos usage record (resource was hardcoded)")
+	}
+	if usage.Limit != 100 {
+		t.Errorf("videos limit = %d, want 100", usage.Limit)
+	}
+
+	audio, err := store.GetUsage(ctx, "tier_user", "audio_seconds", period)
+	if err != nil {
+		t.Fatalf("GetUsage(audio_seconds) failed: %v", err)
+	}
+	if audio != nil {
+		t.Fatalf("ApplyTierChange created a phantom audio_seconds record: %+v", audio)
+	}
+}

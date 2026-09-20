@@ -1348,3 +1348,60 @@ func TestStorage_EdgeCases(t *testing.T) {
 		}
 	})
 }
+
+// TestApplyTierChange_NonAudioResource is a regression test for the hardcoded
+// "audio_seconds" resource bug: ApplyTierChange must operate on req.Resource and
+// must not create a phantom audio_seconds record.
+func TestApplyTierChange_NonAudioResource(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.Close()
+
+	storage, err := New(client, DefaultConfig())
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Type:  goquota.PeriodTypeMonthly,
+		Start: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:   time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+	}
+
+	err = storage.ApplyTierChange(ctx, &goquota.TierChangeRequest{
+		UserID:      "tier_user",
+		Resource:    "videos",
+		OldTier:     "free",
+		NewTier:     "pro",
+		Period:      period,
+		OldLimit:    10,
+		NewLimit:    100,
+		CurrentUsed: 3,
+	})
+	if err != nil {
+		t.Fatalf("ApplyTierChange failed: %v", err)
+	}
+
+	usage, err := storage.GetUsage(ctx, "tier_user", "videos", period)
+	if err != nil {
+		t.Fatalf("GetUsage(videos) failed: %v", err)
+	}
+	if usage == nil {
+		t.Fatal("ApplyTierChange(resource=videos) did not create the videos usage record (resource was hardcoded)")
+	}
+	if usage.Limit != 100 {
+		t.Errorf("videos limit = %d, want 100", usage.Limit)
+	}
+	if usage.Resource != "videos" {
+		t.Errorf("videos usage resource = %q, want %q", usage.Resource, "videos")
+	}
+
+	// The hardcoded path must not create a phantom audio_seconds record.
+	audio, err := storage.GetUsage(ctx, "tier_user", "audio_seconds", period)
+	if err != nil {
+		t.Fatalf("GetUsage(audio_seconds) failed: %v", err)
+	}
+	if audio != nil {
+		t.Fatalf("ApplyTierChange created a phantom audio_seconds record: %+v", audio)
+	}
+}

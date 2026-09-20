@@ -614,12 +614,12 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 
 // ApplyTierChange implements goquota.Storage
 func (s *Storage) ApplyTierChange(ctx context.Context, req *goquota.TierChangeRequest) error {
-	key := s.usageKey(req.UserID, "audio_seconds", req.Period)
+	key := s.usageKey(req.UserID, req.Resource, req.Period)
 
 	// Create updated usage object
 	usage := &goquota.Usage{
 		UserID:    req.UserID,
-		Resource:  "audio_seconds",
+		Resource:  req.Resource,
 		Used:      req.CurrentUsed,
 		Limit:     req.NewLimit,
 		Period:    req.Period,
