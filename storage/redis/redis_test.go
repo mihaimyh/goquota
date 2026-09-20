@@ -1405,3 +1405,91 @@ func TestApplyTierChange_NonAudioResource(t *testing.T) {
 		t.Fatalf("ApplyTierChange created a phantom audio_seconds record: %+v", audio)
 	}
 }
+
+// TestAddLimit_CreditsVisibleAndSpendable is a regression test for STORAGE-5:
+// AddLimit wrote only the numeric "limit" hash field while GetUsage required the
+// "data" JSON payload, so top-up credits were invisible and unspendable. Covers a
+// pure top-up, top-up-after-consume (stale payload limit), and 50 concurrent
+// top-ups synchronized by a barrier.
+func TestAddLimit_CreditsVisibleAndSpendable(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.Close()
+
+	storage, err := New(client, DefaultConfig())
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+	ctx := context.Background()
+	period := goquota.Period{Type: goquota.PeriodTypeForever, Start: time.Now().UTC()}
+
+	// 1. A pure top-up must be visible via GetUsage.
+	if err := storage.AddLimit(ctx, "credit_user", "credits", 50, period, "topup-1"); err != nil {
+		t.Fatalf("AddLimit: %v", err)
+	}
+	usage, err := storage.GetUsage(ctx, "credit_user", "credits", period)
+	if err != nil {
+		t.Fatalf("GetUsage after AddLimit: %v", err)
+	}
+	if usage == nil {
+		t.Fatal("AddLimit credits are invisible to GetUsage (top-up lost)")
+	}
+	if usage.Limit != 50 {
+		t.Fatalf("limit = %d, want 50", usage.Limit)
+	}
+	if usage.Used != 0 {
+		t.Fatalf("used = %d, want 0", usage.Used)
+	}
+
+	// 2. Credits must be spendable.
+	if _, err := storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+		UserID: "credit_user", Resource: "credits", Amount: 20,
+		Tier: "pro", Period: period, Limit: usage.Limit,
+	}); err != nil {
+		t.Fatalf("ConsumeQuota: %v", err)
+	}
+
+	// 3. A later top-up must accumulate the limit and preserve used.
+	if err := storage.AddLimit(ctx, "credit_user", "credits", 50, period, "topup-2"); err != nil {
+		t.Fatalf("AddLimit 2: %v", err)
+	}
+	usage2, err := storage.GetUsage(ctx, "credit_user", "credits", period)
+	if err != nil {
+		t.Fatalf("GetUsage after second AddLimit: %v", err)
+	}
+	if usage2 == nil {
+		t.Fatal("usage disappeared after the second AddLimit")
+	}
+	if usage2.Limit != 100 {
+		t.Errorf("limit = %d, want 100 (cumulative top-ups)", usage2.Limit)
+	}
+	if usage2.Used != 20 {
+		t.Errorf("used = %d, want 20 (consumption preserved)", usage2.Used)
+	}
+
+	// 4. Concurrent top-ups must be atomic and visible.
+	const workers = 50
+	start := make(chan struct{})
+	errCh := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			<-start
+			errCh <- storage.AddLimit(ctx, "concurrent_user", "credits", 2, period, fmt.Sprintf("crowd-%d", i))
+		}(i)
+	}
+	close(start)
+	for i := 0; i < workers; i++ {
+		if err := <-errCh; err != nil {
+			t.Errorf("concurrent AddLimit failed: %v", err)
+		}
+	}
+	concurrent, err := storage.GetUsage(ctx, "concurrent_user", "credits", period)
+	if err != nil {
+		t.Fatalf("GetUsage after concurrent AddLimit: %v", err)
+	}
+	if concurrent == nil {
+		t.Fatal("concurrent top-up credits are invisible")
+	}
+	if want := workers * 2; concurrent.Limit != want {
+		t.Errorf("concurrent limit = %d, want %d", concurrent.Limit, want)
+	}
+}

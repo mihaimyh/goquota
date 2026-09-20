@@ -415,14 +415,50 @@ func (s *Storage) GetUsage(ctx context.Context, userID, resource string,
 	period goquota.Period) (*goquota.Usage, error) {
 	key := s.usageKey(userID, resource, period)
 
-	// Get both data and current used amount
-	results, err := s.client.HMGet(ctx, key, "data", "used").Result()
+	// Get the JSON payload, the current used amount, and the atomically
+	// maintained limit. AddLimit/SubtractLimit write only the numeric hash
+	// fields, so the "limit" field must be read to surface top-up credits.
+	results, err := s.client.HMGet(ctx, key, "data", "used", "limit").Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get usage: %w", err)
 	}
 
-	if len(results) != 2 || results[0] == nil {
-		return nil, nil // No usage yet
+	if len(results) != 3 {
+		return nil, nil
+	}
+
+	if results[0] == nil {
+		// No JSON payload yet: records created solely by AddLimit/SubtractLimit
+		// store only the numeric hash fields. Synthesize a usage so top-up
+		// credits are visible and spendable.
+		if results[1] == nil && results[2] == nil {
+			return nil, nil // No usage yet
+		}
+		usage := &goquota.Usage{
+			UserID:    userID,
+			Resource:  resource,
+			Period:    period,
+			UpdatedAt: time.Now().UTC(),
+		}
+		if results[1] != nil {
+			usedStr, ok := results[1].(string)
+			if !ok {
+				return nil, fmt.Errorf("invalid used format")
+			}
+			if _, err := fmt.Sscanf(usedStr, "%d", &usage.Used); err != nil {
+				return nil, fmt.Errorf("failed to parse usage: %w", err)
+			}
+		}
+		if results[2] != nil {
+			limitStr, ok := results[2].(string)
+			if !ok {
+				return nil, fmt.Errorf("invalid limit format")
+			}
+			if _, err := fmt.Sscanf(limitStr, "%d", &usage.Limit); err != nil {
+				return nil, fmt.Errorf("failed to parse limit: %w", err)
+			}
+		}
+		return usage, nil
 	}
 
 	dataStr, ok := results[0].(string)
@@ -443,6 +479,18 @@ func (s *Storage) GetUsage(ctx context.Context, userID, resource string,
 				return nil, fmt.Errorf("failed to parse usage: %w", err)
 			}
 			usage.Used = used
+		}
+	}
+
+	// The hash limit written by AddLimit is authoritative over the limit embedded
+	// in the JSON payload, which can be stale after a top-up.
+	if results[2] != nil {
+		if limitStr, ok := results[2].(string); ok {
+			var limit int
+			if _, err := fmt.Sscanf(limitStr, "%d", &limit); err != nil {
+				return nil, fmt.Errorf("failed to parse limit: %w", err)
+			}
+			usage.Limit = limit
 		}
 	}
 
