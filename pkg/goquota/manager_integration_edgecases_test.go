@@ -110,8 +110,11 @@ func TestManager_DryRun_WithRateLimit_Redis(t *testing.T) {
 					"api_calls": {
 						Algorithm: "token_bucket",
 						Rate:      10,
-						Window:    time.Second,
-						Burst:     10,
+						// Use a long window so the 100ms sleep below cannot refill
+						// even one token (refill = floor(rate*elapsed/window) = 0),
+						// keeping the rate-limit assertion deterministic.
+						Window: time.Hour,
+						Burst:  10,
 					},
 				},
 			},
