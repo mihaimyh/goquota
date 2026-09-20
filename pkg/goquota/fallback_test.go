@@ -3,6 +3,7 @@ package goquota
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -154,6 +155,7 @@ func (m *mockFallbackStorage) SubtractLimit(_ context.Context, _, _ string, _ in
 
 // mockMetrics is a mock metrics implementation for testing
 type mockMetrics struct {
+	mu                         sync.Mutex
 	fallbackUsageCount         int
 	optimisticConsumptionTotal int
 	fallbackHits               map[string]int
@@ -173,14 +175,20 @@ func (m *mockMetrics) RecordStorageOperation(_ string, _ time.Duration, _ error)
 func (m *mockMetrics) RecordCircuitBreakerStateChange(_ string)                  {}
 
 func (m *mockMetrics) RecordFallbackUsage(_ string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.fallbackUsageCount++
 }
 
 func (m *mockMetrics) RecordOptimisticConsumption(amount int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.optimisticConsumptionTotal += amount
 }
 
 func (m *mockMetrics) RecordFallbackHit(strategy string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.fallbackHits[strategy]++
 }
 
