@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -24,6 +25,24 @@ func setupTestPostgresForIntegration(t *testing.T) *postgresStorage.Storage {
 	}
 
 	ctx := context.Background()
+
+	// Isolate every tagged test: the suite uses fixed user IDs, so leftover
+	// rows from a previously-run test would otherwise couple tests together.
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Skipf("PostgreSQL not available: %v", err)
+	}
+	if _, execErr := conn.Exec(ctx, "TRUNCATE TABLE entitlements, quota_usage, "+
+		"consumption_records, refund_records, top_up_records, merge_records, identity_seals CASCADE"); execErr != nil {
+		if closeErr := conn.Close(ctx); closeErr != nil {
+			t.Fatalf("failed to truncate PostgreSQL test tables: %v (close error: %v)", execErr, closeErr)
+		}
+		t.Fatalf("failed to truncate PostgreSQL test tables: %v", execErr)
+	}
+	if err := conn.Close(ctx); err != nil {
+		t.Fatalf("failed to close truncate connection: %v", err)
+	}
+
 	config := postgresStorage.DefaultConfig()
 	config.ConnectionString = dsn
 	config.CleanupEnabled = false // Disable cleanup in tests
