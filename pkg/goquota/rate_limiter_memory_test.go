@@ -266,3 +266,43 @@ func TestMemoryRateLimiter_ZeroRate(t *testing.T) {
 	assert.False(t, allowed)
 	assert.NotNil(t, info)
 }
+
+// TestMemoryRateLimiter_SlidingWindow_ZeroRateBlocks is a regression test for
+// BUG-2: Rate=0 must block, not panic on an empty timestamp slice.
+func TestMemoryRateLimiter_SlidingWindow_ZeroRateBlocks(t *testing.T) {
+	limiter := NewMemoryRateLimiter()
+	config := RateLimitConfig{
+		Algorithm: "sliding_window",
+		Rate:      0,
+		Window:    time.Second,
+	}
+
+	allowed, info, err := limiter.Allow(context.Background(), "zero_user", "api_calls", config)
+	require.NoError(t, err)
+	assert.False(t, allowed, "Rate=0 sliding window must always block")
+	require.NotNil(t, info)
+}
+
+// TestMemoryRateLimiter_TokenBucket_ZeroRateBlocks is a regression test for the
+// zero-rate reset-time math: it must not produce a garbage ResetTime and must
+// block once the burst is drained.
+func TestMemoryRateLimiter_TokenBucket_ZeroRateBlocks(t *testing.T) {
+	limiter := NewMemoryRateLimiter()
+	config := RateLimitConfig{
+		Algorithm: "token_bucket",
+		Rate:      0,
+		Window:    time.Second,
+		Burst:     1,
+	}
+
+	allowed, info, err := limiter.Allow(context.Background(), "zero_user", "api_calls", config)
+	require.NoError(t, err)
+	require.True(t, allowed, "first request consumes the single burst token")
+	require.NotNil(t, info)
+	assert.WithinDuration(t, time.Now().Add(time.Second), info.ResetTime, 2*time.Second,
+		"ResetTime must not come from an Inf conversion")
+
+	allowed, _, err = limiter.Allow(context.Background(), "zero_user", "api_calls", config)
+	require.NoError(t, err)
+	assert.False(t, allowed, "Rate=0 token bucket must block once drained")
+}

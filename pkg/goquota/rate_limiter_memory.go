@@ -121,7 +121,7 @@ func (r *MemoryRateLimiter) allowTokenBucket(
 
 	// Calculate reset time (when bucket will be full again)
 	resetTime := now.Add(bucket.window)
-	if bucket.tokens < bucket.capacity {
+	if bucket.tokens < bucket.capacity && bucket.refillRate > 0 {
 		// Calculate time until full
 		tokensNeeded := bucket.capacity - bucket.tokens
 		timeToFull := time.Duration(float64(tokensNeeded) * float64(bucket.window) / float64(bucket.refillRate))
@@ -165,6 +165,14 @@ func (r *MemoryRateLimiter) allowSlidingWindow(
 
 	// Check if we're within the limit
 	if len(window.timestamps) >= window.limit {
+		// A zero limit blocks every request; there is no oldest timestamp.
+		if len(window.timestamps) == 0 {
+			return false, &RateLimitInfo{
+				Remaining: 0,
+				ResetTime: now.Add(window.window),
+				Limit:     config.Rate,
+			}, nil
+		}
 		// Find the oldest timestamp still in the window
 		oldestInWindow := window.timestamps[0]
 		resetTime := oldestInWindow.Add(window.window)
