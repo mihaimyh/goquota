@@ -618,3 +618,44 @@ func TestManager_TopUpAndConsume_Concurrent(t *testing.T) {
 		t.Errorf("Expected limit 100, got %d", usage.Limit)
 	}
 }
+
+// TestManager_InitialForeverCredits_MultipleResources is a regression test for
+// BUG-1: every configured resource must receive its own sign-up credits, not
+// just whichever resource is processed first.
+func TestManager_InitialForeverCredits_MultipleResources(t *testing.T) {
+	storage := memory.New()
+	config := goquota.Config{
+		DefaultTier: "free",
+		Tiers: map[string]goquota.TierConfig{
+			"free": {
+				Name: "free",
+				InitialForeverCredits: map[string]int{
+					"images": 100,
+					"videos": 200,
+				},
+			},
+		},
+	}
+	manager, err := goquota.NewManager(storage, &config)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                "bonus_user",
+		Tier:                  "free",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+
+	// Consume (not GetQuota) so the tier-config fallback cannot mask a missing
+	// top-up: uncredentialed resources return ErrQuotaExceeded.
+	for resource, want := range map[string]int{"images": 100, "videos": 200} {
+		if _, err := manager.Consume(ctx, "bonus_user", resource, want, goquota.PeriodTypeForever); err != nil {
+			t.Errorf("resource %q: initial forever credits are not spendable: %v", resource, err)
+		}
+	}
+}

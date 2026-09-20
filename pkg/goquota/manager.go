@@ -1402,9 +1402,10 @@ func (m *Manager) SetEntitlement(ctx context.Context, ent *Entitlement) error {
 		if ok && tierConfig.InitialForeverCredits != nil {
 			for resource, amount := range tierConfig.InitialForeverCredits {
 				if amount > 0 {
-					// Use deterministic idempotency key: "initial_bonus_{userID}"
-					// This ensures bonus is applied exactly once, even with concurrent requests
-					idempotencyKey := fmt.Sprintf("initial_bonus_%s", ent.UserID)
+					// Use a deterministic, per-resource idempotency key so each
+					// resource receives its bonus exactly once, even with
+					// concurrent requests.
+					idempotencyKey := fmt.Sprintf("initial_bonus_%s_%s", ent.UserID, resource)
 					topUpErr := m.TopUpLimit(ctx, ent.UserID, resource, amount, WithTopUpIdempotencyKey(idempotencyKey))
 					if topUpErr != nil && topUpErr != ErrIdempotencyKeyExists {
 						// Log error but don't fail entitlement update
