@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1055,4 +1056,52 @@ func TestOptimisticFallbackStrategy_ConcurrentAccess(t *testing.T) {
 	key := usage.UserID + ":" + usage.Resource + ":" + usage.Period.Key()
 	total := strategy.GetOptimisticUsage(key)
 	assert.LessOrEqual(t, total, 100)
+}
+
+// TestOptimisticFallbackStrategy_ConcurrentCapEnforced is a regression test for
+// BUG-3: concurrent callers must not collectively exceed the optimistic cap.
+// The pre-fix check-then-act split allowed ~50x overspend.
+func TestOptimisticFallbackStrategy_ConcurrentCapEnforced(t *testing.T) {
+	metrics := newMockMetrics()
+	logger := &mockLogger{}
+	strategy := NewOptimisticFallbackStrategy(10.0, metrics, logger)
+
+	usage := &Usage{
+		UserID:   "cap_user",
+		Resource: "api_calls",
+		Limit:    1000,
+		Period: Period{
+			Start: time.Now().UTC(),
+			End:   time.Now().UTC().Add(24 * time.Hour),
+			Type:  PeriodTypeMonthly,
+		},
+	}
+
+	const (
+		goroutines    = 256
+		loops         = 20
+		maxOptimistic = 100 // 10% of 1000
+	)
+
+	start := make(chan struct{})
+	var allowed int64
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < loops; j++ {
+				if strategy.AllowOptimisticConsumption(usage, 1) {
+					atomic.AddInt64(&allowed, 1)
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if allowed > maxOptimistic {
+		t.Fatalf("optimistic cap violated: allowed %d units, cap %d", allowed, maxOptimistic)
+	}
 }

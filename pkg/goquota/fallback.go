@@ -190,15 +190,15 @@ func (s *OptimisticFallbackStrategy) AllowOptimisticConsumption(usage *Usage, am
 		return false
 	}
 
-	// Get current optimistic usage
+	// Get current optimistic usage and update it atomically. A check-then-act
+	// split across two lock acquisitions loses concurrent increments and lets
+	// callers collectively exceed the cap.
 	key := usage.UserID + ":" + usage.Resource + ":" + usage.Period.Key()
-	s.mu.RLock()
+	s.mu.Lock()
 	currentOptimistic := s.optimisticUsage[key]
-	s.mu.RUnlock()
-
-	// Check if adding this amount would exceed optimistic limit
 	newOptimistic := currentOptimistic + amount
 	if newOptimistic > maxOptimistic {
+		s.mu.Unlock()
 		s.logger.Warn("optimistic limit exceeded",
 			Field{"userId", usage.UserID},
 			Field{"resource", usage.Resource},
@@ -208,9 +208,6 @@ func (s *OptimisticFallbackStrategy) AllowOptimisticConsumption(usage *Usage, am
 		)
 		return false
 	}
-
-	// Track optimistic consumption
-	s.mu.Lock()
 	s.optimisticUsage[key] = newOptimistic
 	s.mu.Unlock()
 
