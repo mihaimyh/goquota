@@ -605,3 +605,24 @@ func TestCache_ConcurrentInvalidation(t *testing.T) {
 		}
 	}
 }
+
+// TestLRUCache_ExpiredEntriesReclaimed is a regression test for BUG-4: expired
+// entries must be deleted on read, not merely reported as misses, otherwise the
+// cache never reclaims memory and keeps paying for O(N) eviction scans.
+func TestLRUCache_ExpiredEntriesReclaimed(t *testing.T) {
+	cache := goquota.NewLRUCache(10, 10)
+	cache.SetUsage("u1:api_calls:daily", &goquota.Usage{Used: 1}, time.Nanosecond)
+	cache.SetEntitlement("u1", &goquota.Entitlement{UserID: "u1"}, time.Nanosecond)
+
+	time.Sleep(5 * time.Millisecond)
+
+	if _, ok := cache.GetUsage("u1:api_calls:daily"); ok {
+		t.Fatal("expected expired usage entry to be a miss")
+	}
+	if _, ok := cache.GetEntitlement("u1"); ok {
+		t.Fatal("expected expired entitlement entry to be a miss")
+	}
+	if size := cache.Stats().Size; size != 0 {
+		t.Fatalf("expired entries were not reclaimed: Stats().Size=%d", size)
+	}
+}

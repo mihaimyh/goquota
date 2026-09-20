@@ -126,6 +126,10 @@ func (c *LRUCache) GetEntitlement(userID string) (*Entitlement, bool) {
 
 	entry, exists := c.entitlements[userID]
 	if !exists || entry.isExpired() {
+		if exists {
+			// Reclaim the expired entry so TTL bounds memory as well as freshness.
+			delete(c.entitlements, userID)
+		}
 		c.entitlementMiss++
 		return nil, false
 	}
@@ -196,6 +200,10 @@ func (c *LRUCache) GetUsage(key string) (*Usage, bool) {
 
 	entry, exists := c.usage[key]
 	if !exists || entry.isExpired() {
+		if exists {
+			// Reclaim the expired entry so TTL bounds memory as well as freshness.
+			delete(c.usage, key)
+		}
 		c.usageMisses++
 		return nil, false
 	}
