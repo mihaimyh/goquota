@@ -138,12 +138,16 @@ func Middleware(config *Config) func(http.Handler) http.Handler {
 
 				if err == goquota.ErrQuotaExceeded {
 					// Get current usage for error response
-					usage, err := config.Manager.GetQuota(ctx, userID, resource, config.PeriodType)
-					if err == nil && config.OnQuotaExceeded != nil {
-						config.OnQuotaExceeded(w, r, usage)
+					usage, usageErr := config.Manager.GetQuota(ctx, userID, resource, config.PeriodType)
+					if usageErr == nil && usage != nil {
+						if config.OnQuotaExceeded != nil {
+							config.OnQuotaExceeded(w, r, usage)
+						} else {
+							msg := fmt.Sprintf("Quota exceeded: %d/%d %s used", usage.Used, usage.Limit, resource)
+							http.Error(w, msg, http.StatusTooManyRequests)
+						}
 					} else {
-						msg := fmt.Sprintf("Quota exceeded: %d/%d %s used", usage.Used, usage.Limit, resource)
-						http.Error(w, msg, http.StatusTooManyRequests)
+						http.Error(w, "Quota exceeded", http.StatusTooManyRequests)
 					}
 				} else {
 					if config.OnError != nil {

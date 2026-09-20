@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -637,5 +638,53 @@ func TestJSONHelpers(t *testing.T) {
 				t.Errorf("Body not preserved: expected %q, got %q", tt.payload, string(body))
 			}
 		})
+	}
+}
+
+// failingUsageStorage wraps memory.Storage and fails all usage reads, simulating
+// a storage outage during error rendering.
+type failingUsageStorage struct {
+	*memory.Storage
+}
+
+func (s *failingUsageStorage) GetUsage(
+	context.Context, string, string, goquota.Period,
+) (*goquota.Usage, error) {
+	return nil, errors.New("storage unavailable")
+}
+
+// TestMiddleware_QuotaExceeded_GetQuotaErrorDoesNotPanic is a regression test for
+// MIDDLEWARE-1: when GetQuota fails while rendering ErrQuotaExceeded, the handler
+// must not dereference a nil usage.
+func TestMiddleware_QuotaExceeded_GetQuotaErrorDoesNotPanic(t *testing.T) {
+	manager, err := goquota.NewManager(&failingUsageStorage{Storage: memory.New()}, &goquota.Config{
+		DefaultTier: "free",
+		// No quota for api_calls => Consume returns ErrQuotaExceeded without
+		// touching storage; the subsequent GetQuota then hits the failing read.
+		Tiers: map[string]goquota.TierConfig{"free": {Name: "free"}},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	mw := Middleware(&Config{
+		Manager:     manager,
+		GetUserID:   func(*http.Request) string { return "user1" },
+		GetResource: FixedResource("api_calls"),
+		GetAmount:   FixedAmount(1),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("middleware panicked while rendering quota-exceeded on storage error: %v", r)
+		}
+	}()
+	mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusTooManyRequests)
 	}
 }
