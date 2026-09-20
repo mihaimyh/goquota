@@ -216,3 +216,23 @@ func TestPortalURL_Integration(t *testing.T) {
 	// This test would require Stripe test mode credentials
 	t.Skip("Requires Stripe test mode credentials")
 }
+
+// TestBuildCreditPackCheckoutParams_PaymentIntentMetadata is a regression test
+// for BILLING-6: the refund handler resolves user_id/resource from the
+// PaymentIntent, so the one-time checkout params must set
+// PaymentIntentData.Metadata (session metadata alone is not enough).
+func TestBuildCreditPackCheckoutParams_PaymentIntentMetadata(t *testing.T) {
+	params := buildCreditPackCheckoutParams("user-1", "credits", 500, "https://ok", "https://cancel")
+
+	if params.Metadata["user_id"] != "user-1" || params.Metadata["resource"] != "credits" {
+		t.Fatalf("session metadata missing: %+v", params.Metadata)
+	}
+
+	if params.PaymentIntentData == nil {
+		t.Fatal("PaymentIntentData is nil: refund handler cannot resolve user_id/resource from the PaymentIntent")
+	}
+	if params.PaymentIntentData.Metadata["user_id"] != "user-1" ||
+		params.PaymentIntentData.Metadata["resource"] != "credits" {
+		t.Fatalf("PaymentIntent metadata missing: %+v", params.PaymentIntentData.Metadata)
+	}
+}

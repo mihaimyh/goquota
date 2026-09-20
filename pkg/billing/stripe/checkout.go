@@ -80,22 +80,16 @@ func (p *Provider) CheckoutURL(ctx context.Context, userID, tier, successURL, ca
 	return session.URL, nil
 }
 
-// CheckoutURLForPayment creates a Stripe Checkout Session for one-time payment (credit top-up) and returns the URL.
-// The resource and amount should be specified in metadata.
-func (p *Provider) CheckoutURLForPayment(
-	ctx context.Context, userID, resource string, amount int64, successURL, cancelURL string,
-) (string, error) {
-	startTime := time.Now()
-
-	// 1. Resolve Customer ID (optional - Stripe can create customer during checkout)
-	customerID, err := p.resolveCustomerID(ctx, userID)
-	if err != nil && !errors.Is(err, billing.ErrCustomerNotFound) && !errors.Is(err, billing.ErrUserNotFound) {
-		p.metrics.RecordAPICall(providerName, "/checkout/sessions", "customer_resolution_failed")
-		return "", fmt.Errorf("failed to resolve customer: %w", err)
+// buildCreditPackCheckoutParams builds the Checkout Session parameters for a
+// one-time credit-pack purchase (mode=payment).
+func buildCreditPackCheckoutParams(
+	userID, resource string, amount int64, successURL, cancelURL string,
+) *stripe.CheckoutSessionCreateParams {
+	metadata := map[string]string{
+		"user_id":  userID,
+		"resource": resource,
 	}
-
-	// 2. Create Checkout Session for one-time payment
-	params := &stripe.CheckoutSessionCreateParams{
+	return &stripe.CheckoutSessionCreateParams{
 		Mode: stripe.String(string(stripe.CheckoutSessionModePayment)),
 		LineItems: []*stripe.CheckoutSessionCreateLineItemParams{
 			{
@@ -111,13 +105,32 @@ func (p *Provider) CheckoutURLForPayment(
 		},
 		SuccessURL: stripe.String(successURL),
 		CancelURL:  stripe.String(cancelURL),
+		// Inject metadata on the Session *and* the PaymentIntent. The refund
+		// handler (payment_intent.refunded) reads user_id/resource from the
+		// PaymentIntent, which does not inherit the session metadata.
+		Metadata: metadata,
+		PaymentIntentData: &stripe.CheckoutSessionCreatePaymentIntentDataParams{
+			Metadata: metadata,
+		},
+	}
+}
+
+// CheckoutURLForPayment creates a Stripe Checkout Session for one-time payment (credit top-up) and returns the URL.
+// The resource and amount should be specified in metadata.
+func (p *Provider) CheckoutURLForPayment(
+	ctx context.Context, userID, resource string, amount int64, successURL, cancelURL string,
+) (string, error) {
+	startTime := time.Now()
+
+	// 1. Resolve Customer ID (optional - Stripe can create customer during checkout)
+	customerID, err := p.resolveCustomerID(ctx, userID)
+	if err != nil && !errors.Is(err, billing.ErrCustomerNotFound) && !errors.Is(err, billing.ErrUserNotFound) {
+		p.metrics.RecordAPICall(providerName, "/checkout/sessions", "customer_resolution_failed")
+		return "", fmt.Errorf("failed to resolve customer: %w", err)
 	}
 
-	// CRITICAL: Inject metadata for webhook handler
-	params.Metadata = map[string]string{
-		"user_id":  userID,
-		"resource": resource,
-	}
+	// 2. Create Checkout Session for one-time payment
+	params := buildCreditPackCheckoutParams(userID, resource, amount, successURL, cancelURL)
 
 	// Attach existing customer if found (avoids duplicates)
 	if customerID != "" {
