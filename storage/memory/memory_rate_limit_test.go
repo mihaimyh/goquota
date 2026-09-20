@@ -227,3 +227,40 @@ func TestStorage_CheckRateLimit_DifferentUsers(t *testing.T) {
 	assert.True(t, allowed)
 	assert.Greater(t, remaining, 0)
 }
+
+// TestStorage_CheckRateLimit_SlidingWindow_ResetsAfterWindow is a regression
+// test for STORAGE-2: once every timestamp in a sliding window has expired the
+// limiter must reset, not remain permanently blocked.
+func TestStorage_CheckRateLimit_SlidingWindow_ResetsAfterWindow(t *testing.T) {
+	storage := New()
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	window := 100 * time.Millisecond
+
+	req := &goquota.RateLimitRequest{
+		UserID:    "sliding_user",
+		Resource:  "api_calls",
+		Algorithm: "sliding_window",
+		Rate:      2,
+		Window:    window,
+		Now:       base,
+	}
+
+	// Fill the window.
+	for i := 0; i < 2; i++ {
+		allowed, _, _, err := storage.CheckRateLimit(ctx, req)
+		require.NoError(t, err)
+		require.True(t, allowed, "request %d should be allowed", i+1)
+	}
+
+	// A third request within the window is blocked.
+	allowed, _, _, err := storage.CheckRateLimit(ctx, req)
+	require.NoError(t, err)
+	require.False(t, allowed, "third request should be rate limited")
+
+	// Once the whole window has elapsed the limiter must allow requests again.
+	req.Now = base.Add(window + time.Millisecond)
+	allowed, _, _, err = storage.CheckRateLimit(ctx, req)
+	require.NoError(t, err)
+	assert.True(t, allowed, "sliding window did not reset after the window elapsed")
+}

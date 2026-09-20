@@ -429,9 +429,11 @@ func (s *Storage) checkSlidingWindow(key string, req *goquota.RateLimitRequest) 
 	window.mu.Lock()
 	defer window.mu.Unlock()
 
-	// Remove timestamps outside the window
+	// Remove timestamps outside the window. Default validStart to the end of the
+	// slice so that when every timestamp has expired the window is fully cleared
+	// (otherwise the limiter would stay blocked forever).
 	cutoff := req.Now.Add(-window.window)
-	validStart := 0
+	validStart := len(window.timestamps)
 	for i, ts := range window.timestamps {
 		if ts.After(cutoff) {
 			validStart = i
