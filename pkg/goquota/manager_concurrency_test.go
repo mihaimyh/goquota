@@ -2,6 +2,7 @@ package goquota_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -284,6 +285,61 @@ func TestManager_ConcurrentGetQuota(t *testing.T) {
 			t.Errorf("Concurrent GetQuota %d returned nil", i)
 		} else if usage.Used != 100 {
 			t.Errorf("Concurrent GetQuota %d: expected 100 used, got %d", i, usage.Used)
+		}
+	}
+}
+
+// TestManager_ConcurrentGetQuota_SharedResultNoRace is a regression test for the
+// data race at manager.go:462: singleflight.Group.Do returns one *Usage to all
+// concurrent waiters, and GetQuota mutates that pointer after the call. Each
+// round releases 100 workers from a barrier so they receive the same result and
+// mutate it concurrently; the race detector must report zero races.
+func TestManager_ConcurrentGetQuota_SharedResultNoRace(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+	userID := "user_getquota_shared_result"
+	resource := testResourceAPICalls
+
+	if err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                userID,
+		Tier:                  "scholar",
+		SubscriptionStartDate: time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SetEntitlement failed: %v", err)
+	}
+	if _, err := manager.Consume(ctx, userID, resource, 50, goquota.PeriodTypeDaily); err != nil {
+		t.Fatalf("Initial Consume failed: %v", err)
+	}
+
+	const (
+		workers = 100
+		rounds  = 50
+	)
+	for round := 0; round < rounds; round++ {
+		start := make(chan struct{})
+		errChan := make(chan error, workers)
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				usage, err := manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeDaily)
+				if err != nil {
+					errChan <- err
+					return
+				}
+				if usage == nil {
+					errChan <- fmt.Errorf("GetQuota returned nil usage")
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(errChan)
+		for err := range errChan {
+			t.Fatalf("Concurrent GetQuota failed: %v", err)
 		}
 	}
 }

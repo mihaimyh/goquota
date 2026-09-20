@@ -442,6 +442,11 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 		}, nil
 	}
 
+	// singleflight.Group.Do returns the same *Usage to every concurrent waiter,
+	// so copy it before mutating tier/limit to avoid racing on the shared value.
+	cloned := *usage
+	usage = &cloned
+
 	// Always recalculate limit from current tier to handle tier upgrades/downgrades
 	// The stored limit may be from a previous tier
 	// Exceptions:
