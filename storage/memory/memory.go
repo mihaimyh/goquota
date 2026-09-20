@@ -509,6 +509,7 @@ func (s *Storage) Clear(_ context.Context) error {
 	s.topUps = make(map[string]bool)
 	s.tokenBuckets = make(map[string]*tokenBucketState)
 	s.slidingWindows = make(map[string]*slidingWindowState)
+	s.mergeRecords = make(map[string]*goquota.MergeUserResult)
 	return nil
 }
 

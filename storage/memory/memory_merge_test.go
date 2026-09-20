@@ -78,3 +78,39 @@ func TestMergeUser_ConcurrentIdempotent(t *testing.T) {
 		t.Fatalf("concurrent merge doubled used: %d", dst.Used)
 	}
 }
+
+// TestStorage_ClearResetsMergeRecords is a regression test for STORAGE-6: Clear
+// promises to remove all data, so a repeat merge with the same idempotency key
+// must be applied, not replayed.
+func TestStorage_ClearResetsMergeRecords(t *testing.T) {
+	store := New()
+	ctx := context.Background()
+	period := goquota.Period{Type: goquota.PeriodTypeForever, Start: time.Now().UTC()}
+	req := &goquota.StorageMergeRequest{
+		SourceUserID:   "src",
+		TargetUserID:   "dst",
+		IdempotencyKey: "merge-clear-1",
+		Items: []goquota.MergeItem{{
+			Resource:     "credits",
+			PeriodType:   goquota.PeriodTypeForever,
+			SourcePeriod: period,
+			TargetPeriod: period,
+		}},
+		Now: time.Now().UTC(),
+	}
+
+	if _, err := store.MergeUser(ctx, req); err != nil {
+		t.Fatalf("first merge: %v", err)
+	}
+	if err := store.Clear(ctx); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+
+	res, err := store.MergeUser(ctx, req)
+	if err != nil {
+		t.Fatalf("second merge: %v", err)
+	}
+	if res != nil && res.IdempotentReplay {
+		t.Fatal("Clear() left the merge idempotency record behind; repeat merge was replayed")
+	}
+}
