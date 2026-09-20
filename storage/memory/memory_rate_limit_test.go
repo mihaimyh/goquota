@@ -264,3 +264,44 @@ func TestStorage_CheckRateLimit_SlidingWindow_ResetsAfterWindow(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, allowed, "sliding window did not reset after the window elapsed")
 }
+
+// TestStorage_CheckRateLimit_SlidingWindow_ZeroRateBlocks is a regression test
+// for STORAGE-3: Rate=0 must block, not panic on an empty timestamp slice.
+func TestStorage_CheckRateLimit_SlidingWindow_ZeroRateBlocks(t *testing.T) {
+	storage := New()
+	ctx := context.Background()
+	req := &goquota.RateLimitRequest{
+		UserID:    "zero_sliding",
+		Resource:  "api_calls",
+		Algorithm: "sliding_window",
+		Rate:      0,
+		Window:    time.Second,
+		Now:       time.Now().UTC(),
+	}
+	allowed, _, _, err := storage.CheckRateLimit(ctx, req)
+	require.NoError(t, err)
+	assert.False(t, allowed, "Rate=0 sliding window must always block")
+}
+
+// TestStorage_CheckRateLimit_TokenBucket_ZeroRateBlocks is a regression test for
+// STORAGE-3: once the burst is drained at Rate=0, the refill math must not
+// divide by zero.
+func TestStorage_CheckRateLimit_TokenBucket_ZeroRateBlocks(t *testing.T) {
+	storage := New()
+	ctx := context.Background()
+	req := &goquota.RateLimitRequest{
+		UserID:    "zero_bucket",
+		Resource:  "api_calls",
+		Algorithm: "token_bucket",
+		Rate:      0,
+		Burst:     1,
+		Window:    time.Second,
+		Now:       time.Now().UTC(),
+	}
+	allowed, _, _, err := storage.CheckRateLimit(ctx, req)
+	require.NoError(t, err)
+	require.True(t, allowed, "first request consumes the burst token")
+	allowed, _, _, err = storage.CheckRateLimit(ctx, req)
+	require.NoError(t, err)
+	assert.False(t, allowed, "Rate=0 token bucket must block once drained")
+}

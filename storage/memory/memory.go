@@ -389,6 +389,10 @@ func (s *Storage) checkTokenBucket(key string, req *goquota.RateLimitRequest) (b
 
 	// Check if we have tokens
 	if bucket.tokens <= 0 {
+		// A zero refill rate never adds tokens; avoid dividing by zero.
+		if bucket.refillRate <= 0 {
+			return false, 0, req.Now.Add(bucket.window), nil
+		}
 		// Calculate when next token will be available
 		nextTokenTime := bucket.lastRefill.Add(bucket.window / time.Duration(bucket.refillRate))
 		if nextTokenTime.Before(req.Now) {
@@ -402,7 +406,7 @@ func (s *Storage) checkTokenBucket(key string, req *goquota.RateLimitRequest) (b
 
 	// Calculate reset time (when bucket will be full again)
 	resetTime := req.Now.Add(bucket.window)
-	if bucket.tokens < bucket.capacity {
+	if bucket.tokens < bucket.capacity && bucket.refillRate > 0 {
 		// Calculate time until full
 		tokensNeeded := bucket.capacity - bucket.tokens
 		timeToFull := time.Duration(float64(tokensNeeded) * float64(bucket.window) / float64(bucket.refillRate))
@@ -444,6 +448,10 @@ func (s *Storage) checkSlidingWindow(key string, req *goquota.RateLimitRequest) 
 
 	// Check if we're within the limit
 	if len(window.timestamps) >= window.limit {
+		// A zero limit blocks every request; there is no oldest timestamp.
+		if len(window.timestamps) == 0 {
+			return false, 0, req.Now.Add(window.window), nil
+		}
 		// Find the oldest timestamp still in the window
 		oldestInWindow := window.timestamps[0]
 		resetTime := oldestInWindow.Add(window.window)
