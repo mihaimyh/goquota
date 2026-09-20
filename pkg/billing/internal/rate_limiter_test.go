@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -193,5 +194,57 @@ func TestRateLimiter_CleanupCounterReset(t *testing.T) {
 	// Counter should be reset after reaching threshold
 	if limiter.requestCount > limiter.cleanupEvery*10 {
 		t.Errorf("Counter should be reset, but is %d", limiter.requestCount)
+	}
+}
+
+// TestRateLimiter_MiddlewareIgnoresSpoofedXForwardedFor is a regression test for
+// BILLING-1: the client-controlled X-Forwarded-For header must not be trusted by
+// default, otherwise rotating it bypasses the limiter entirely.
+func TestRateLimiter_MiddlewareIgnoresSpoofedXForwardedFor(t *testing.T) {
+	limiter := NewRateLimiter(5, time.Minute)
+	handler := limiter.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	got429 := false
+	for i := 0; i < 20; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+		req.RemoteAddr = "203.0.113.7:1234" // same peer for every request
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code == http.StatusTooManyRequests {
+			got429 = true
+			break
+		}
+	}
+
+	if !got429 {
+		t.Fatal("spoofed X-Forwarded-For bypassed the rate limiter: no 429 in 20 requests")
+	}
+}
+
+// TestRateLimiter_TrustProxyHonorsXForwardedFor verifies the opt-in path: when
+// the limiter is explicitly placed behind a trusted proxy, X-Forwarded-For is
+// used as the client identity.
+func TestRateLimiter_TrustProxyHonorsXForwardedFor(t *testing.T) {
+	limiter := NewRateLimiter(2, time.Minute)
+	limiter.SetTrustProxy(true)
+	handler := limiter.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for i := 1; i <= 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+		req.RemoteAddr = fmt.Sprintf("10.0.0.%d:1234", i) // different peers
+		req.Header.Set("X-Forwarded-For", "198.51.100.9") // same forwarded client
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if i <= 2 && w.Code == http.StatusTooManyRequests {
+			t.Fatalf("request %d unexpectedly rate limited", i)
+		}
+		if i == 3 && w.Code != http.StatusTooManyRequests {
+			t.Fatalf("trusted X-Forwarded-For was not honored: request 3 status = %d", w.Code)
+		}
 	}
 }

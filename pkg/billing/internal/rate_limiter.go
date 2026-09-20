@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ type RateLimiter struct {
 	requests      map[string]*bucket
 	limit         int           // max requests per window
 	window        time.Duration // time window
+	trustProxy    bool          // honor X-Forwarded-For only when behind a trusted proxy
 	requestCount  int           // counter for deterministic cleanup
 	cleanupEvery  int           // cleanup every N requests (default: 100)
 	cleanupAtSize int           // cleanup when map size exceeds this (default: 200)
@@ -89,10 +91,33 @@ func (rl *RateLimiter) Cleanup() {
 	rl.cleanupExpired(time.Now())
 }
 
+// SetTrustProxy controls whether the limiter honors the client-supplied
+// X-Forwarded-For header. It defaults to false; enable it only when the limiter
+// sits behind a trusted proxy that sanitizes the header.
+func (rl *RateLimiter) SetTrustProxy(trust bool) { rl.trustProxy = trust }
+
+// clientIP returns the key used for rate limiting. RemoteAddr is used unless
+// SetTrustProxy(true) was called, in which case the first X-Forwarded-For entry
+// is preferred.
+func (rl *RateLimiter) clientIP(r *http.Request) string {
+	if rl.trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if ip := strings.Split(xff, ",")[0]; ip != "" {
+				return strings.TrimSpace(ip)
+			}
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
 // Middleware wraps HTTP handler with rate limiting
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := GetClientIP(r)
+		ip := rl.clientIP(r)
 		if !rl.allow(ip) {
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
