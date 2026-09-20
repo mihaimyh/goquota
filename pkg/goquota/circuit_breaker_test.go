@@ -161,6 +161,12 @@ func TestCircuitBreaker_StateChangeCallbackRace(t *testing.T) {
 		mu.Unlock()
 	})
 
+	// Force the circuit open once so a state-change callback is guaranteed to
+	// fire; otherwise concurrent Success calls can reset the failure count before
+	// it reaches the threshold and no callback ever runs.
+	cb.Failure(errors.New("warm-up"))
+	cb.Failure(errors.New("warm-up"))
+
 	const goroutines = 50
 	errChan := make(chan error, goroutines)
 
