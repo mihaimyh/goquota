@@ -769,7 +769,12 @@ func (s *Storage) checkTokenBucket(
 		*allowed = false
 		*remaining = 0
 		// Calculate when next token will be available
-		*resetTime = lastRefill.Add(req.Window / time.Duration(req.Rate))
+		if req.Rate <= 0 {
+			// A zero rate never adds tokens; avoid dividing by zero.
+			*resetTime = req.Now.Add(req.Window)
+		} else {
+			*resetTime = lastRefill.Add(req.Window / time.Duration(req.Rate))
+		}
 	} else {
 		// Consume a token
 		tokens--
@@ -777,7 +782,7 @@ func (s *Storage) checkTokenBucket(
 		*remaining = tokens
 
 		// Calculate reset time (when bucket will be full)
-		if tokens < burst {
+		if tokens < burst && req.Rate > 0 {
 			tokensNeeded := burst - tokens
 			*resetTime = req.Now.Add(time.Duration(tokensNeeded) * req.Window / time.Duration(req.Rate))
 		} else {

@@ -194,3 +194,34 @@ func TestStorage_RecordRateLimitRequest(t *testing.T) {
 	err = storage.RecordRateLimitRequest(ctx, req)
 	assert.NoError(t, err)
 }
+
+// TestStorage_CheckRateLimit_TokenBucket_ZeroRateBlocks is a regression test for
+// STORAGE-3 (Firestore half): Rate=0 must not divide by zero while computing the
+// reset time; it must block once the burst is drained.
+func TestStorage_CheckRateLimit_TokenBucket_ZeroRateBlocks(t *testing.T) {
+	ctx := context.Background()
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	storage, err := New(client, Config{})
+	require.NoError(t, err)
+
+	userID := fmt.Sprintf("zero_bucket_%d", time.Now().UnixNano())
+	req := &goquota.RateLimitRequest{
+		UserID:    userID,
+		Resource:  "api_calls",
+		Algorithm: "token_bucket",
+		Rate:      0,
+		Burst:     1,
+		Window:    time.Second,
+		Now:       time.Now().UTC(),
+	}
+
+	allowed, _, _, err := storage.CheckRateLimit(ctx, req)
+	require.NoError(t, err)
+	require.True(t, allowed, "first request consumes the single burst token")
+
+	allowed, _, _, err = storage.CheckRateLimit(ctx, req)
+	require.NoError(t, err)
+	assert.False(t, allowed, "Rate=0 token bucket must block once drained")
+}
