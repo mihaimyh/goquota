@@ -192,13 +192,8 @@ func (p *Provider) extractTierFromSubscriber(
 ) (tier string, expiresAt, purchaseAt *time.Time, productID, entitlementID string) {
 	now := time.Now()
 
-	// Priority list: check configured entitlements in order
-	// Find the highest tier entitlement that is active
-	for candidateID := range p.tierMapping {
-		if candidateID == "*" || candidateID == "default" { //nolint:goconst // These are magic strings for tier mapping
-			continue
-		}
-
+	// Priority list: check configured entitlements in a deterministic order.
+	for _, candidateID := range p.sortedEntitlementCandidates() {
 		ent, ok := subscriber.Entitlements[candidateID]
 		if !ok {
 			// Try case-insensitive lookup

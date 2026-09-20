@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -220,6 +221,22 @@ func (p *webhookPayload) getPurchaseTimestamp() int64 {
 	return p.Event.PurchaseDateMs
 }
 
+// sortedEntitlementCandidates returns the configured entitlement ids in a
+// deterministic (lexicographic) order, excluding the reserved default keys.
+// Go randomizes map iteration, so resolving tiers directly over tierMapping can
+// yield different tiers for identical payloads.
+func (p *Provider) sortedEntitlementCandidates() []string {
+	candidates := make([]string, 0, len(p.tierMapping))
+	for candidate := range p.tierMapping {
+		if candidate == defaultTierKeyWildcard || candidate == defaultTierKeyDefault {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	sort.Strings(candidates)
+	return candidates
+}
+
 // extractTierFromPayload extracts tier information from the webhook payload
 func (p *Provider) extractTierFromPayload(payload *webhookPayload) (
 	tier string, expiresAt *time.Time, productID, entitlementID string,
@@ -247,11 +264,8 @@ func (p *Provider) extractTierFromPayload(payload *webhookPayload) (
 		}
 	}
 
-	// Fallback to subscriber entitlements
-	for candidate := range p.tierMapping {
-		if candidate == "*" || candidate == "default" {
-			continue
-		}
+	// Fallback to subscriber entitlements, evaluated in a deterministic order.
+	for _, candidate := range p.sortedEntitlementCandidates() {
 		ent := payload.resolveEntitlement(candidate)
 		if ent != nil && ent.IsActive {
 			return p.handleEntitlementFromDetails(ent, candidate)

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -3723,5 +3724,67 @@ func TestProvider_Webhook_ExtractTierFromDetails_InvalidPurchaseDate(t *testing.
 	// Should use current time when purchase date is zero
 	if ent.SubscriptionStartDate.IsZero() {
 		t.Error("Expected SubscriptionStartDate to be set to current time when PurchaseDateMs is zero")
+	}
+}
+
+// TestProvider_MultiEntitlement_TierResolutionDeterministic is a regression test
+// for BILLING-3: when a payload contains several active entitlements, tier
+// resolution must be deterministic across identical deliveries.
+func TestProvider_MultiEntitlement_TierResolutionDeterministic(t *testing.T) {
+	manager, err := goquota.NewManager(memory.New(), &goquota.Config{
+		DefaultTier: testTierExplorer,
+		Tiers: map[string]goquota.TierConfig{
+			testTierExplorer: {Name: testTierExplorer},
+			"pro":            {Name: "pro"},
+			"premium":        {Name: "premium"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	provider, err := NewProvider(billing.Config{
+		Manager:       manager,
+		WebhookSecret: testSecret,
+		TierMapping: map[string]string{
+			"pro_ent":     "pro",
+			"premium_ent": "premium",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create provider: %v", err)
+	}
+
+	handler := provider.WebhookHandler()
+	ctx := context.Background()
+	base := time.Now()
+	seen := map[string]int{}
+
+	for i := 0; i < 200; i++ {
+		ts := base.Add(time.Duration(i+1) * time.Second).UnixMilli()
+		body := fmt.Sprintf(
+			`{"event":{"type":"RENEWAL","app_user_id":"det_user","event_timestamp_ms":%d,"product_id":"pkg"},`+
+				`"subscriber":{"entitlements":{`+
+				`"pro_ent":{"product_identifier":"pkg","is_active":true},`+
+				`"premium_ent":{"product_identifier":"pkg","is_active":true}}}}`, ts)
+
+		req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+testSecret)
+		req.RemoteAddr = fmt.Sprintf("10.1.%d.%d:1234", i/256, i%256) // unique peers: avoid the limiter
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("webhook %d: status=%d body=%s", i, rec.Code, rec.Body.String())
+		}
+
+		ent, err := manager.GetEntitlement(ctx, "det_user")
+		if err != nil {
+			t.Fatalf("GetEntitlement: %v", err)
+		}
+		seen[ent.Tier]++
+	}
+
+	if len(seen) > 1 {
+		t.Fatalf("tier resolution is nondeterministic across identical payloads: %v", seen)
 	}
 }
