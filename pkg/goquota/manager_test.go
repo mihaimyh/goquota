@@ -2,6 +2,7 @@ package goquota_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -1909,7 +1910,7 @@ func TestManager_Consume_SameKeyDifferentAmounts(t *testing.T) {
 	}
 }
 
-func TestManager_Consume_KeyCollisionAcrossUsers(t *testing.T) {
+func TestManager_Consume_KeyScopedAcrossUsers(t *testing.T) {
 	manager := newTestManager()
 	ctx := context.Background()
 
@@ -1935,26 +1936,31 @@ func TestManager_Consume_KeyCollisionAcrossUsers(t *testing.T) {
 		t.Fatalf("Consume for user1 failed: %v", err)
 	}
 
-	// Consume for user2 with same key - should return cached result from user1
-	// This tests that idempotency keys are global (not per-user)
+	// Idempotency keys are scoped per user: user2 reusing the same key must be
+	// charged independently, not treated as a replay of user1's consumption.
 	newUsed2, err := manager.Consume(ctx, "user2", "api_calls", 10,
 		goquota.PeriodTypeDaily, goquota.WithIdempotencyKey(sharedKey))
 	if err != nil {
 		t.Fatalf("Consume for user2 failed: %v", err)
 	}
-	// Should return cached result from user1's consumption
 	if newUsed2 != 10 {
-		t.Errorf("Expected cached newUsed 10, got %d", newUsed2)
+		t.Errorf("Expected user2 newUsed 10, got %d", newUsed2)
 	}
 
-	// Verify user2's usage was NOT consumed (idempotency key collision)
+	// Both users must be charged independently.
+	usage1, err := manager.GetQuota(ctx, "user1", "api_calls", goquota.PeriodTypeDaily)
+	if err != nil {
+		t.Fatalf("GetQuota for user1 failed: %v", err)
+	}
+	if usage1.Used != 10 {
+		t.Errorf("Expected 10 used for user1, got %d", usage1.Used)
+	}
 	usage2, err := manager.GetQuota(ctx, "user2", "api_calls", goquota.PeriodTypeDaily)
 	if err != nil {
 		t.Fatalf("GetQuota for user2 failed: %v", err)
 	}
-	// User2 should have 0 used (idempotency key returned cached result from user1)
-	if usage2.Used != 0 {
-		t.Errorf("Expected 0 used for user2 (key collision), got %d", usage2.Used)
+	if usage2.Used != 10 {
+		t.Errorf("Expected 10 used for user2 (per-user idempotency scope), got %d", usage2.Used)
 	}
 }
 
@@ -2800,4 +2806,87 @@ func TestManager_IdempotencyKeyTTL_Integration(t *testing.T) {
 			t.Fatalf("Idempotent Consume failed: %v", err)
 		}
 	})
+}
+
+// TestManager_IdempotencyKeyScopedPerUser is a regression test for STORAGE-4:
+// idempotency records were keyed by the client key alone, so a second user
+// reusing that key was treated as a replay (not charged / not refunded). Keys
+// must be scoped per user. Includes a 50-goroutine cross-user stress phase.
+func TestManager_IdempotencyKeyScopedPerUser(t *testing.T) {
+	manager := newTestManager()
+	ctx := context.Background()
+	resource := testResourceAPICalls
+	const sharedKey = "shared-request-id"
+
+	// Same user, same key: must remain idempotent.
+	if _, err := manager.Consume(ctx, "userA", resource, 5, goquota.PeriodTypeDaily, goquota.WithIdempotencyKey(sharedKey)); err != nil {
+		t.Fatalf("userA consume: %v", err)
+	}
+	replayA, err := manager.Consume(ctx, "userA", resource, 5, goquota.PeriodTypeDaily, goquota.WithIdempotencyKey(sharedKey))
+	if err != nil {
+		t.Fatalf("userA replay: %v", err)
+	}
+	if replayA != 5 {
+		t.Fatalf("userA replay newUsed = %d, want 5", replayA)
+	}
+
+	// A different user reusing the key must be charged independently.
+	if _, err := manager.Consume(ctx, "userB", resource, 7, goquota.PeriodTypeDaily, goquota.WithIdempotencyKey(sharedKey)); err != nil {
+		t.Fatalf("userB consume: %v", err)
+	}
+	usageB, err := manager.GetQuota(ctx, "userB", resource, goquota.PeriodTypeDaily)
+	if err != nil {
+		t.Fatalf("GetQuota userB: %v", err)
+	}
+	if usageB.Used != 7 {
+		t.Fatalf("userB not charged (used=%d, want 7): cross-user idempotency replay", usageB.Used)
+	}
+
+	// Refund keys must be scoped per user too.
+	if err := manager.Refund(ctx, &goquota.RefundRequest{
+		UserID: "userA", Resource: resource, Amount: 5,
+		PeriodType: goquota.PeriodTypeDaily, IdempotencyKey: "shared-refund",
+	}); err != nil {
+		t.Fatalf("userA refund: %v", err)
+	}
+	if err := manager.Refund(ctx, &goquota.RefundRequest{
+		UserID: "userB", Resource: resource, Amount: 5,
+		PeriodType: goquota.PeriodTypeDaily, IdempotencyKey: "shared-refund",
+	}); err != nil {
+		t.Fatalf("userB refund: %v", err)
+	}
+	usageB, err = manager.GetQuota(ctx, "userB", resource, goquota.PeriodTypeDaily)
+	if err != nil {
+		t.Fatalf("GetQuota userB after refund: %v", err)
+	}
+	if usageB.Used != 2 {
+		t.Fatalf("userB refund skipped (used=%d, want 2): cross-user refund replay", usageB.Used)
+	}
+
+	// Concurrency stress: many users share one key; each must be charged once.
+	const users = 50
+	start := make(chan struct{})
+	errCh := make(chan error, users)
+	for i := 0; i < users; i++ {
+		go func(i int) {
+			<-start
+			_, err := manager.Consume(ctx, fmt.Sprintf("stress-user-%d", i), resource, 1, goquota.PeriodTypeDaily, goquota.WithIdempotencyKey("stress-key"))
+			errCh <- err
+		}(i)
+	}
+	close(start)
+	for i := 0; i < users; i++ {
+		if err := <-errCh; err != nil {
+			t.Errorf("stress consume: %v", err)
+		}
+	}
+	for i := 0; i < users; i++ {
+		u, err := manager.GetQuota(ctx, fmt.Sprintf("stress-user-%d", i), resource, goquota.PeriodTypeDaily)
+		if err != nil {
+			t.Fatalf("GetQuota stress-user-%d: %v", i, err)
+		}
+		if u.Used != 1 {
+			t.Errorf("stress-user-%d used=%d, want 1 (cross-user replay)", i, u.Used)
+		}
+	}
 }

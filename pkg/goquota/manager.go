@@ -475,6 +475,15 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 	return usage, nil
 }
 
+// scopedIdempotencyKey namespaces a caller-supplied idempotency key by user so
+// consumption and refund records cannot collide across identities.
+func scopedIdempotencyKey(userID, key string) string {
+	if key == "" {
+		return ""
+	}
+	return userID + ":" + key
+}
+
 // Consume consumes quota for a resource
 // Returns the new total used amount and any error
 //
@@ -502,9 +511,13 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		opt(consumeOpts)
 	}
 
+	// Namespace the caller's idempotency key by user so records cannot collide
+	// across identities.
+	scopedKey := scopedIdempotencyKey(userID, consumeOpts.IdempotencyKey)
+
 	// Check for duplicate consumption using idempotency key
-	if consumeOpts.IdempotencyKey != "" {
-		existing, err := m.storage.GetConsumptionRecord(ctx, consumeOpts.IdempotencyKey)
+	if scopedKey != "" {
+		existing, err := m.storage.GetConsumptionRecord(ctx, scopedKey)
 		if err != nil {
 			m.logger.Error("failed to check consumption idempotency",
 				Field{"userId", userID},
@@ -707,7 +720,7 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		Tier:              tier,
 		Period:            period,
 		Limit:             limit,
-		IdempotencyKey:    consumeOpts.IdempotencyKey,
+		IdempotencyKey:    scopedKey,
 		IdempotencyKeyTTL: m.config.IdempotencyKeyTTL,
 	})
 	m.metrics.RecordStorageOperation("ConsumeQuota", time.Since(cStart), err)
@@ -876,8 +889,9 @@ func (m *Manager) ConsumeWithResult(ctx context.Context, userID, resource string
 	}
 
 	// Idempotent replay: rebuild result from the original charged period.
-	if consumeOpts.IdempotencyKey != "" {
-		existing, err := m.storage.GetConsumptionRecord(ctx, consumeOpts.IdempotencyKey)
+	scopedKey := scopedIdempotencyKey(userID, consumeOpts.IdempotencyKey)
+	if scopedKey != "" {
+		existing, err := m.storage.GetConsumptionRecord(ctx, scopedKey)
 		if err != nil {
 			m.logger.Error("failed to check consumption idempotency",
 				Field{"userId", userID},
@@ -1534,9 +1548,15 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 		return nil // No-op
 	}
 
+	// Namespace idempotency keys by user so consumption and refund records
+	// cannot collide across identities. Work on a copy so the caller's request
+	// key is never mutated (callers may resubmit the same struct for retries).
+	scopedRefundKey := scopedIdempotencyKey(req.UserID, req.IdempotencyKey)
+	scopedRelatedKey := scopedIdempotencyKey(req.UserID, req.RelatedIdempotencyKey)
+
 	// Check for duplicate refund using idempotency key
-	if req.IdempotencyKey != "" {
-		existing, err := m.storage.GetRefundRecord(ctx, req.IdempotencyKey)
+	if scopedRefundKey != "" {
+		existing, err := m.storage.GetRefundRecord(ctx, scopedRefundKey)
 		if err != nil {
 			m.logger.Error("failed to check refund idempotency",
 				Field{"userId", req.UserID},
@@ -1557,22 +1577,26 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 		}
 	}
 
+	refundReq := *req
+	refundReq.IdempotencyKey = scopedRefundKey
+	refundReq.RelatedIdempotencyKey = scopedRelatedKey
+
 	// Get entitlement to determine period
-	ent, err := m.GetEntitlement(ctx, req.UserID)
+	ent, err := m.GetEntitlement(ctx, refundReq.UserID)
 	var period Period
 
 	// Get current time (using TimeSource if available)
 	now := m.now(ctx)
 
 	// Calculate period
-	switch req.PeriodType {
+	switch refundReq.PeriodType {
 	case PeriodTypeAuto:
 		// Attempt to resolve the period type from the original consumption
-		resolvedType, resolvedPeriod, err := m.resolveRefundPeriod(ctx, req)
+		resolvedType, resolvedPeriod, err := m.resolveRefundPeriod(ctx, &refundReq)
 		if err != nil {
 			return err
 		}
-		req.PeriodType = resolvedType
+		refundReq.PeriodType = resolvedType
 		period = resolvedPeriod
 
 	case PeriodTypeMonthly:
@@ -1599,13 +1623,13 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 	}
 
 	// Set period in request so storage uses the correct cycle
-	req.Period = period
+	refundReq.Period = period
 	// Set TTL for idempotency key
-	req.IdempotencyKeyTTL = m.config.IdempotencyKeyTTL
+	refundReq.IdempotencyKeyTTL = m.config.IdempotencyKeyTTL
 
 	// Execute refund via storage
 	rStart := time.Now()
-	err = m.storage.RefundQuota(ctx, req)
+	err = m.storage.RefundQuota(ctx, &refundReq)
 	m.metrics.RecordStorageOperation("RefundQuota", time.Since(rStart), err)
 
 	if err == nil {
