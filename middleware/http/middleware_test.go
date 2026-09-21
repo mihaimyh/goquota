@@ -688,3 +688,56 @@ func TestMiddleware_QuotaExceeded_GetQuotaErrorDoesNotPanic(t *testing.T) {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusTooManyRequests)
 	}
 }
+
+// rateLimitedStorage wraps memory.Storage and always reports the client as
+// rate limited with a configurable reset delay.
+type rateLimitedStorage struct {
+	*memory.Storage
+	resetIn time.Duration
+}
+
+func (s *rateLimitedStorage) CheckRateLimit(
+	context.Context, *goquota.RateLimitRequest,
+) (bool, int, time.Time, error) {
+	return false, 0, time.Now().Add(s.resetIn), nil
+}
+
+// TestMiddleware_SubSecondRetryAfterCeilsToOne is a regression test for
+// MIDDLEWARE-2: a sub-second retry delay must not be advertised as "0".
+func TestMiddleware_SubSecondRetryAfterCeilsToOne(t *testing.T) {
+	manager, err := goquota.NewManager(
+		&rateLimitedStorage{Storage: memory.New(), resetIn: 400 * time.Millisecond},
+		&goquota.Config{
+			DefaultTier: "free",
+			Tiers: map[string]goquota.TierConfig{
+				"free": {
+					Name:          "free",
+					MonthlyQuotas: map[string]int{"api_calls": 1000},
+					RateLimits: map[string]goquota.RateLimitConfig{
+						"api_calls": {Algorithm: "token_bucket", Rate: 10, Window: time.Second, Burst: 10},
+					},
+				},
+			},
+		})
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	mw := Middleware(&Config{
+		Manager:     manager,
+		GetUserID:   func(*http.Request) string { return "user1" },
+		GetResource: FixedResource("api_calls"),
+		GetAmount:   FixedAmount(1),
+	})
+
+	rec := httptest.NewRecorder()
+	mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
+		ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusTooManyRequests)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q for a ~400ms delay; want \"1\"", got)
+	}
+}

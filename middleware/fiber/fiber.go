@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -173,7 +174,8 @@ func Middleware(cfg Config) fiber.Handler {
 					c.Set("X-RateLimit-Reset", fmt.Sprintf("%d", rateLimitErr.Info.ResetTime.Unix()))
 				}
 				if rateLimitErr.RetryAfter > 0 {
-					c.Set("Retry-After", fmt.Sprintf("%.0f", rateLimitErr.RetryAfter.Seconds()))
+					seconds := max(int(math.Ceil(rateLimitErr.RetryAfter.Seconds())), 1)
+					c.Set("Retry-After", fmt.Sprintf("%d", seconds))
 				}
 
 				if cfg.OnRateLimitExceeded != nil {

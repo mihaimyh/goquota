@@ -130,7 +130,11 @@ func Middleware(config *Config) func(http.Handler) http.Handler {
 						w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", rateLimitErr.Info.ResetTime.Unix()))
 					}
 					if rateLimitErr.RetryAfter > 0 {
-						w.Header().Set("Retry-After", fmt.Sprintf("%.0f", rateLimitErr.RetryAfter.Seconds()))
+						seconds := int(math.Ceil(rateLimitErr.RetryAfter.Seconds()))
+						if seconds < 1 {
+							seconds = 1
+						}
+						w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
 					}
 					http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
 					return

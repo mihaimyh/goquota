@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
@@ -174,7 +175,8 @@ func Middleware(cfg Config) echo.MiddlewareFunc {
 						c.Response().Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", rateLimitErr.Info.ResetTime.Unix()))
 					}
 					if rateLimitErr.RetryAfter > 0 {
-						c.Response().Header().Set("Retry-After", fmt.Sprintf("%.0f", rateLimitErr.RetryAfter.Seconds()))
+						seconds := max(int(math.Ceil(rateLimitErr.RetryAfter.Seconds())), 1)
+						c.Response().Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
 					}
 
 					if cfg.OnRateLimitExceeded != nil {

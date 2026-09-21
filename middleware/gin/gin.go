@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
@@ -179,7 +180,11 @@ func Middleware(cfg Config) gongin.HandlerFunc {
 					c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", rateLimitErr.Info.ResetTime.Unix()))
 				}
 				if rateLimitErr.RetryAfter > 0 {
-					c.Header("Retry-After", fmt.Sprintf("%.0f", rateLimitErr.RetryAfter.Seconds()))
+					seconds := int(math.Ceil(rateLimitErr.RetryAfter.Seconds()))
+					if seconds < 1 {
+						seconds = 1
+					}
+					c.Header("Retry-After", fmt.Sprintf("%d", seconds))
 				}
 
 				if cfg.OnRateLimitExceeded != nil {
