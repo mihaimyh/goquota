@@ -1,6 +1,7 @@
 package goquota
 
 import (
+	"container/list"
 	"sync"
 	"time"
 )
@@ -45,16 +46,11 @@ type CacheStats struct {
 	Size              int
 }
 
-// cacheEntry wraps a cached value with expiration time and access time for LRU
+// cacheEntry is the value stored in the intrusive LRU list.
 type cacheEntry struct {
+	key        string
 	value      interface{}
 	expiration time.Time
-	accessTime time.Time // For LRU eviction
-	sequence   int64     // For tiebreaking when access times are equal
-}
-
-func (e *cacheEntry) isExpired() bool {
-	return time.Now().After(e.expiration)
 }
 
 // NoopCache is a cache implementation that does nothing
@@ -88,10 +84,14 @@ func (c *NoopCache) Stats() CacheStats {
 	return CacheStats{}
 }
 
-// LRUCache implements Cache using an in-memory LRU cache with TTL support
+// LRUCache implements Cache using an in-memory LRU cache with TTL support.
+// Eviction is O(1): a doubly-linked list (container/list) tracks recency and
+// the maps point at list elements.
 type LRUCache struct {
-	entitlements    map[string]*cacheEntry
-	usage           map[string]*cacheEntry
+	entitlements    map[string]*list.Element
+	usage           map[string]*list.Element
+	entitlementList *list.List
+	usageList       *list.List
 	maxEntitlements int
 	maxUsage        int
 	mu              sync.RWMutex
@@ -100,7 +100,6 @@ type LRUCache struct {
 	usageHits       int64
 	usageMisses     int64
 	evictions       int64
-	sequence        int64 // For tiebreaking when access times are equal
 }
 
 // NewLRUCache creates a new LRU cache with specified maximum sizes
@@ -113,8 +112,10 @@ func NewLRUCache(maxEntitlements, maxUsage int) *LRUCache {
 	}
 
 	return &LRUCache{
-		entitlements:    make(map[string]*cacheEntry, maxEntitlements),
-		usage:           make(map[string]*cacheEntry, maxUsage),
+		entitlements:    make(map[string]*list.Element, maxEntitlements),
+		usage:           make(map[string]*list.Element, maxUsage),
+		entitlementList: list.New(),
+		usageList:       list.New(),
 		maxEntitlements: maxEntitlements,
 		maxUsage:        maxUsage,
 	}
@@ -124,20 +125,23 @@ func (c *LRUCache) GetEntitlement(userID string) (*Entitlement, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	entry, exists := c.entitlements[userID]
-	if !exists || entry.isExpired() {
-		if exists {
-			// Reclaim the expired entry so TTL bounds memory as well as freshness.
-			delete(c.entitlements, userID)
-		}
+	el, exists := c.entitlements[userID]
+	if !exists {
+		c.entitlementMiss++
+		return nil, false
+	}
+	entry := el.Value.(*cacheEntry)
+	if time.Now().After(entry.expiration) {
+		// Reclaim the expired entry so TTL bounds memory as well as freshness.
+		c.entitlementList.Remove(el)
+		delete(c.entitlements, userID)
 		c.entitlementMiss++
 		return nil, false
 	}
 
-	// Update access time for LRU
-	entry.accessTime = time.Now()
-
+	c.entitlementList.MoveToFront(el)
 	c.entitlementHits++
+
 	// Return a shallow copy so callers cannot mutate the cached entry.
 	// Copy the full struct; omitting fields (e.g. Timezone) makes cache hits
 	// silently fall back to UTC daily boundaries.
@@ -153,65 +157,56 @@ func (c *LRUCache) SetEntitlement(userID string, ent *Entitlement, ttl time.Dura
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	now := time.Now()
-	_, exists := c.entitlements[userID]
+	if el, exists := c.entitlements[userID]; exists {
+		entry := el.Value.(*cacheEntry)
+		entry.value = ent
+		entry.expiration = time.Now().Add(ttl)
+		c.entitlementList.MoveToFront(el)
+		return
+	}
 
-	// Evict if at capacity and entry doesn't exist
-	if len(c.entitlements) >= c.maxEntitlements && !exists {
-		// Evict least recently used (oldest accessTime, then oldest sequence)
-		var oldestKey string
-		var oldestTime time.Time
-		var oldestSeq int64
-		first := true
-		for key, entry := range c.entitlements {
-			if first || entry.accessTime.Before(oldestTime) ||
-				(entry.accessTime.Equal(oldestTime) && entry.sequence < oldestSeq) {
-				oldestKey = key
-				oldestTime = entry.accessTime
-				oldestSeq = entry.sequence
-				first = false
-			}
-		}
-		if oldestKey != "" {
-			delete(c.entitlements, oldestKey)
+	if c.entitlementList.Len() >= c.maxEntitlements {
+		if back := c.entitlementList.Back(); back != nil {
+			delete(c.entitlements, back.Value.(*cacheEntry).key)
+			c.entitlementList.Remove(back)
 			c.evictions++
 		}
 	}
 
-	seq := c.sequence
-	c.sequence++
-	c.entitlements[userID] = &cacheEntry{
-		value:      ent,
-		expiration: now.Add(ttl),
-		accessTime: now,
-		sequence:   seq,
-	}
+	entry := &cacheEntry{key: userID, value: ent, expiration: time.Now().Add(ttl)}
+	c.entitlements[userID] = c.entitlementList.PushFront(entry)
 }
 
 func (c *LRUCache) InvalidateEntitlement(userID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.entitlements, userID)
+	if el, exists := c.entitlements[userID]; exists {
+		c.entitlementList.Remove(el)
+		delete(c.entitlements, userID)
+	}
 }
 
 func (c *LRUCache) GetUsage(key string) (*Usage, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	entry, exists := c.usage[key]
-	if !exists || entry.isExpired() {
-		if exists {
-			// Reclaim the expired entry so TTL bounds memory as well as freshness.
-			delete(c.usage, key)
-		}
+	el, exists := c.usage[key]
+	if !exists {
+		c.usageMisses++
+		return nil, false
+	}
+	entry := el.Value.(*cacheEntry)
+	if time.Now().After(entry.expiration) {
+		// Reclaim the expired entry so TTL bounds memory as well as freshness.
+		c.usageList.Remove(el)
+		delete(c.usage, key)
 		c.usageMisses++
 		return nil, false
 	}
 
-	// Update access time for LRU
-	entry.accessTime = time.Now()
-
+	c.usageList.MoveToFront(el)
 	c.usageHits++
+
 	// Return a copy to prevent external modifications
 	usage, ok := entry.value.(*Usage)
 	if !ok {
@@ -232,52 +227,42 @@ func (c *LRUCache) SetUsage(key string, usage *Usage, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	now := time.Now()
-	_, exists := c.usage[key]
+	if el, exists := c.usage[key]; exists {
+		entry := el.Value.(*cacheEntry)
+		entry.value = usage
+		entry.expiration = time.Now().Add(ttl)
+		c.usageList.MoveToFront(el)
+		return
+	}
 
-	// Evict if at capacity and entry doesn't exist
-	if len(c.usage) >= c.maxUsage && !exists {
-		// Evict least recently used (oldest accessTime, then oldest sequence)
-		var oldestKey string
-		var oldestTime time.Time
-		var oldestSeq int64
-		first := true
-		for k, entry := range c.usage {
-			if first || entry.accessTime.Before(oldestTime) ||
-				(entry.accessTime.Equal(oldestTime) && entry.sequence < oldestSeq) {
-				oldestKey = k
-				oldestTime = entry.accessTime
-				oldestSeq = entry.sequence
-				first = false
-			}
-		}
-		if oldestKey != "" {
-			delete(c.usage, oldestKey)
+	if c.usageList.Len() >= c.maxUsage {
+		if back := c.usageList.Back(); back != nil {
+			delete(c.usage, back.Value.(*cacheEntry).key)
+			c.usageList.Remove(back)
 			c.evictions++
 		}
 	}
 
-	seq := c.sequence
-	c.sequence++
-	c.usage[key] = &cacheEntry{
-		value:      usage,
-		expiration: now.Add(ttl),
-		accessTime: now,
-		sequence:   seq,
-	}
+	entry := &cacheEntry{key: key, value: usage, expiration: time.Now().Add(ttl)}
+	c.usage[key] = c.usageList.PushFront(entry)
 }
 
 func (c *LRUCache) InvalidateUsage(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.usage, key)
+	if el, exists := c.usage[key]; exists {
+		c.usageList.Remove(el)
+		delete(c.usage, key)
+	}
 }
 
 func (c *LRUCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entitlements = make(map[string]*cacheEntry, c.maxEntitlements)
-	c.usage = make(map[string]*cacheEntry, c.maxUsage)
+	c.entitlements = make(map[string]*list.Element, c.maxEntitlements)
+	c.usage = make(map[string]*list.Element, c.maxUsage)
+	c.entitlementList = list.New()
+	c.usageList = list.New()
 }
 
 func (c *LRUCache) Stats() CacheStats {

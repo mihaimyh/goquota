@@ -626,3 +626,22 @@ func TestLRUCache_ExpiredEntriesReclaimed(t *testing.T) {
 		t.Fatalf("expired entries were not reclaimed: Stats().Size=%d", size)
 	}
 }
+
+// BenchmarkLRUCacheSetUsageEviction guards the O(1) eviction path: inserting new
+// keys into a full cache must not scale with capacity.
+func BenchmarkLRUCacheSetUsageEviction(b *testing.B) {
+	for _, max := range []int{1000, 16000} {
+		b.Run(fmt.Sprintf("max_%d", max), func(b *testing.B) {
+			c := goquota.NewLRUCache(max, max)
+			u := &goquota.Usage{Used: 1}
+			for i := 0; i < max; i++ {
+				c.SetUsage(fmt.Sprintf("seed-%d", i), u, time.Hour)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				c.SetUsage(fmt.Sprintf("new-%d", i), u, time.Hour)
+			}
+		})
+	}
+}
