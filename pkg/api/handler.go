@@ -38,7 +38,13 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 		if h.config.Metrics != nil {
 			duration := time.Since(startTime)
 			h.config.Metrics.RecordUsageAPIRequestDuration(duration)
-			h.config.Metrics.RecordUsageAPIRequest(status, errorType)
+			// status holds the entitlement state for the response body; the metric
+			// needs a success/error outcome instead.
+			outcome := "success"
+			if errorType != "" {
+				outcome = "error"
+			}
+			h.config.Metrics.RecordUsageAPIRequest(outcome, errorType)
 		}
 	}()
 

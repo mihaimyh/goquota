@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -866,5 +867,51 @@ func TestUsageAPI_StorageErrorReturnsError(t *testing.T) {
 
 	if rec.Code == http.StatusOK {
 		t.Fatalf("storage failure surfaced as HTTP 200 with body: %s", rec.Body.String())
+	}
+}
+
+// captureUsageMetrics records the labels passed to RecordUsageAPIRequest.
+type captureUsageMetrics struct {
+	*goquota.NoopMetrics
+	mu       sync.Mutex
+	statuses []string
+}
+
+func (m *captureUsageMetrics) RecordUsageAPIRequest(status, _ string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.statuses = append(m.statuses, status)
+}
+
+// TestUsageAPI_MetricStatusIsOutcome is a regression test for API-1: the metric
+// status must be a success/error outcome, not the entitlement status
+// (active/expired/default).
+func TestUsageAPI_MetricStatusIsOutcome(t *testing.T) {
+	metrics := &captureUsageMetrics{NoopMetrics: &goquota.NoopMetrics{}}
+	handler, err := NewHandler(Config{
+		Manager:        newTestManager(),
+		GetUserID:      func(*http.Request) string { return testUserID },
+		KnownResources: []string{testResource},
+		Metrics:        metrics,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create handler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.GetUsage(rec, httptest.NewRequest(http.MethodGet, "/usage", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	if len(metrics.statuses) == 0 {
+		t.Fatal("RecordUsageAPIRequest was never called")
+	}
+	for _, s := range metrics.statuses {
+		if s != "success" && s != "error" {
+			t.Fatalf("RecordUsageAPIRequest status=%q; expected success/error", s)
+		}
 	}
 }
