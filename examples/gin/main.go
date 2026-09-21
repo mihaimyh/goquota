@@ -20,9 +20,11 @@ func main() {
 		DefaultTier: "free",
 		Tiers: map[string]goquota.TierConfig{
 			"free": {
+				Name:        "free",
 				DailyQuotas: map[string]int{"api_calls": 10},
 			},
 			"pro": {
+				Name:        "pro",
 				DailyQuotas: map[string]int{"api_calls": 1000},
 			},
 		},
