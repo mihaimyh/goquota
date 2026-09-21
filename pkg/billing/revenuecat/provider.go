@@ -292,11 +292,20 @@ func (p *Provider) handleWebhook(w http.ResponseWriter, r *http.Request) {
 func (p *Provider) processWebhookEvent(ctx context.Context, payload *webhookPayload, userID string) error {
 	// Parse event timestamp (supports both timestamp_ms and event_timestamp_ms)
 	eventTimestamp := parseEventTimestamp(payload.getEventTimestamp())
+	eventType := strings.TrimSpace(payload.Event.Type)
+
+	// A one-time purchase (consumable/non-consumable) is not a subscription
+	// event. Rewriting the subscription entitlement from it would downgrade a
+	// premium subscriber to the default tier, or grant premium for a cheap
+	// top-up. Fire the callback (so applications can grant credits / record the
+	// sale) and stop: tier, expiry and UpdatedAt are left untouched.
+	if isNonSubscriptionPurchase(eventType) {
+		return p.handleNonSubscriptionPurchase(ctx, payload, userID, eventType, eventTimestamp)
+	}
 
 	// Extract tier information from payload
 	tier, expiresAt, productID, entitlementID := p.extractTierFromPayload(payload)
 	effectiveTier := tier
-	eventType := strings.TrimSpace(payload.Event.Type)
 
 	// Check if entitlement has expired
 	if expiresAt != nil && expiresAt.Before(time.Now()) {
@@ -431,4 +440,53 @@ func (p *Provider) invokeWebhookCallback(ctx context.Context, event billing.Webh
 		event.Provider = providerName
 	}
 	return p.webhookCallback(ctx, event)
+}
+
+// isNonSubscriptionPurchase reports whether an event describes a one-time
+// (consumable or non-consumable) purchase rather than a subscription event.
+func isNonSubscriptionPurchase(eventType string) bool {
+	return strings.EqualFold(strings.TrimSpace(eventType), "NON_RENEWING_PURCHASE")
+}
+
+// handleNonSubscriptionPurchase fires the webhook callback for a one-time
+// purchase without touching the subscription entitlement. The reported tier is
+// unchanged (NewTier == PreviousTier) so consumers never mistake it for a
+// subscription transition. Idempotency for any credit grant is the caller's:
+// deduplicate on EventID.
+func (p *Provider) handleNonSubscriptionPurchase(
+	ctx context.Context, payload *webhookPayload, userID, eventType string, eventTimestamp time.Time,
+) error {
+	existing, err := p.manager.GetEntitlement(ctx, userID)
+	if err != nil && err != goquota.ErrEntitlementNotFound {
+		return err
+	}
+	previousTier := p.defaultTier
+	if existing != nil {
+		previousTier = existing.Tier
+	}
+
+	productID := strings.TrimSpace(payload.Event.ProductID)
+	priceCents, currency := purchasedPrice(payload.Event)
+	event := billing.WebhookEvent{
+		UserID:         userID,
+		PreviousTier:   previousTier,
+		NewTier:        previousTier, // unchanged: this is not a tier transition
+		Provider:       providerName,
+		EventType:      eventType,
+		EventTimestamp: eventTimestamp,
+		Metadata: map[string]interface{}{
+			"product_id": productID,
+			"event_type": eventType,
+		},
+		EventID:           strings.TrimSpace(payload.Event.ID),
+		ProductID:         productID,
+		Store:             strings.TrimSpace(payload.Event.Store),
+		Currency:          currency,
+		PriceCents:        priceCents,
+		PeriodType:        strings.ToUpper(strings.TrimSpace(payload.Event.PeriodType)),
+		PurchasedAt:       purchaseTime(payload.Event),
+		CancelAtPeriodEnd: cancellationState(eventType, payload.Event.CancelReason),
+		CancelReason:      strings.ToUpper(strings.TrimSpace(payload.Event.CancelReason)),
+	}
+	return p.invokeWebhookCallback(ctx, event)
 }
