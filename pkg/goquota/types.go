@@ -111,6 +111,30 @@ func (p *TierPromotion) IsActive(now time.Time) bool {
 	return p != nil && now.Before(p.ExpiresAt)
 }
 
+// ActivePromotion returns the promotion overlay when it is in effect at now,
+// and nil otherwise. It is nil-safe: a nil entitlement (and a nil promotion) has
+// no active promotion.
+//
+// Use it to display "premium until <date>" or to detect that a user's tier is a
+// temporary grant rather than a paid one.
+func (e *Entitlement) ActivePromotion(now time.Time) *TierPromotion {
+	if e == nil || !e.Promotion.IsActive(now) {
+		return nil
+	}
+	return e.Promotion
+}
+
+// EffectiveTier returns the tier that is in effect for this entitlement at now,
+// falling back to defaultTier when the entitlement has no base tier of its own.
+//
+// This is the value to use for display, caches, claims and any application-side
+// authorization decision. Do not read Entitlement.Tier directly for those: Tier
+// is the provider-owned *base* tier and is overridden while a promotion is
+// active. It is nil-safe.
+func (e *Entitlement) EffectiveTier(defaultTier string, now time.Time) string {
+	return ResolveEffectiveTier(e, defaultTier, now)
+}
+
 // IsSealed reports whether the identity is currently sealed at now.
 // A tombstone with ExpireAt in the past (now >= ExpireAt) is not sealed.
 func (e *Entitlement) IsSealed(now time.Time) bool {
@@ -125,12 +149,17 @@ func (e *Entitlement) IsSealed(now time.Time) bool {
 
 // Usage represents quota usage for a specific resource and period
 type Usage struct {
-	UserID    string
-	Resource  string
-	Used      int
-	Limit     int
-	Period    Period
-	Tier      string
+	UserID   string
+	Resource string
+	Used     int
+	Limit    int
+	Period   Period
+	// Tier is the effective tier at read time: the base tier, overridden by an
+	// active Promotion. It is not necessarily Entitlement.Tier.
+	Tier string
+	// Promotion is the promotion overlay that was in effect when this Usage was
+	// read, or nil when the user's tier is a base (paid/default) tier.
+	Promotion *TierPromotion
 	UpdatedAt time.Time
 }
 
@@ -631,15 +660,26 @@ type ConsumeResult struct {
 	// (e.g. PeriodTypeDaily or PeriodTypeForever), never PeriodTypeAuto.
 	// Prefer this over PeriodTypeAuto when calling Refund.
 	Period PeriodType
+	// EffectiveTier is the tier that was in effect for the charged period (the
+	// base tier, overridden by an active Promotion). It lets callers drive
+	// side-effects (webhooks, entitlement sync, UI) without a second lookup.
+	EffectiveTier string
+	// Promotion is the promotion overlay that was in effect for the charged
+	// period, or nil.
+	Promotion *TierPromotion
 }
 
 // EffectiveQuota is the merged ledger view of a resource across a tier's ConsumptionOrder.
 // Used and Limit are sums of finite periods (Limit == -1 means unlimited overall).
 // Limit stays stable as forever/bonus credits are spent (unlike MeterQuota).
 type EffectiveQuota struct {
-	UserID    string
-	Resource  string
-	Tier      string
+	UserID   string
+	Resource string
+	// Tier is the effective tier at read time (base tier overridden by an active
+	// Promotion), not necessarily Entitlement.Tier.
+	Tier string
+	// Promotion is the promotion overlay in effect at read time, or nil.
+	Promotion *TierPromotion
 	Used      int
 	Limit     int
 	Remaining int
@@ -658,9 +698,13 @@ type MeterPeriod struct {
 // Recurring periods contribute Used and Limit. Forever overflow contributes
 // only Remaining to Limit, so spent bonus segments drop off the bar.
 type MeterQuota struct {
-	UserID    string
-	Resource  string
-	Tier      string
+	UserID   string
+	Resource string
+	// Tier is the effective tier at read time (base tier overridden by an active
+	// Promotion), not necessarily Entitlement.Tier.
+	Tier string
+	// Promotion is the promotion overlay in effect at read time, or nil.
+	Promotion *TierPromotion
 	Used      int
 	Limit     int
 	Remaining int

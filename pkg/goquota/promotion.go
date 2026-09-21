@@ -6,36 +6,62 @@ import (
 	"time"
 )
 
+// ResolveEffectiveTier returns the tier that is in effect for ent at now.
+//
+// An active promotion (now < Promotion.ExpiresAt) overrides the base tier. A
+// nil entitlement, or one with an empty base tier, resolves to defaultTier.
+//
+// This is the canonical resolver the Manager uses internally. Applications that
+// mirror a goquota entitlement into their own DTO, cache, JWT claim or enum
+// should resolve through it (or Entitlement.EffectiveTier) instead of reading
+// Entitlement.Tier, which is the provider-owned *base* tier and can be
+// overridden by a promotion. Resolving by hand is the single most common way to
+// end up with a quota engine that grants premium while the app still shows free.
+func ResolveEffectiveTier(ent *Entitlement, defaultTier string, now time.Time) string {
+	if ent == nil {
+		return defaultTier
+	}
+	if p := ent.ActivePromotion(now); p != nil {
+		return p.Tier
+	}
+	if ent.Tier != "" {
+		return ent.Tier
+	}
+	return defaultTier
+}
+
 // effectiveTier resolves the tier that is in effect for an entitlement at now.
 //
 // An active promotion (now < Promotion.ExpiresAt) overrides the base tier. This
 // is evaluated on every read against the current time, so promotions expire
 // automatically without a background job and a stale cache self-corrects.
 func (m *Manager) effectiveTier(ent *Entitlement, now time.Time) string {
-	if ent != nil && ent.Promotion.IsActive(now) {
-		return ent.Promotion.Tier
-	}
-	if ent != nil && ent.Tier != "" {
-		return ent.Tier
-	}
-	return m.config.DefaultTier
+	return ResolveEffectiveTier(ent, m.config.DefaultTier, now)
 }
 
-// tierFor resolves the effective tier for a loaded entitlement without forcing
-// a storage clock read unless a promotion is actually present. The vast
-// majority of users have no promotion, so this keeps the hot paths free of an
-// extra Now() round-trip.
-func (m *Manager) tierFor(ctx context.Context, ent *Entitlement) string {
+// resolveTierAndPromotion returns the effective tier for ent together with the
+// promotion overlay that produced it (nil when the base tier applies). It does
+// not force a storage clock read unless a promotion is actually present: the
+// vast majority of users have no promotion, so this keeps the hot paths free of
+// an extra Now() round-trip.
+func (m *Manager) resolveTierAndPromotion(ctx context.Context, ent *Entitlement) (string, *TierPromotion) {
 	if ent == nil {
-		return m.config.DefaultTier
+		return m.config.DefaultTier, nil
 	}
 	if ent.Promotion != nil {
-		return m.effectiveTier(ent, m.now(ctx))
+		now := m.now(ctx)
+		return ResolveEffectiveTier(ent, m.config.DefaultTier, now), ent.ActivePromotion(now)
 	}
 	if ent.Tier != "" {
-		return ent.Tier
+		return ent.Tier, nil
 	}
-	return m.config.DefaultTier
+	return m.config.DefaultTier, nil
+}
+
+// tierFor resolves the effective tier for a loaded entitlement.
+func (m *Manager) tierFor(ctx context.Context, ent *Entitlement) string {
+	tier, _ := m.resolveTierAndPromotion(ctx, ent)
+	return tier
 }
 
 // cloneEntitlement returns a shallow copy of ent (or nil).
@@ -238,4 +264,36 @@ func (m *Manager) GetEffectiveTier(ctx context.Context, userID string) (string, 
 		return "", err
 	}
 	return m.tierFor(ctx, ent), nil
+}
+
+// promotionCapabilityReporter lets a Storage wrapper (such as
+// CircuitBreakerStorage, whose PromotionStore methods always exist) report the
+// capability of the store it delegates to instead of unconditionally
+// advertising promotion support.
+type promotionCapabilityReporter interface {
+	PromotionsSupported() bool
+}
+
+// SupportsPromotions reports whether storage can store promotion overlays, i.e.
+// whether it implements PromotionStore. Wrappers that forward to an inner store
+// are unwrapped.
+//
+// Applications that depend on promotions should assert this once at startup so a
+// misconfigured backend fails fast instead of at the first grant, which is the
+// only point Manager.GrantPromotion can report ErrUnsupportedOperation.
+func SupportsPromotions(storage Storage) bool {
+	if storage == nil {
+		return false
+	}
+	if reporter, ok := storage.(promotionCapabilityReporter); ok {
+		return reporter.PromotionsSupported()
+	}
+	_, ok := storage.(PromotionStore)
+	return ok
+}
+
+// PromotionsSupported reports whether this Manager's storage supports
+// time-boxed promotions. See SupportsPromotions.
+func (m *Manager) PromotionsSupported() bool {
+	return SupportsPromotions(m.storage)
 }

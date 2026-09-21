@@ -266,12 +266,14 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 	// Get entitlement to determine tier (uses cache)
 	ent, err := m.GetEntitlement(ctx, userID)
 	tier := m.config.DefaultTier
+	var promotion *TierPromotion
 	var period Period
 
 	// Get current time (using TimeSource if available)
 	now := m.now(ctx)
 	if err == nil {
 		tier = m.effectiveTier(ent, now)
+		promotion = ent.ActivePromotion(now)
 	}
 
 	// Calculate period based on type
@@ -324,6 +326,7 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 			cached.Limit = tierConfigLimit
 		}
 		cached.Tier = tier // Also update tier to match current entitlement
+		cached.Promotion = promotion
 		return cached, nil
 	}
 
@@ -351,6 +354,7 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 				cached.Limit = tierConfigLimit
 			}
 			cached.Tier = tier
+			cached.Promotion = promotion
 			return cached, nil
 		}
 
@@ -432,12 +436,13 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 			}
 		}
 		return &Usage{
-			UserID:   userID,
-			Resource: resource,
-			Used:     0,
-			Limit:    limit,
-			Period:   period,
-			Tier:     tier,
+			UserID:    userID,
+			Resource:  resource,
+			Used:      0,
+			Limit:     limit,
+			Period:    period,
+			Tier:      tier,
+			Promotion: promotion,
 		}, nil
 	}
 
@@ -464,6 +469,7 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 		usage.Limit = tierConfigLimit
 	}
 	usage.Tier = tier
+	usage.Promotion = promotion
 
 	// Record forever credits balance when getting forever quota
 	if periodType == PeriodTypeForever && usage.Limit > 0 {
@@ -991,11 +997,13 @@ func consumeResultFromUsage(usage *Usage, newUsed int, periodType PeriodType) *C
 		percentage = float64(newUsed) / float64(limit) * 100
 	}
 	return &ConsumeResult{
-		NewUsed:    newUsed,
-		Limit:      limit,
-		Remaining:  remaining,
-		Percentage: percentage,
-		Period:     periodType,
+		NewUsed:       newUsed,
+		Limit:         limit,
+		Remaining:     remaining,
+		Percentage:    percentage,
+		Period:        periodType,
+		EffectiveTier: usage.Tier,
+		Promotion:     usage.Promotion,
 	}
 }
 
@@ -1007,11 +1015,13 @@ func (m *Manager) consumeResultZeroAmount(ctx context.Context, userID, resource 
 			return nil, err
 		}
 		return &ConsumeResult{
-			NewUsed:    eff.Used,
-			Limit:      eff.Limit,
-			Remaining:  eff.Remaining,
-			Percentage: percentageOf(eff.Used, eff.Limit),
-			Period:     PeriodTypeAuto,
+			NewUsed:       eff.Used,
+			Limit:         eff.Limit,
+			Remaining:     eff.Remaining,
+			Percentage:    percentageOf(eff.Used, eff.Limit),
+			Period:        PeriodTypeAuto,
+			EffectiveTier: eff.Tier,
+			Promotion:     eff.Promotion,
 		}, nil
 	}
 	usage, err := m.GetQuota(ctx, userID, resource, periodType)
@@ -1033,26 +1043,29 @@ type orderedUsage struct {
 	usage  *Usage
 }
 
-func (m *Manager) loadOrderedUsages(ctx context.Context, userID, resource string) (string, []orderedUsage, error) {
+func (m *Manager) loadOrderedUsages(
+	ctx context.Context, userID, resource string,
+) (string, *TierPromotion, []orderedUsage, error) {
 	select {
 	case <-ctx.Done():
-		return "", nil, ctx.Err()
+		return "", nil, nil, ctx.Err()
 	default:
 	}
 	if userID == "" {
-		return "", nil, fmt.Errorf("userID is required")
+		return "", nil, nil, fmt.Errorf("userID is required")
 	}
 	if resource == "" {
-		return "", nil, fmt.Errorf("resource is required")
+		return "", nil, nil, fmt.Errorf("resource is required")
 	}
 
 	ent, err := m.GetEntitlement(ctx, userID)
 	tier := m.config.DefaultTier
+	var promotion *TierPromotion
 	if err != nil && err != ErrEntitlementNotFound {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if err == nil {
-		tier = m.tierFor(ctx, ent)
+		tier, promotion = m.resolveTierAndPromotion(ctx, ent)
 	}
 
 	order := m.consumptionOrderForTier(tier)
@@ -1063,11 +1076,11 @@ func (m *Manager) loadOrderedUsages(ctx context.Context, userID, resource string
 		}
 		usage, qErr := m.GetQuota(ctx, userID, resource, pt)
 		if qErr != nil {
-			return "", nil, qErr
+			return "", nil, nil, qErr
 		}
 		if usage.Limit < 0 {
 			usages = append(usages, orderedUsage{period: pt, usage: usage})
-			return tier, usages, nil
+			return tier, promotion, usages, nil
 		}
 		if usage.Limit == 0 && usage.Used == 0 {
 			continue
@@ -1079,7 +1092,7 @@ func (m *Manager) loadOrderedUsages(ctx context.Context, userID, resource string
 		}
 		usages = append(usages, orderedUsage{period: pt, usage: usage})
 	}
-	return tier, usages, nil
+	return tier, promotion, usages, nil
 }
 
 func (m *Manager) appendForeverIfMissing(
@@ -1108,7 +1121,7 @@ func (m *Manager) appendForeverIfMissing(
 // skipped (not configured / no forever balance). Limit stays stable while
 // forever bonus credits are spent.
 func (m *Manager) GetEffectiveQuota(ctx context.Context, userID, resource string) (*EffectiveQuota, error) {
-	tier, usages, err := m.loadOrderedUsages(ctx, userID, resource)
+	tier, promotion, usages, err := m.loadOrderedUsages(ctx, userID, resource)
 	if err != nil {
 		return nil, err
 	}
@@ -1117,6 +1130,7 @@ func (m *Manager) GetEffectiveQuota(ctx context.Context, userID, resource string
 		UserID:    userID,
 		Resource:  resource,
 		Tier:      tier,
+		Promotion: promotion,
 		UpdatedAt: m.now(ctx),
 	}
 	for _, item := range usages {
@@ -1136,7 +1150,7 @@ func (m *Manager) GetEffectiveQuota(ctx context.Context, userID, resource string
 // Recurring periods fill Used/Limit. Forever overflow adds only Remaining to
 // Limit so spent bonus credits drop off the meter instead of sitting filled.
 func (m *Manager) GetMeterQuota(ctx context.Context, userID, resource string) (*MeterQuota, error) {
-	tier, usages, err := m.loadOrderedUsages(ctx, userID, resource)
+	tier, promotion, usages, err := m.loadOrderedUsages(ctx, userID, resource)
 	if err != nil {
 		return nil, err
 	}
@@ -1149,6 +1163,7 @@ func (m *Manager) GetMeterQuota(ctx context.Context, userID, resource string) (*
 		UserID:    userID,
 		Resource:  resource,
 		Tier:      tier,
+		Promotion: promotion,
 		UpdatedAt: m.now(ctx),
 		Periods:   make([]MeterPeriod, 0, len(usages)),
 	}

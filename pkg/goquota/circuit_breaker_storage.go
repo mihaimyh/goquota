@@ -181,3 +181,10 @@ func (s *CircuitBreakerStorage) ClearPromotion(ctx context.Context, userID strin
 		return store.ClearPromotion(ctx, userID)
 	})
 }
+
+// PromotionsSupported reports whether the wrapped storage implements
+// PromotionStore. The wrapper itself always has the PromotionStore methods, so
+// this delegates so that SupportsPromotions reports the real capability.
+func (s *CircuitBreakerStorage) PromotionsSupported() bool {
+	return SupportsPromotions(s.storage)
+}

@@ -116,19 +116,19 @@ func (h *Handler) getEntitlementAndTier(
 
 	if err == nil && ent != nil {
 		now := time.Now().UTC()
-		tier = ent.Tier
-		switch {
-		case ent.Promotion.IsActive(now):
-			tier = ent.Promotion.Tier
+		// Resolve through the shared resolver so this handler cannot drift from
+		// the Manager's quota decisions; then layer the display-only status.
+		tier = goquota.ResolveEffectiveTier(ent, tierDefault, now)
+		if promo := ent.ActivePromotion(now); promo != nil {
 			*status = statusActive
 			promotion = &PromotionInfo{
-				Tier:      ent.Promotion.Tier,
-				ExpiresAt: ent.Promotion.ExpiresAt,
-				Source:    ent.Promotion.Source,
+				Tier:      promo.Tier,
+				ExpiresAt: promo.ExpiresAt,
+				Source:    promo.Source,
 			}
-		case ent.ExpiresAt != nil && ent.ExpiresAt.Before(now):
+		} else if ent.ExpiresAt != nil && ent.ExpiresAt.Before(now) {
 			*status = statusExpired
-		default:
+		} else {
 			*status = statusActive
 		}
 	} else if err != nil && err != goquota.ErrEntitlementNotFound {

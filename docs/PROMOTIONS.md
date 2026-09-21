@@ -75,7 +75,7 @@ it has expired.
 
 | Guarantee | Mechanism |
 | --- | --- |
-| Promotion expires automatically | `Manager.effectiveTier` checks `now` at every read |
+| Promotion expires automatically | `ResolveEffectiveTier` checks `now` at every read |
 | Billing anniversary is never touched | Promotion writes do not modify `SubscriptionStartDate` |
 | Provider webhook idempotency is preserved | Promotion writes do not modify `UpdatedAt` |
 | Provider writes cannot erase a promotion | `Storage.SetEntitlement` preserves an existing promotion when the incoming `Promotion` is nil |
@@ -85,21 +85,75 @@ it has expired.
 
 ### Effective tier resolution
 
+Resolution is centralised in one exported function:
+
 ```go
-func (m *Manager) effectiveTier(ent *Entitlement, now time.Time) string {
-    if ent != nil && ent.Promotion.IsActive(now) {
-        return ent.Promotion.Tier
-    }
-    if ent != nil && ent.Tier != "" {
-        return ent.Tier
-    }
-    return m.config.DefaultTier
-}
+func ResolveEffectiveTier(ent *Entitlement, defaultTier string, now time.Time) string
+
+// ergonomic wrappers for callers that already hold an entitlement
+func (e *Entitlement) EffectiveTier(defaultTier string, now time.Time) string
+func (e *Entitlement) ActivePromotion(now time.Time) *TierPromotion
 ```
 
-All consumers of a user's tier (`Consume`, `ConsumeWithResult`, `GetQuota`,
-`GetEffectiveQuota`, `GetMeterQuota`, `TryConsume`, `SetUsage`) go through this
-resolution. `ApplyTierChange` is unaffected because it takes explicit tier names.
+The `Manager` uses it for every consumer of a user's tier (`Consume`,
+`ConsumeWithResult`, `GetQuota`, `GetEffectiveQuota`, `GetMeterQuota`,
+`TryConsume`, `SetUsage`). `ApplyTierChange` is unaffected because it takes
+explicit tier names.
+
+Because the effective tier is resolved on every read, read results already expose
+it, so a caller never needs to resolve by hand:
+
+| Result | Effective tier | Active overlay |
+| --- | --- | --- |
+| `*Usage` (from `GetQuota`) | `Usage.Tier` | `Usage.Promotion` |
+| `*EffectiveQuota` | `.Tier` | `.Promotion` |
+| `*MeterQuota` | `.Tier` | `.Promotion` |
+| `*ConsumeResult` | `.EffectiveTier` | `.Promotion` |
+
+> `Usage.Tier`, `EffectiveQuota.Tier` and `MeterQuota.Tier` are the **effective**
+> tier, not `Entitlement.Tier`. `Entitlement.Tier` is the provider-owned base
+> tier.
+
+### Integrating with an existing tier-resolution layer
+
+The most common integration bug is not in `goquota` — it is an application that
+already has a `tier` string somewhere (a DTO, a cache key, a JWT claim, a Dart or
+TypeScript enum) populated from `Entitlement.Tier`. That field now means "base
+tier", so the quota engine grants `premium` while the app keeps showing `free`.
+
+Checklist:
+
+1. **Never read `Entitlement.Tier` for a decision or for display.** Replace it
+   with `ent.EffectiveTier(defaultTier, now)` or `goquota.ResolveEffectiveTier`.
+2. **Prefer a read result that already carries the effective tier.** A call to
+   `GetQuota` / `GetEffectiveQuota` / `GetMeterQuota` / `ConsumeWithResult`
+   returns the effective tier *and* the active overlay, so a second call (and a
+   second resolution path) is unnecessary.
+3. **Mirror `Promotion` next to `Tier` in any DTO that mirrors an entitlement.**
+   If your DTO drops `Promotion`, it silently drops the effective tier too.
+4. **Check the capability once at startup:**
+   ```go
+   if !manager.PromotionsSupported() {
+       log.Fatal("storage does not implement PromotionStore")
+   }
+   ```
+   `PromotionsSupported` (and the free function `SupportsPromotions(storage)`)
+   unwraps wrappers such as `CircuitBreakerStorage`, so it reports the real
+   backend capability. Without it you only find out at the first
+   `GrantPromotion` (`ErrUnsupportedOperation`).
+5. **Keep the base and effective domains separate in your own types.** A
+   promotion-aware `EntitlementInfo` should expose both, e.g.
+   `{BaseTier, EffectiveTier, Promotion}`, and the billing/badge UI should read
+   `EffectiveTier` + `Promotion`.
+6. **React to promotion lifecycle out of band.** `GrantPromotion` /
+   `RevokePromotion` write audit entries but do not fire `WebhookCallback` (which
+   is provider-only), and lazy expiry fires no event. Use the audit log or your
+   own notification path.
+
+`pkg/api` is a worked example: the usage handler calls
+`goquota.ResolveEffectiveTier` / `ent.ActivePromotion` rather than inspecting
+`Promotion.IsActive` itself.
+
 
 ### API
 
@@ -114,6 +168,11 @@ type TierPromotion struct {
 }
 
 func (p *TierPromotion) IsActive(now time.Time) bool
+func (e *Entitlement) ActivePromotion(now time.Time) *TierPromotion
+
+// Canonical tier resolution (base tier overridden by an active promotion).
+func ResolveEffectiveTier(ent *Entitlement, defaultTier string, now time.Time) string
+func (e *Entitlement) EffectiveTier(defaultTier string, now time.Time) string
 
 type PromotionRequest struct {
     UserID    string
@@ -128,6 +187,10 @@ type PromotionRequest struct {
 func (m *Manager) GrantPromotion(ctx context.Context, req *PromotionRequest) (*Entitlement, error)
 func (m *Manager) RevokePromotion(ctx context.Context, userID string) error
 func (m *Manager) GetEffectiveTier(ctx context.Context, userID string) (string, error)
+
+// Startup capability check.
+func SupportsPromotions(storage Storage) bool
+func (m *Manager) PromotionsSupported() bool
 ```
 
 `GrantPromotion`:
