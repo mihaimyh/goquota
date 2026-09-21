@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
+	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -730,7 +731,48 @@ func (s *Storage) CheckRateLimit(ctx context.Context, req *goquota.RateLimitRequ
 		return false, 0, time.Time{}, fmt.Errorf("failed to check rate limit: %w", err)
 	}
 
+	// Best-effort: purge sliding-window timestamps whose window has elapsed so
+	// the per-user subcollection does not grow without bound.
+	if req.Algorithm == "sliding_window" {
+		s.cleanupExpiredRateLimitTimestamps(ctx, req)
+	}
+
 	return allowed, remaining, resetTime, nil
+}
+
+// cleanupExpiredRateLimitTimestamps deletes sliding-window timestamp documents
+// older than the window. It is best-effort and bounded (100 docs per call).
+func (s *Storage) cleanupExpiredRateLimitTimestamps(ctx context.Context, req *goquota.RateLimitRequest) {
+	cutoff := req.Now.Add(-req.Window)
+	doc := s.rateLimitDoc(req.UserID, req.Resource)
+	iter := doc.Collection(s.rateLimitTimestampsSub).
+		Where("timestamp", "<=", cutoff).
+		Limit(100).
+		Documents(ctx)
+
+	var refs []*firestore.DocumentRef
+	for {
+		snap, err := iter.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			iter.Stop()
+			return
+		}
+		refs = append(refs, snap.Ref)
+	}
+	iter.Stop()
+
+	if len(refs) == 0 {
+		return
+	}
+	batch := s.client.Batch()
+	for _, ref := range refs {
+		batch.Delete(ref)
+	}
+	//nolint:errcheck // best-effort cleanup; a failure here must not fail the rate-limit check
+	_, _ = batch.Commit(ctx)
 }
 
 func (s *Storage) checkTokenBucket(

@@ -56,7 +56,7 @@ func TestStorage_CheckRateLimit_TokenBucket_Exceeded(t *testing.T) {
 		UserID:    userID,
 		Resource:  "api_calls",
 		Algorithm: "token_bucket",
-		Rate: 10,
+		Rate:      10,
 		// Long window so the 11 transactions below cannot refill a token
 		// (refill = floor(rate*elapsed/window) = 0), keeping the denial
 		// assertion deterministic under load.
@@ -227,4 +227,49 @@ func TestStorage_CheckRateLimit_TokenBucket_ZeroRateBlocks(t *testing.T) {
 	allowed, _, _, err = storage.CheckRateLimit(ctx, req)
 	require.NoError(t, err)
 	assert.False(t, allowed, "Rate=0 token bucket must block once drained")
+}
+
+// TestStorage_CheckRateLimit_SlidingWindow_CleansExpiredTimestamps is a
+// regression test for the unbounded-growth finding: expired timestamp documents
+// must be purged instead of accumulating forever.
+func TestStorage_CheckRateLimit_SlidingWindow_CleansExpiredTimestamps(t *testing.T) {
+	ctx := context.Background()
+	client := setupFirestoreClient(t)
+	defer client.Close()
+
+	storage, err := New(client, Config{})
+	require.NoError(t, err)
+
+	userID := fmt.Sprintf("sl_clean_%d", time.Now().UnixNano())
+	base := time.Now().UTC()
+	window := time.Minute
+	req := &goquota.RateLimitRequest{
+		UserID:    userID,
+		Resource:  "api_calls",
+		Algorithm: "sliding_window",
+		Rate:      100,
+		Window:    window,
+		Now:       base,
+	}
+	for i := 0; i < 20; i++ {
+		if _, _, _, err := storage.CheckRateLimit(ctx, req); err != nil {
+			t.Fatalf("rate limit %d: %v", i, err)
+		}
+	}
+
+	// Advance past the window; the next check must purge the expired timestamps.
+	req.Now = base.Add(window + time.Second)
+	if _, _, _, err := storage.CheckRateLimit(ctx, req); err != nil {
+		t.Fatalf("post-window rate limit: %v", err)
+	}
+
+	docs, err := client.Collection("rate_limits").
+		Doc(fmt.Sprintf("%s_%s", userID, "api_calls")).
+		Collection("timestamps").Documents(ctx).GetAll()
+	if err != nil {
+		t.Fatalf("count timestamps: %v", err)
+	}
+	if len(docs) > 5 {
+		t.Fatalf("expired sliding-window timestamps were not cleaned: %d docs remain", len(docs))
+	}
 }
