@@ -2,3 +2,6 @@
 
 # Stripe credentials (contains sensitive API keys and secrets)
 examples/comprehensive/STRIPE_CREDENTIALS.md
+
+# Local audit/remediation scratch space
+.tmp/
