@@ -30,6 +30,13 @@ type Storage struct {
 	mergeRecordsCollection string
 }
 
+// Compile-time interface conformance checks.
+var (
+	_ goquota.Storage        = (*Storage)(nil)
+	_ goquota.TimeSource     = (*Storage)(nil)
+	_ goquota.PromotionStore = (*Storage)(nil)
+)
+
 // Now returns the current time from Firestore server.
 // This ensures consistency in distributed systems by using Firestore server time
 // instead of application server time, preventing clock skew issues.
@@ -203,6 +210,10 @@ func (s *Storage) GetEntitlement(ctx context.Context, userID string) (*goquota.E
 		ent.ExpireAt = &expireAt
 	}
 
+	if promo, ok := data["promotion"].(map[string]interface{}); ok {
+		ent.Promotion = promotionFromMap(promo)
+	}
+
 	return ent, nil
 }
 
@@ -228,11 +239,79 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 		data["expiresAt"] = *ent.ExpiresAt
 	}
 
+	// Only write the promotion key when set. With MergeAll, omitting it preserves
+	// any stored promotion, so provider writes cannot erase one. Clear via
+	// RevokePromotion / ClearPromotion.
+	if ent.Promotion != nil {
+		data["promotion"] = promotionToMap(ent.Promotion)
+	}
+
 	_, err := doc.Set(ctx, data, firestore.MergeAll)
 	if err != nil {
 		return fmt.Errorf("failed to set entitlement: %w", err)
 	}
 
+	return nil
+}
+
+// SetPromotion implements goquota.PromotionStore.
+func (s *Storage) SetPromotion(
+	ctx context.Context, userID string, promo *goquota.TierPromotion,
+) error {
+	if userID == "" {
+		return fmt.Errorf("userID is required")
+	}
+	if promo == nil {
+		return fmt.Errorf("promotion is required")
+	}
+	if promo.ExpiresAt.IsZero() {
+		return fmt.Errorf("promotion expiresAt is required")
+	}
+
+	doc := s.client.Collection(s.entitlementsCollection).Doc(userID)
+	snap, err := doc.Get(ctx)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return goquota.ErrEntitlementNotFound
+		}
+		return fmt.Errorf("failed to get entitlement: %w", err)
+	}
+	if !snap.Exists() {
+		return goquota.ErrEntitlementNotFound
+	}
+
+	promoCopy := *promo
+	if _, err := doc.Set(ctx, map[string]interface{}{
+		"promotion": promotionToMap(&promoCopy),
+	}, firestore.MergeAll); err != nil {
+		return fmt.Errorf("failed to set promotion: %w", err)
+	}
+	return nil
+}
+
+// ClearPromotion implements goquota.PromotionStore. It is idempotent.
+func (s *Storage) ClearPromotion(ctx context.Context, userID string) error {
+	if userID == "" {
+		return fmt.Errorf("userID is required")
+	}
+
+	doc := s.client.Collection(s.entitlementsCollection).Doc(userID)
+	snap, err := doc.Get(ctx)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil
+		}
+		return fmt.Errorf("failed to get entitlement: %w", err)
+	}
+	if !snap.Exists() {
+		return nil
+	}
+
+	if _, err := doc.Set(ctx, map[string]interface{}{
+		"promotion": firestore.Delete,
+	}, firestore.MergeAll); err != nil {
+		return fmt.Errorf("failed to clear promotion: %w", err)
+	}
 	return nil
 }
 
@@ -1120,4 +1199,43 @@ func getBool(data map[string]interface{}, key string) bool {
 		return v
 	}
 	return false
+}
+
+// promotionToMap serializes a promotion for a Firestore entitlement document.
+func promotionToMap(p *goquota.TierPromotion) map[string]interface{} {
+	m := map[string]interface{}{
+		"tier":      p.Tier,
+		"grantedAt": p.GrantedAt,
+		"expiresAt": p.ExpiresAt,
+	}
+	if p.Source != "" {
+		m["source"] = p.Source
+	}
+	if p.Reason != "" {
+		m["reason"] = p.Reason
+	}
+	if p.IdempotencyKey != "" {
+		m["idempotencyKey"] = p.IdempotencyKey
+	}
+	return m
+}
+
+// promotionFromMap deserializes a promotion from a Firestore document.
+// Returns nil when there is no usable promotion (e.g. a cleared field).
+func promotionFromMap(m map[string]interface{}) *goquota.TierPromotion {
+	if m == nil {
+		return nil
+	}
+	p := &goquota.TierPromotion{
+		Tier:           getString(m, "tier"),
+		GrantedAt:      getTime(m, "grantedAt"),
+		ExpiresAt:      getTime(m, "expiresAt"),
+		Source:         getString(m, "source"),
+		Reason:         getString(m, "reason"),
+		IdempotencyKey: getString(m, "idempotencyKey"),
+	}
+	if p.Tier == "" || p.ExpiresAt.IsZero() {
+		return nil
+	}
+	return p
 }

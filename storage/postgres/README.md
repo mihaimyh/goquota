@@ -51,11 +51,12 @@ Execute the migration files in order to create the required tables:
 psql -d goquota -f storage/postgres/migrations/001_initial_schema.sql
 psql -d goquota -f storage/postgres/migrations/002_forever_periods.sql
 psql -d goquota -f storage/postgres/migrations/003_usage_period_type_key.sql
+psql -d goquota -f storage/postgres/migrations/004_tier_promotions.sql
 ```
 
 Or manually run the SQL from the files in `storage/postgres/migrations/`.
 
-> `New()` also calls `ensureMergeTables` and `ensureUsagePeriodTypeKey` at startup, so the merge/seal tables and the usage unique index are created automatically if missing. Running the migrations explicitly is still recommended for production.
+> `New()` also calls `ensureMergeTables`, `ensureUsagePeriodTypeKey` and `ensurePromotionColumn` at startup, so the merge/seal tables, the usage unique index and the `entitlements.promotion` column are created automatically if missing. Running the migrations explicitly is still recommended for production.
 
 ### 3. Tables
 

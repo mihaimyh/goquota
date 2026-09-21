@@ -268,12 +268,11 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 	tier := m.config.DefaultTier
 	var period Period
 
-	if err == nil {
-		tier = ent.Tier
-	}
-
 	// Get current time (using TimeSource if available)
 	now := m.now(ctx)
+	if err == nil {
+		tier = m.effectiveTier(ent, now)
+	}
 
 	// Calculate period based on type
 	switch periodType {
@@ -548,12 +547,12 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 		return 0, err
 	}
 
-	if err == nil {
-		tier = ent.Tier
-	}
-
 	// Get current time (using TimeSource if available)
 	now := m.now(ctx)
+
+	if err == nil {
+		tier = m.effectiveTier(ent, now)
+	}
 
 	if err == nil && ent.IsSealed(now) {
 		return 0, ErrUserSealed
@@ -926,7 +925,7 @@ func (m *Manager) consumeAutoWithResult(ctx context.Context, userID, resource st
 		return nil, err
 	}
 	if err == nil {
-		tier = ent.Tier
+		tier = m.tierFor(ctx, ent)
 	}
 
 	var lastErr error
@@ -1053,7 +1052,7 @@ func (m *Manager) loadOrderedUsages(ctx context.Context, userID, resource string
 		return "", nil, err
 	}
 	if err == nil {
-		tier = ent.Tier
+		tier = m.tierFor(ctx, ent)
 	}
 
 	order := m.consumptionOrderForTier(tier)
@@ -1264,7 +1263,7 @@ func (m *Manager) TryConsume(ctx context.Context, userID, resource string, amoun
 	ent, err := m.GetEntitlement(ctx, userID)
 	tier := m.config.DefaultTier
 	if err == nil {
-		tier = ent.Tier
+		tier = m.tierFor(ctx, ent)
 	}
 
 	// Get limit for tier
@@ -1999,7 +1998,7 @@ func (m *Manager) SetUsage(ctx context.Context, userID, resource string, periodT
 	ent, err := m.GetEntitlement(ctx, userID)
 	tier := m.config.DefaultTier
 	if err == nil && ent != nil {
-		tier = ent.Tier
+		tier = m.tierFor(ctx, ent)
 	}
 
 	// Get current time (using TimeSource if available)

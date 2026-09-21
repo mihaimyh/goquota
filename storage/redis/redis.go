@@ -20,6 +20,13 @@ type Storage struct {
 	scripts map[string]*redis.Script
 }
 
+// Compile-time interface conformance checks.
+var (
+	_ goquota.Storage        = (*Storage)(nil)
+	_ goquota.TimeSource     = (*Storage)(nil)
+	_ goquota.PromotionStore = (*Storage)(nil)
+)
+
 // Now returns the current time from Redis server.
 // This ensures consistency in distributed systems by using Redis server time
 // instead of application server time, preventing clock skew issues.
@@ -390,6 +397,24 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 		return fmt.Errorf("invalid entitlement")
 	}
 
+	// Preserve an existing promotion when the incoming entitlement does not set
+	// one, so provider webhooks/syncs cannot erase a promotion. Use
+	// RevokePromotion / ClearPromotion to clear one deliberately.
+	toStore := ent
+	if ent.Promotion == nil {
+		if existing, getErr := s.GetEntitlement(ctx, ent.UserID); getErr == nil &&
+			existing != nil && existing.Promotion != nil {
+			cp := *ent
+			cp.Promotion = existing.Promotion
+			toStore = &cp
+		}
+	}
+
+	return s.writeEntitlement(ctx, toStore)
+}
+
+// writeEntitlement persists ent verbatim, bypassing promotion preservation.
+func (s *Storage) writeEntitlement(ctx context.Context, ent *goquota.Entitlement) error {
 	key := s.entitlementKey(ent.UserID)
 
 	data, err := json.Marshal(ent)
@@ -408,6 +433,49 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 	}
 
 	return nil
+}
+
+// SetPromotion implements goquota.PromotionStore.
+func (s *Storage) SetPromotion(
+	ctx context.Context, userID string, promo *goquota.TierPromotion,
+) error {
+	if userID == "" {
+		return fmt.Errorf("userID is required")
+	}
+	if promo == nil {
+		return fmt.Errorf("promotion is required")
+	}
+	if promo.ExpiresAt.IsZero() {
+		return fmt.Errorf("promotion expiresAt is required")
+	}
+
+	ent, err := s.GetEntitlement(ctx, userID)
+	if err != nil {
+		return err
+	}
+	promoCopy := *promo
+	ent.Promotion = &promoCopy
+	return s.writeEntitlement(ctx, ent)
+}
+
+// ClearPromotion implements goquota.PromotionStore. It is idempotent.
+func (s *Storage) ClearPromotion(ctx context.Context, userID string) error {
+	if userID == "" {
+		return fmt.Errorf("userID is required")
+	}
+
+	ent, err := s.GetEntitlement(ctx, userID)
+	if err == goquota.ErrEntitlementNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if ent.Promotion == nil {
+		return nil
+	}
+	ent.Promotion = nil
+	return s.writeEntitlement(ctx, ent)
 }
 
 // GetUsage implements goquota.Storage

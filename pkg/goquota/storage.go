@@ -152,6 +152,27 @@ type ConsumeRequest struct {
 	IdempotencyKeyTTL time.Duration // TTL for idempotency key expiration
 }
 
+// PromotionStore is an optional Storage capability for applying or clearing a
+// user's tier promotion without rewriting the provider-owned base fields.
+//
+// Manager.GrantPromotion and Manager.RevokePromotion require the configured
+// Storage to implement this interface; otherwise they return
+// ErrUnsupportedOperation. All first-party storage adapters implement it, and
+// SetEntitlement preserves an existing promotion so provider writes cannot
+// erase one.
+type PromotionStore interface {
+	// SetPromotion stores promo as the user's active promotion overlay.
+	// It must not modify the base tier, subscription start date, base expiry,
+	// or UpdatedAt. Returns ErrEntitlementNotFound when the user has no
+	// entitlement row.
+	SetPromotion(ctx context.Context, userID string, promo *TierPromotion) error
+
+	// ClearPromotion removes the user's promotion overlay, if any. It is
+	// idempotent: clearing a missing promotion (or missing entitlement) is not
+	// an error.
+	ClearPromotion(ctx context.Context, userID string) error
+}
+
 // TierChangeRequest represents a tier change with proration
 // TierChangeRequest represents a tier change with proration
 type TierChangeRequest struct {

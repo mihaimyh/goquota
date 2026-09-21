@@ -5,9 +5,17 @@ import "time"
 // UsageResponse represents the complete quota state for a user
 type UsageResponse struct {
 	UserID    string                   `json:"user_id"`
-	Tier      string                   `json:"tier"`
+	Tier      string                   `json:"tier"`   // effective tier (promotion-aware)
 	Status    string                   `json:"status"` // "active", "expired", "default"
+	Promotion *PromotionInfo           `json:"promotion,omitempty"`
 	Resources map[string]ResourceUsage `json:"resources"`
+}
+
+// PromotionInfo describes an active tier promotion in a usage response.
+type PromotionInfo struct {
+	Tier      string    `json:"tier"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Source    string    `json:"source,omitempty"`
 }
 
 // ResourceUsage represents quota information for a single resource

@@ -157,3 +157,27 @@ func (s *CircuitBreakerStorage) MergeUser(ctx context.Context, req *StorageMerge
 	})
 	return result, err
 }
+
+// SetPromotion forwards to the inner storage when it implements PromotionStore.
+func (s *CircuitBreakerStorage) SetPromotion(
+	ctx context.Context, userID string, promo *TierPromotion,
+) error {
+	store, ok := s.storage.(PromotionStore)
+	if !ok {
+		return ErrUnsupportedOperation
+	}
+	return s.cb.Execute(ctx, func() error {
+		return store.SetPromotion(ctx, userID, promo)
+	})
+}
+
+// ClearPromotion forwards to the inner storage when it implements PromotionStore.
+func (s *CircuitBreakerStorage) ClearPromotion(ctx context.Context, userID string) error {
+	store, ok := s.storage.(PromotionStore)
+	if !ok {
+		return ErrUnsupportedOperation
+	}
+	return s.cb.Execute(ctx, func() error {
+		return store.ClearPromotion(ctx, userID)
+	})
+}

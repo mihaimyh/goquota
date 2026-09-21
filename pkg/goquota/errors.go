@@ -52,6 +52,10 @@ var (
 
 	// ErrInvalidMergeRequest is returned when MergeUser is missing required fields.
 	ErrInvalidMergeRequest = errors.New("invalid merge request")
+
+	// ErrInvalidPromotionRequest is returned when a promotion request is missing
+	// required fields, targets an unconfigured tier, or has a non-future expiry.
+	ErrInvalidPromotionRequest = errors.New("invalid promotion request")
 )
 
 // RateLimitExceededError provides detailed information about a rate limit exceeded error

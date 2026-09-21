@@ -52,6 +52,13 @@ func (s *Storage) Now(_ context.Context) (time.Time, error) {
 	return time.Now().UTC(), nil
 }
 
+// Compile-time interface conformance checks.
+var (
+	_ goquota.Storage        = (*Storage)(nil)
+	_ goquota.TimeSource     = (*Storage)(nil)
+	_ goquota.PromotionStore = (*Storage)(nil)
+)
+
 // New creates a new in-memory storage adapter
 func New() *Storage {
 	return &Storage{
@@ -78,6 +85,10 @@ func (s *Storage) GetEntitlement(_ context.Context, userID string) (*goquota.Ent
 
 	// Return a copy to prevent external mutations
 	entCopy := *ent
+	if ent.Promotion != nil {
+		promoCopy := *ent.Promotion
+		entCopy.Promotion = &promoCopy
+	}
 	return &entCopy, nil
 }
 
@@ -92,7 +103,66 @@ func (s *Storage) SetEntitlement(_ context.Context, ent *goquota.Entitlement) er
 
 	// Store a copy to prevent external mutations
 	entCopy := *ent
+	// Deep-copy the promotion so later caller mutation cannot change stored state.
+	if entCopy.Promotion != nil {
+		promoCopy := *entCopy.Promotion
+		entCopy.Promotion = &promoCopy
+	} else if existing, ok := s.entitlements[ent.UserID]; ok && existing.Promotion != nil {
+		// Preserve an existing promotion when the incoming entitlement does not
+		// set one, so provider writes cannot erase a promotion. Use
+		// RevokePromotion / ClearPromotion to clear one deliberately.
+		promoCopy := *existing.Promotion
+		entCopy.Promotion = &promoCopy
+	}
 	s.entitlements[ent.UserID] = &entCopy
+	return nil
+}
+
+// SetPromotion implements goquota.PromotionStore.
+func (s *Storage) SetPromotion(
+	_ context.Context, userID string, promo *goquota.TierPromotion,
+) error {
+	if userID == "" {
+		return fmt.Errorf("userID is required")
+	}
+	if promo == nil {
+		return fmt.Errorf("promotion is required")
+	}
+	if promo.ExpiresAt.IsZero() {
+		return fmt.Errorf("promotion expiresAt is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ent, ok := s.entitlements[userID]
+	if !ok {
+		return goquota.ErrEntitlementNotFound
+	}
+
+	entCopy := *ent
+	promoCopy := *promo
+	entCopy.Promotion = &promoCopy
+	s.entitlements[userID] = &entCopy
+	return nil
+}
+
+// ClearPromotion implements goquota.PromotionStore. It is idempotent.
+func (s *Storage) ClearPromotion(_ context.Context, userID string) error {
+	if userID == "" {
+		return fmt.Errorf("userID is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ent, ok := s.entitlements[userID]
+	if !ok {
+		return nil
+	}
+	entCopy := *ent
+	entCopy.Promotion = nil
+	s.entitlements[userID] = &entCopy
 	return nil
 }
 

@@ -122,6 +122,9 @@ func (s *Storage) startWorker() {
 
 // --- Strategy: Read-Through (Hot → Cold → Populate Hot) ---
 
+// Compile-time interface conformance checks.
+var _ goquota.PromotionStore = (*Storage)(nil)
+
 // GetEntitlement implements goquota.Storage with read-through strategy.
 func (s *Storage) GetEntitlement(ctx context.Context, userID string) (*goquota.Entitlement, error) {
 	// 1. Try Hot
@@ -207,6 +210,42 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 	// 2. Write Hot (Availability)
 	// If Hot fails, we log it but don't fail the operation since Cold succeeded
 	_ = s.hot.SetEntitlement(ctx, ent) //nolint:errcheck // Best effort - Cold is source of truth
+	return nil
+}
+
+// SetPromotion implements goquota.PromotionStore with write-through
+// (Cold → Hot). Cold is the source of truth.
+func (s *Storage) SetPromotion(
+	ctx context.Context, userID string, promo *goquota.TierPromotion,
+) error {
+	coldStore, ok := s.cold.(goquota.PromotionStore)
+	if !ok {
+		return goquota.ErrUnsupportedOperation
+	}
+	if err := coldStore.SetPromotion(ctx, userID, promo); err != nil {
+		return err
+	}
+	if hotStore, ok := s.hot.(goquota.PromotionStore); ok {
+		//nolint:errcheck // Best effort - Cold is source of truth
+		_ = hotStore.SetPromotion(ctx, userID, promo)
+	}
+	return nil
+}
+
+// ClearPromotion implements goquota.PromotionStore with write-through
+// (Cold → Hot). Cold is the source of truth.
+func (s *Storage) ClearPromotion(ctx context.Context, userID string) error {
+	coldStore, ok := s.cold.(goquota.PromotionStore)
+	if !ok {
+		return goquota.ErrUnsupportedOperation
+	}
+	if err := coldStore.ClearPromotion(ctx, userID); err != nil {
+		return err
+	}
+	if hotStore, ok := s.hot.(goquota.PromotionStore); ok {
+		//nolint:errcheck // Best effort - Cold is source of truth
+		_ = hotStore.ClearPromotion(ctx, userID)
+	}
 	return nil
 }
 

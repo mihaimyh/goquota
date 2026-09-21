@@ -55,7 +55,7 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Get Entitlement (Tier)
-	ent, tier, ok := h.getEntitlementAndTier(ctx, userID, &status, &errorType, w, r)
+	ent, tier, promotion, ok := h.getEntitlementAndTier(ctx, userID, &status, &errorType, w, r)
 	if !ok {
 		return
 	}
@@ -80,7 +80,7 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 5. Send response
-	h.sendUsageResponse(w, userID, tier, status, resourceUsage, &status, &errorType)
+	h.sendUsageResponse(w, userID, tier, promotion, status, resourceUsage, &status, &errorType)
 }
 
 // validateUserID extracts and validates the user ID from the request
@@ -103,30 +103,42 @@ func (h *Handler) validateUserID(w http.ResponseWriter, r *http.Request, status,
 	return userID, true
 }
 
-// getEntitlementAndTier retrieves entitlement and determines tier/status
+// getEntitlementAndTier retrieves entitlement and determines the effective
+// tier/status, accounting for an active tier promotion.
 func (h *Handler) getEntitlementAndTier(
 	ctx context.Context, userID string, status, errorType *string,
 	w http.ResponseWriter, r *http.Request,
-) (*goquota.Entitlement, string, bool) {
+) (*goquota.Entitlement, string, *PromotionInfo, bool) {
 	ent, err := h.config.Manager.GetEntitlement(ctx, userID)
 	tier := tierDefault
 	*status = statusDefault
+	var promotion *PromotionInfo
 
 	if err == nil && ent != nil {
+		now := time.Now().UTC()
 		tier = ent.Tier
-		if ent.ExpiresAt != nil && ent.ExpiresAt.Before(time.Now().UTC()) {
+		switch {
+		case ent.Promotion.IsActive(now):
+			tier = ent.Promotion.Tier
+			*status = statusActive
+			promotion = &PromotionInfo{
+				Tier:      ent.Promotion.Tier,
+				ExpiresAt: ent.Promotion.ExpiresAt,
+				Source:    ent.Promotion.Source,
+			}
+		case ent.ExpiresAt != nil && ent.ExpiresAt.Before(now):
 			*status = statusExpired
-		} else {
+		default:
 			*status = statusActive
 		}
 	} else if err != nil && err != goquota.ErrEntitlementNotFound {
 		*status = statusError
 		*errorType = "storage_error"
 		h.handleError(w, r, fmt.Errorf("failed to get entitlement: %w", err), http.StatusInternalServerError)
-		return nil, "", false
+		return nil, "", nil, false
 	}
 
-	return ent, tier, true
+	return ent, tier, promotion, true
 }
 
 // discoverResourcesWithMetrics discovers resources and records metrics
@@ -181,13 +193,14 @@ func (h *Handler) buildResourceUsageMap(
 
 // sendUsageResponse sends the usage response
 func (h *Handler) sendUsageResponse(
-	w http.ResponseWriter, userID, tier, status string,
-	resourceUsage map[string]ResourceUsage, finalStatus, errorType *string,
+	w http.ResponseWriter, userID, tier string, promotion *PromotionInfo,
+	status string, resourceUsage map[string]ResourceUsage, finalStatus, errorType *string,
 ) {
 	response := UsageResponse{
 		UserID:    userID,
 		Tier:      tier,
 		Status:    status,
+		Promotion: promotion,
 		Resources: resourceUsage,
 	}
 

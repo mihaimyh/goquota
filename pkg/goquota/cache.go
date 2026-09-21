@@ -156,6 +156,10 @@ func (c *LRUCache) GetEntitlement(userID string) (*Entitlement, bool) {
 		return nil, false
 	}
 	cp := *ent
+	if ent.Promotion != nil {
+		promoCopy := *ent.Promotion
+		cp.Promotion = &promoCopy
+	}
 	return &cp, true
 }
 

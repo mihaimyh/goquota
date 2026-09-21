@@ -167,6 +167,7 @@ func New(ctx context.Context, config Config) (*Storage, error) {
 
 	_ = s.ensureMergeTables(ctx)        //nolint:errcheck // MergeUser retries; GetEntitlement ignores missing tables
 	_ = s.ensureUsagePeriodTypeKey(ctx) //nolint:errcheck // ON CONFLICT fails closed if the unique index is missing
+	_ = s.ensurePromotionColumn(ctx)    //nolint:errcheck // SetPromotion fails closed if the column is missing
 
 	// Start cleanup goroutine if enabled
 	if config.CleanupEnabled {
@@ -190,9 +191,10 @@ func (s *Storage) Close() {
 func (s *Storage) GetEntitlement(ctx context.Context, userID string) (*goquota.Entitlement, error) {
 	var ent goquota.Entitlement
 	var expiresAt *time.Time
+	var promotionJSON []byte
 
 	err := s.pool.QueryRow(ctx,
-		fmt.Sprintf(`SELECT user_id, tier_id, subscription_start, expires_at, updated_at
+		fmt.Sprintf(`SELECT user_id, tier_id, subscription_start, expires_at, updated_at, promotion
 			FROM %s WHERE user_id = $1`, s.config.EntitlementsTable),
 		userID).Scan(
 		&ent.UserID,
@@ -200,6 +202,7 @@ func (s *Storage) GetEntitlement(ctx context.Context, userID string) (*goquota.E
 		&ent.SubscriptionStartDate,
 		&expiresAt,
 		&ent.UpdatedAt,
+		&promotionJSON,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -215,6 +218,9 @@ func (s *Storage) GetEntitlement(ctx context.Context, userID string) (*goquota.E
 	}
 
 	ent.ExpiresAt = expiresAt
+	if ent.Promotion, err = unmarshalPromotion(promotionJSON); err != nil {
+		return nil, err
+	}
 	if err := s.overlayIdentitySeal(ctx, &ent); err != nil {
 		return nil, err
 	}
@@ -227,15 +233,25 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 		return fmt.Errorf("invalid entitlement")
 	}
 
-	_, err := s.pool.Exec(ctx,
-		fmt.Sprintf(`INSERT INTO %s (user_id, tier_id, subscription_start, expires_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5)
+	promotionJSON, err := marshalPromotion(ent.Promotion)
+	if err != nil {
+		return fmt.Errorf("failed to marshal promotion: %w", err)
+	}
+
+	// COALESCE(EXCLUDED.promotion, <table>.promotion) preserves an existing
+	// promotion when the incoming entitlement does not set one, so provider
+	// writes cannot erase it. Clear via RevokePromotion / ClearPromotion.
+	_, err = s.pool.Exec(ctx,
+		fmt.Sprintf(`INSERT INTO %s (user_id, tier_id, subscription_start, expires_at, updated_at, promotion)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (user_id) DO UPDATE SET
 				tier_id = EXCLUDED.tier_id,
 				subscription_start = EXCLUDED.subscription_start,
 				expires_at = EXCLUDED.expires_at,
-				updated_at = EXCLUDED.updated_at`, s.config.EntitlementsTable),
-		ent.UserID, ent.Tier, ent.SubscriptionStartDate, ent.ExpiresAt, time.Now().UTC(),
+				updated_at = EXCLUDED.updated_at,
+				promotion = COALESCE(EXCLUDED.promotion, %s.promotion)`,
+			s.config.EntitlementsTable, s.config.EntitlementsTable),
+		ent.UserID, ent.Tier, ent.SubscriptionStartDate, ent.ExpiresAt, time.Now().UTC(), promotionJSON,
 	)
 
 	if err != nil {

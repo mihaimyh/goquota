@@ -17,6 +17,7 @@ This document outlines planned enhancements to make goquota a comprehensive, pro
 - Transaction-safe quota consumption
 - HTTP middleware integration
 - Multi-framework middleware (standard `net/http`, Gin, Echo, Fiber)
+- Tier promotions (time-boxed temporary tier grants with automatic expiry)
 
 ---
 

@@ -20,6 +20,7 @@ Subscription quota management for Go with anniversary-based billing cycles, pror
 - **Rate Limiting** - Time-based request frequency limits (requests per second/minute/hour) with token bucket and sliding window algorithms
 - **Soft Limits & Warnings** - Trigger callbacks when usage approaches limits (e.g. 80%)
 - **Admin Operations** - Manual quota management for incident response (SetUsage, GrantOneTimeCredit, ResetUsage, DrainRemaining, MergeUser)
+- **Tier Promotions** - Time-boxed tier grants (e.g. premium for 1 month) that expire automatically, survive provider webhooks, and are provider-safe
 - **Dry-Run Mode** - Test quota rules without blocking traffic for safe deployments
 - **Audit Trail** - Comprehensive logging of all quota changes for compliance and debugging
 - **Clock Skew Protection** - Uses storage server time to prevent quota double-spending at reset boundaries
@@ -708,6 +709,67 @@ Forever: only remaining credits (`Limit - Used`) are added to the target limit; 
 Merge idempotency is durable (not a 24h consume TTL).
 
 All admin operations are automatically logged if an audit logger is configured.
+
+### Tier Promotions (Temporary Tier Grants)
+
+Grant a user a tier they did not pay for, for a bounded period (support comps,
+promo codes, partner access, retention offers). A promotion is a **time-boxed
+overlay on the base entitlement**: while active it drives every quota and rate
+limit, and when it expires the provider-owned base tier resumes automatically —
+no scheduler required.
+
+```go
+// Promote to premium for one calendar month.
+err := manager.GrantPromotion(ctx, &goquota.PromotionRequest{
+    UserID:         "user123",
+    Tier:           "premium",                     // must exist in Config.Tiers
+    ExpiresAt:      time.Now().UTC().AddDate(0, 1, 0),
+    Source:         "support_comp",
+    Reason:         "incident_2026_09",
+    IdempotencyKey: "comp-incident-2026-09",       // safe retries
+})
+
+// Or a fixed duration instead of an explicit expiry.
+err = manager.GrantPromotion(ctx, &goquota.PromotionRequest{
+    UserID: "user123", Tier: "premium", Duration: 14 * 24 * time.Hour,
+})
+
+// Resolve the tier currently in effect (promotion-aware).
+tier, _ := manager.GetEffectiveTier(ctx, "user123") // "premium" while active
+
+// Revoke early (idempotent).
+err = manager.RevokePromotion(ctx, "user123")
+```
+
+**Guarantees:**
+
+- **Auto-expiry** — the effective tier is resolved against the current read
+  time, so promotions end without a background job and stale caches
+  self-correct.
+- **Provider-safe** — `SetEntitlement` preserves an existing promotion when the
+  incoming entitlement has none, so RevenueCat/Stripe webhooks and `SyncUser`
+  cannot erase it. The base tier, `SubscriptionStartDate`, base `ExpiresAt` and
+  `UpdatedAt` are never modified (webhook idempotency and billing anniversary
+  stay intact).
+- **Idempotent grants** — repeating a grant with the same `IdempotencyKey`
+  while the promotion is active is a no-op.
+- **Validated** — the target tier must exist in `Config.Tiers`; the expiry must
+  be in the future.
+- **Audited** — `grant_promotion` / `revoke_promotion` entries are written when
+  the storage implements `AuditLogger`.
+
+Promotions are exposed by the Usage API as an effective `tier` plus a
+`promotion` block, and persisted by every first-party storage adapter through
+the optional `PromotionStore` capability. Backends without it return
+`ErrUnsupportedOperation`. Postgres requires the promotion column migration:
+
+```bash
+psql -d goquota -f storage/postgres/migrations/004_tier_promotions.sql
+```
+
+See [docs/PROMOTIONS.md](docs/PROMOTIONS.md) for the full design, storage
+contract, and explicit non-goals (notably: `MergeUser` does not transfer
+promotions).
 
 ### Dry-Run / Shadow Mode
 

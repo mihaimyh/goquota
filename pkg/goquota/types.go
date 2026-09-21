@@ -70,6 +70,45 @@ type Entitlement struct {
 	MigratedTo string
 	// ExpireAt is when the tombstone stops sealing this identity. Nil means permanent.
 	ExpireAt *time.Time
+
+	// Promotion is an optional time-boxed tier override managed by
+	// Manager.GrantPromotion / Manager.RevokePromotion.
+	//
+	// It is an overlay on top of the provider-owned base fields. Billing
+	// providers MUST NOT set it: Storage.SetEntitlement preserves an existing
+	// promotion when the incoming Promotion is nil, so provider webhooks and
+	// syncs cannot erase it. While active, Promotion.Tier takes precedence for
+	// every quota, rate-limit and warning decision.
+	Promotion *TierPromotion
+}
+
+// TierPromotion is a time-boxed override of a user's tier.
+//
+// It is an overlay on the base entitlement: while active it is the effective
+// tier, and when it expires the base tier resumes automatically because the
+// effective tier is resolved against the current time on every read (no
+// scheduled job is required).
+type TierPromotion struct {
+	// Tier is the tier that is in effect while the promotion is active.
+	Tier string
+	// GrantedAt is when the promotion was granted.
+	GrantedAt time.Time
+	// ExpiresAt is when the promotion stops being effective. Required.
+	ExpiresAt time.Time
+	// Source is an optional attribution, e.g. "manual", "promo_code", "partner".
+	Source string
+	// Reason is an optional human-readable reason, e.g. "support_comp".
+	Reason string
+	// IdempotencyKey is an optional caller-supplied key. Repeating a grant with
+	// the same key while the promotion is active is a no-op, so retried admin
+	// calls or webhooks cannot silently extend or double-apply a promotion.
+	IdempotencyKey string
+}
+
+// IsActive reports whether the promotion is in effect at now.
+// It is nil-safe: a nil promotion is never active.
+func (p *TierPromotion) IsActive(now time.Time) bool {
+	return p != nil && now.Before(p.ExpiresAt)
 }
 
 // IsSealed reports whether the identity is currently sealed at now.
@@ -685,4 +724,35 @@ func WithRefundIdempotencyKey(key string) RefundCreditsOption {
 	return func(opts *RefundCreditsOptions) {
 		opts.IdempotencyKey = key
 	}
+}
+
+// PromotionRequest describes a temporary tier grant.
+//
+// Either ExpiresAt or Duration must be provided. ExpiresAt is authoritative when
+// both are set. Duration is a fixed time.Duration; for a calendar month, compute
+// ExpiresAt with time.AddDate(0, 1, 0) instead.
+type PromotionRequest struct {
+	// UserID is the identity receiving the promotion. Required.
+	UserID string
+
+	// Tier is the tier to apply while the promotion is active. It must exist in
+	// Config.Tiers. Required.
+	Tier string
+
+	// ExpiresAt is when the promotion ends. Must be in the future.
+	ExpiresAt time.Time
+
+	// Duration is a convenience alternative to ExpiresAt (now + Duration).
+	Duration time.Duration
+
+	// Source is an optional attribution, e.g. "manual", "promo_code".
+	Source string
+
+	// Reason is an optional human-readable reason, e.g. "support_comp".
+	Reason string
+
+	// IdempotencyKey is optional. When it matches the key of an already-active
+	// promotion for this user, GrantPromotion returns the current entitlement
+	// without changing anything (safe retries).
+	IdempotencyKey string
 }
