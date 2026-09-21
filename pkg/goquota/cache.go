@@ -130,7 +130,13 @@ func (c *LRUCache) GetEntitlement(userID string) (*Entitlement, bool) {
 		c.entitlementMiss++
 		return nil, false
 	}
-	entry := el.Value.(*cacheEntry)
+	entry, ok := el.Value.(*cacheEntry)
+	if !ok {
+		c.entitlementList.Remove(el)
+		delete(c.entitlements, userID)
+		c.entitlementMiss++
+		return nil, false
+	}
 	if time.Now().After(entry.expiration) {
 		// Reclaim the expired entry so TTL bounds memory as well as freshness.
 		c.entitlementList.Remove(el)
@@ -158,16 +164,22 @@ func (c *LRUCache) SetEntitlement(userID string, ent *Entitlement, ttl time.Dura
 	defer c.mu.Unlock()
 
 	if el, exists := c.entitlements[userID]; exists {
-		entry := el.Value.(*cacheEntry)
-		entry.value = ent
-		entry.expiration = time.Now().Add(ttl)
-		c.entitlementList.MoveToFront(el)
-		return
+		if entry, ok := el.Value.(*cacheEntry); ok {
+			entry.value = ent
+			entry.expiration = time.Now().Add(ttl)
+			c.entitlementList.MoveToFront(el)
+			return
+		}
+		// Corrupt element: drop it and fall through to a fresh insert.
+		c.entitlementList.Remove(el)
+		delete(c.entitlements, userID)
 	}
 
 	if c.entitlementList.Len() >= c.maxEntitlements {
 		if back := c.entitlementList.Back(); back != nil {
-			delete(c.entitlements, back.Value.(*cacheEntry).key)
+			if be, ok := back.Value.(*cacheEntry); ok {
+				delete(c.entitlements, be.key)
+			}
 			c.entitlementList.Remove(back)
 			c.evictions++
 		}
@@ -195,7 +207,13 @@ func (c *LRUCache) GetUsage(key string) (*Usage, bool) {
 		c.usageMisses++
 		return nil, false
 	}
-	entry := el.Value.(*cacheEntry)
+	entry, ok := el.Value.(*cacheEntry)
+	if !ok {
+		c.usageList.Remove(el)
+		delete(c.usage, key)
+		c.usageMisses++
+		return nil, false
+	}
 	if time.Now().After(entry.expiration) {
 		// Reclaim the expired entry so TTL bounds memory as well as freshness.
 		c.usageList.Remove(el)
@@ -228,16 +246,22 @@ func (c *LRUCache) SetUsage(key string, usage *Usage, ttl time.Duration) {
 	defer c.mu.Unlock()
 
 	if el, exists := c.usage[key]; exists {
-		entry := el.Value.(*cacheEntry)
-		entry.value = usage
-		entry.expiration = time.Now().Add(ttl)
-		c.usageList.MoveToFront(el)
-		return
+		if entry, ok := el.Value.(*cacheEntry); ok {
+			entry.value = usage
+			entry.expiration = time.Now().Add(ttl)
+			c.usageList.MoveToFront(el)
+			return
+		}
+		// Corrupt element: drop it and fall through to a fresh insert.
+		c.usageList.Remove(el)
+		delete(c.usage, key)
 	}
 
 	if c.usageList.Len() >= c.maxUsage {
 		if back := c.usageList.Back(); back != nil {
-			delete(c.usage, back.Value.(*cacheEntry).key)
+			if be, ok := back.Value.(*cacheEntry); ok {
+				delete(c.usage, be.key)
+			}
 			c.usageList.Remove(back)
 			c.evictions++
 		}

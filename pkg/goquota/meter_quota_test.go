@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mihaimyh/goquota/pkg/goquota"
-	"github.com/mihaimyh/goquota/storage/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mihaimyh/goquota/pkg/goquota"
+	"github.com/mihaimyh/goquota/storage/memory"
 )
 
 func TestGetMeterQuota_UnusedBonusWidensTheBar(t *testing.T) {

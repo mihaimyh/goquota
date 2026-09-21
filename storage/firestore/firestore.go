@@ -767,12 +767,15 @@ func (s *Storage) cleanupExpiredRateLimitTimestamps(ctx context.Context, req *go
 	if len(refs) == 0 {
 		return
 	}
-	batch := s.client.Batch()
+	// BulkWriter replaces the deprecated WriteBatch API. Deletes are best-effort:
+	// a failure here must not fail the rate-limit check.
+	bw := s.client.BulkWriter(ctx)
 	for _, ref := range refs {
-		batch.Delete(ref)
+		if _, err := bw.Delete(ref); err != nil {
+			break
+		}
 	}
-	//nolint:errcheck // best-effort cleanup; a failure here must not fail the rate-limit check
-	_, _ = batch.Commit(ctx)
+	bw.End()
 }
 
 func (s *Storage) checkTokenBucket(

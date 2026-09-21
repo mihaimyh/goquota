@@ -51,10 +51,12 @@ func (s *Storage) ensureMergeTables(ctx context.Context) error {
 }
 
 func (s *Storage) ensureUsagePeriodTypeKey(ctx context.Context) error {
-	_, _ = s.pool.Exec(ctx, fmt.Sprintf(
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(
 		`ALTER TABLE %s DROP CONSTRAINT IF EXISTS quota_usage_user_id_resource_period_start_key`,
 		s.config.UsageTable,
-	))
+	)); err != nil {
+		return fmt.Errorf("drop legacy usage constraint: %w", err)
+	}
 	_, err := s.pool.Exec(ctx, fmt.Sprintf(`
 		CREATE UNIQUE INDEX IF NOT EXISTS quota_usage_user_resource_type_start_idx
 		ON %s (user_id, resource, period_type, period_start)`, s.config.UsageTable))

@@ -60,10 +60,7 @@ func (s *Storage) MergeUser(ctx context.Context, req *goquota.StorageMergeReques
 			return fmt.Errorf("merge user: get record: %w", err)
 		}
 		if err == nil && mergeSnap.Exists() {
-			decoded, decodeErr := mergeResultFromData(mergeSnap.Data())
-			if decodeErr != nil {
-				return decodeErr
-			}
+			decoded := mergeResultFromData(mergeSnap.Data())
 			decoded.IdempotentReplay = true
 			result = decoded
 			return nil
@@ -242,11 +239,11 @@ func mergeResultData(req *goquota.StorageMergeRequest, result *goquota.MergeUser
 	}
 }
 
-func mergeResultFromData(data map[string]interface{}) (*goquota.MergeUserResult, error) {
+func mergeResultFromData(data map[string]interface{}) *goquota.MergeUserResult {
 	result := &goquota.MergeUserResult{}
 	raw, ok := data["transfers"].([]interface{})
 	if !ok {
-		return result, nil
+		return result
 	}
 	result.Transfers = make([]goquota.MergeTransfer, 0, len(raw))
 	for _, item := range raw {
@@ -260,5 +257,5 @@ func mergeResultFromData(data map[string]interface{}) (*goquota.MergeUserResult,
 			Amount:     getInt(m, "amount"),
 		})
 	}
-	return result, nil
+	return result
 }

@@ -153,8 +153,10 @@ func New(ctx context.Context, config Config) (*Storage, error) {
 	// Initialize embedded memory adapter for rate limiting
 	memStorage := memory.New()
 
-	// Create context for background cleanup worker
-	cleanupCtx, cancel := context.WithCancel(context.Background())
+	// Create context for the background cleanup worker. Derive it from the
+	// caller's context (WithoutCancel) so it carries values/tracing yet outlives
+	// any request deadline; it is stopped explicitly via stopCleanup.
+	cleanupCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 
 	s := &Storage{
 		pool:        pool,
@@ -763,7 +765,9 @@ func (s *Storage) startCleanup(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.cleanupExpiredRecords(context.Background()); err != nil {
+			// Use the worker's context (canceled on Close) so an in-flight
+			// cleanup is aborted when the storage is shut down.
+			if err := s.cleanupExpiredRecords(ctx); err != nil {
 				// Log error but continue cleanup loop
 				// In production, you might want to use a logger here
 				_ = err

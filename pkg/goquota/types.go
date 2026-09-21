@@ -293,7 +293,7 @@ func (c *Config) Validate() error {
 		var errMsg strings.Builder
 		errMsg.WriteString("configuration validation failed:\n")
 		for i, err := range errs {
-			errMsg.WriteString(fmt.Sprintf("  %d. %s\n", i+1, err.Error()))
+			fmt.Fprintf(&errMsg, "  %d. %s\n", i+1, err.Error())
 		}
 		return fmt.Errorf("%s", errMsg.String())
 	}

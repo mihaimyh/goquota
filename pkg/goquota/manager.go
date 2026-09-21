@@ -1852,11 +1852,11 @@ func (m *Manager) resolveRefundPeriod(ctx context.Context, req *RefundRequest) (
 	// If no related key provided, try to derive it from the current idempotency key
 	// Common convention: refundKey = consumeKey + "_refund"
 	if searchKey == "" && req.IdempotencyKey != "" {
+		// Common convention: refundKey = consumeKey + "_refund". If the key has
+		// no "_refund" suffix there is nothing safe to derive, so leave searchKey
+		// empty rather than guessing.
 		if strings.HasSuffix(req.IdempotencyKey, "_refund") {
 			searchKey = strings.TrimSuffix(req.IdempotencyKey, "_refund")
-		} else {
-			// Also try without suffix if it doesn't have one? No, too risky.
-			// Just use the key itself as a last resort? No.
 		}
 	}
 
