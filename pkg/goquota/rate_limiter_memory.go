@@ -14,6 +14,7 @@ type MemoryRateLimiter struct {
 	tokenBuckets map[string]*tokenBucketState
 	// slidingWindows stores sliding window state: key = userID:resource
 	slidingWindows map[string]*slidingWindowState
+	accessCount    int // for periodically evicting idle keys
 }
 
 type tokenBucketState struct {
@@ -23,6 +24,7 @@ type tokenBucketState struct {
 	capacity   int
 	refillRate int // tokens per window
 	window     time.Duration
+	lastSeen   time.Time
 }
 
 type slidingWindowState struct {
@@ -30,6 +32,7 @@ type slidingWindowState struct {
 	timestamps []time.Time
 	window     time.Duration
 	limit      int
+	lastSeen   time.Time
 }
 
 // NewMemoryRateLimiter creates a new in-memory rate limiter
@@ -46,6 +49,19 @@ func (r *MemoryRateLimiter) Allow(
 ) (bool, *RateLimitInfo, error) {
 	key := userID + ":" + resource
 	now := time.Now().UTC()
+
+	// Periodically evict idle keys so long-lived limiters do not grow without
+	// bound. Only entries that would be reset anyway by idleness are removed.
+	r.mu.Lock()
+	r.accessCount++
+	sweep := r.accessCount >= 256
+	if sweep {
+		r.accessCount = 0
+	}
+	r.mu.Unlock()
+	if sweep {
+		r.evictIdle(now)
+	}
 
 	switch config.Algorithm {
 	case algorithmTokenBucket:
@@ -85,6 +101,7 @@ func (r *MemoryRateLimiter) allowTokenBucket(
 
 	bucket.mu.Lock()
 	defer bucket.mu.Unlock()
+	bucket.lastSeen = now
 
 	// Refill tokens based on elapsed time
 	elapsed := now.Sub(bucket.lastRefill)
@@ -152,6 +169,7 @@ func (r *MemoryRateLimiter) allowSlidingWindow(
 
 	window.mu.Lock()
 	defer window.mu.Unlock()
+	window.lastSeen = now
 
 	// Remove timestamps outside the window
 	cutoff := now.Add(-window.window)
@@ -199,6 +217,33 @@ func (r *MemoryRateLimiter) allowSlidingWindow(
 		ResetTime: resetTime,
 		Limit:     config.Rate,
 	}, nil
+}
+
+// evictIdle removes entries that would be equivalent to fresh ones if recreated:
+// sliding windows with no timestamps inside the window, and token buckets idle
+// long enough to have refilled to capacity.
+func (r *MemoryRateLimiter) evictIdle(now time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for key, b := range r.tokenBuckets {
+		b.mu.Lock()
+		if b.refillRate > 0 && b.capacity > 0 {
+			fullAfter := time.Duration(int64(b.window) * int64(b.capacity) / int64(b.refillRate))
+			if now.Sub(b.lastSeen) >= fullAfter {
+				delete(r.tokenBuckets, key)
+			}
+		}
+		b.mu.Unlock()
+	}
+
+	for key, w := range r.slidingWindows {
+		w.mu.Lock()
+		if now.Sub(w.lastSeen) >= w.window {
+			delete(r.slidingWindows, key)
+		}
+		w.mu.Unlock()
+	}
 }
 
 // intMin returns the minimum of two integers

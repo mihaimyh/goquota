@@ -2,6 +2,7 @@ package goquota
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -305,4 +306,29 @@ func TestMemoryRateLimiter_TokenBucket_ZeroRateBlocks(t *testing.T) {
 	allowed, _, err = limiter.Allow(context.Background(), "zero_user", "api_calls", config)
 	require.NoError(t, err)
 	assert.False(t, allowed, "Rate=0 token bucket must block once drained")
+}
+
+// TestMemoryRateLimiter_EvictsIdleKeys is a regression test for unbounded growth:
+// idle keys must be evicted periodically instead of being retained forever.
+func TestMemoryRateLimiter_EvictsIdleKeys(t *testing.T) {
+	l := NewMemoryRateLimiter()
+	cfg := RateLimitConfig{Algorithm: "token_bucket", Rate: 1000, Window: 10 * time.Millisecond, Burst: 1000}
+
+	for i := 0; i < 50; i++ {
+		_, _, _ = l.Allow(context.Background(), fmt.Sprintf("u%d", i), "r", cfg)
+	}
+	if len(l.tokenBuckets) != 50 {
+		t.Fatalf("expected 50 buckets, got %d", len(l.tokenBuckets))
+	}
+
+	time.Sleep(60 * time.Millisecond) // exceed the full-refill duration (10ms)
+
+	// Trigger the periodic sweep.
+	for i := 0; i < 300; i++ {
+		_, _, _ = l.Allow(context.Background(), "trigger", "r", cfg)
+	}
+
+	if len(l.tokenBuckets) > 5 {
+		t.Fatalf("idle token buckets were not evicted: %d remain", len(l.tokenBuckets))
+	}
 }
