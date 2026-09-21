@@ -19,6 +19,7 @@ type RateLimiter struct {
 	requestCount  int           // counter for deterministic cleanup
 	cleanupEvery  int           // cleanup every N requests (default: 100)
 	cleanupAtSize int           // cleanup when map size exceeds this (default: 200)
+	cleanupRuns   int           // number of cleanup sweeps performed (for tests)
 }
 
 type bucket struct {
@@ -44,10 +45,13 @@ func (rl *RateLimiter) allow(ip string) bool {
 
 	now := time.Now()
 
-	// Deterministic cleanup: Run every N requests or when map gets too large
+	// Deterministic cleanup: at most once per cleanupEvery requests. A full-map
+	// scan on every request whenever the map is large is O(N) per request
+	// (O(N^2) overall); the periodic sweep keeps the cost amortized.
 	rl.requestCount++
-	shouldCleanup := rl.requestCount%rl.cleanupEvery == 0 || len(rl.requests) > rl.cleanupAtSize
+	shouldCleanup := rl.requestCount%rl.cleanupEvery == 0
 	if shouldCleanup {
+		rl.cleanupRuns++
 		rl.cleanupExpired(now)
 		// Reset counter after cleanup to avoid overflow
 		if rl.requestCount >= rl.cleanupEvery*10 {

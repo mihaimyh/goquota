@@ -248,3 +248,21 @@ func TestRateLimiter_TrustProxyHonorsXForwardedFor(t *testing.T) {
 		}
 	}
 }
+
+// TestRateLimiter_NoFullScanPerRequestWhenLarge is a regression test for
+// BILLING-2: once the bucket map exceeds cleanupAtSize, the limiter must not
+// run a full-map sweep on every request (O(N^2) overall).
+func TestRateLimiter_NoFullScanPerRequestWhenLarge(t *testing.T) {
+	rl := NewRateLimiter(1000, time.Minute)
+
+	// Populate well beyond cleanupAtSize with fresh (non-expired) entries.
+	for i := 0; i < rl.cleanupAtSize+50; i++ {
+		rl.allow(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256))
+	}
+
+	before := rl.cleanupRuns
+	rl.allow("192.0.2.1")
+	if rl.cleanupRuns != before {
+		t.Fatalf("cleanup ran on a single request after the map exceeded cleanupAtSize: O(N) per request")
+	}
+}
