@@ -58,7 +58,14 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	resources := h.discoverResourcesWithMetrics(ctx, userID)
 
 	// 4. Build response for each resource
-	resourceUsage := h.buildResourceUsageMap(ctx, userID, resources, ent, &errorType)
+	resourceUsage, buildErr := h.buildResourceUsageMap(ctx, userID, resources, ent, &errorType)
+	if buildErr != nil && len(resourceUsage) == 0 {
+		// Nothing could be read: surface the outage instead of a misleading 200.
+		status = statusError
+		errorType = "storage_error"
+		h.handleError(w, r, fmt.Errorf("failed to read quota usage: %w", buildErr), http.StatusInternalServerError)
+		return
+	}
 
 	// 5. Send response
 	h.sendUsageResponse(w, userID, tier, status, resourceUsage, &status, &errorType)
@@ -136,11 +143,15 @@ func (h *Handler) discoverResourcesWithMetrics(ctx context.Context, userID strin
 func (h *Handler) buildResourceUsageMap(
 	ctx context.Context, userID string, resources []string,
 	ent *goquota.Entitlement, errorType *string,
-) map[string]ResourceUsage {
+) (map[string]ResourceUsage, error) {
 	resourceUsage := make(map[string]ResourceUsage)
+	var firstErr error
 	for _, resource := range resources {
 		usage, err := h.buildResourceUsage(ctx, userID, resource, ent)
 		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			if h.config.Metrics != nil && *errorType == "" {
 				*errorType = "partial_error"
 			}
@@ -150,7 +161,7 @@ func (h *Handler) buildResourceUsageMap(
 			resourceUsage[resource] = *usage
 		}
 	}
-	return resourceUsage
+	return resourceUsage, firstErr
 }
 
 // sendUsageResponse sends the usage response

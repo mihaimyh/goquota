@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -823,5 +824,47 @@ func TestHandler_GetUsage_InvalidUserID(t *testing.T) {
 	// Should return 400 Bad Request
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("Expected status 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// failingUsageStorage wraps memory.Storage and fails all usage reads, simulating
+// a storage outage.
+type failingUsageStorage struct {
+	*memory.Storage
+}
+
+func (s *failingUsageStorage) GetUsage(
+	context.Context, string, string, goquota.Period,
+) (*goquota.Usage, error) {
+	return nil, errors.New("storage unavailable")
+}
+
+// TestUsageAPI_StorageErrorReturnsError is a regression test for API-2: a total
+// storage failure must not masquerade as a 200 OK with an empty resource map.
+func TestUsageAPI_StorageErrorReturnsError(t *testing.T) {
+	manager, err := goquota.NewManager(&failingUsageStorage{Storage: memory.New()}, &goquota.Config{
+		DefaultTier: "free",
+		Tiers: map[string]goquota.TierConfig{
+			"free": {Name: "free", MonthlyQuotas: map[string]int{"api_calls": 100}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	handler, err := NewHandler(Config{
+		Manager:        manager,
+		GetUserID:      func(*http.Request) string { return testUserID },
+		KnownResources: []string{testResource},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create handler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.GetUsage(rec, httptest.NewRequest(http.MethodGet, "/usage", nil))
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("storage failure surfaced as HTTP 200 with body: %s", rec.Body.String())
 	}
 }
