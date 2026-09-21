@@ -3,6 +3,7 @@ package prommetrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -266,5 +267,22 @@ func TestPrometheusMetrics_RateLimitExceededNotDoubleCounted(t *testing.T) {
 	}
 	if sum != 1 {
 		t.Fatalf("rate_limit_exceeded_total=%v after exactly 1 exceeded event; expected 1", sum)
+	}
+}
+
+// TestPrometheusMetrics_DefaultMetricsIdempotent is a regression test for OBS-2:
+// constructing the default metrics twice for the same namespace must not panic
+// and must return the same instance.
+func TestPrometheusMetrics_DefaultMetricsIdempotent(t *testing.T) {
+	namespace := fmt.Sprintf("idem_%d", time.Now().UnixNano())
+
+	first := DefaultMetrics(namespace)
+	second := DefaultMetrics(namespace)
+
+	if first == nil || second == nil {
+		t.Fatal("DefaultMetrics returned nil")
+	}
+	if first != second {
+		t.Fatal("DefaultMetrics returned different instances for the same namespace")
 	}
 }

@@ -180,10 +180,7 @@ func Middleware(cfg Config) gongin.HandlerFunc {
 					c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", rateLimitErr.Info.ResetTime.Unix()))
 				}
 				if rateLimitErr.RetryAfter > 0 {
-					seconds := int(math.Ceil(rateLimitErr.RetryAfter.Seconds()))
-					if seconds < 1 {
-						seconds = 1
-					}
+					seconds := max(int(math.Ceil(rateLimitErr.RetryAfter.Seconds())), 1)
 					c.Header("Retry-After", fmt.Sprintf("%d", seconds))
 				}
 

@@ -3,6 +3,7 @@ package prommetrics
 import (
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -394,7 +395,22 @@ func (m *Metrics) RecordResourceFilterEffectivenessRatio(ratio float64) {
 	m.resourceFilterEffectivenessRatio.WithLabelValues().Set(ratio)
 }
 
-// DefaultMetrics returns a Metrics implementation using the default Prometheus registerer.
+// defaultMetricsCache memoizes DefaultMetrics per namespace so repeated calls
+// (e.g. tests or multiple initializers) do not double-register collectors.
+var (
+	defaultMetricsMu    sync.Mutex
+	defaultMetricsCache = map[string]*Metrics{}
+)
+
+// DefaultMetrics returns a Metrics implementation using the default Prometheus
+// registerer. Repeated calls with the same namespace return the same instance.
 func DefaultMetrics(namespace string) *Metrics {
-	return NewMetrics(prometheus.DefaultRegisterer, namespace)
+	defaultMetricsMu.Lock()
+	defer defaultMetricsMu.Unlock()
+	if m, ok := defaultMetricsCache[namespace]; ok {
+		return m
+	}
+	m := NewMetrics(prometheus.DefaultRegisterer, namespace)
+	defaultMetricsCache[namespace] = m
+	return m
 }
