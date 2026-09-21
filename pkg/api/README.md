@@ -71,6 +71,7 @@ func main() {
 - **KnownResources**: List of all known resources across all tiers. Used to discover orphaned credits when users downgrade.
 - **ResourceFilter**: Function to filter which resources to include in the response. Applied AFTER resource discovery.
 - **OnError**: Custom error handler. If nil, uses default error handling.
+- **Metrics**: Optional `goquota.Metrics` recorder for Usage API operations. If nil, no metrics are recorded.
 
 ## User ID Extraction
 
@@ -222,25 +223,39 @@ handler, _ := api.NewHandler(api.Config{
 
 ## Integration with Existing Middleware
 
-The Usage API can be used alongside the quota enforcement middleware:
+The Usage API can be used alongside the quota enforcement middleware. Enforcement lives in `middleware/*` (Gin, Echo, Fiber, `net/http`); the Usage API only reads state:
 
 ```go
-// 1. Protect endpoints with quota middleware
-api.Use(goquota.Middleware(&goquota.Config{
-    Manager: manager,
-    GetUserID: api.FromHeader("X-User-ID"),
-    GetResource: api.FixedResource("api_calls"),
-    GetAmount: api.FixedAmount(1),
+import (
+    "net/http"
+
+    "github.com/gin-gonic/gin"
+
+    "github.com/mihaimyh/goquota/pkg/api"
+    ginMiddleware "github.com/mihaimyh/goquota/middleware/gin"
+)
+
+r := gin.New()
+
+// 1. Protect endpoints with the quota middleware
+apiGroup := r.Group("/api")
+apiGroup.Use(ginMiddleware.Middleware(ginMiddleware.Config{
+    Manager:     manager,
+    GetUserID:   ginMiddleware.FromHeader("X-User-ID"),
+    GetResource: ginMiddleware.FixedResource("api_calls"),
+    GetAmount:   ginMiddleware.FixedAmount(1),
 }))
 
-// 2. Expose usage endpoint
+// 2. Expose the usage endpoint with the API handler
 usageHandler, _ := api.NewHandler(api.Config{
-    Manager: manager,
-    GetUserID: api.FromHeader("X-User-ID"),
+    Manager:        manager,
+    GetUserID:      api.FromHeader("X-User-ID"),
     KnownResources: []string{"api_calls"},
 })
-api.GET("/api/v1/me/usage", usageHandler.GetUsage)
+apiGroup.GET("/v1/me/usage", gin.WrapF(usageHandler.GetUsage))
 ```
+
+> `goquota.Middleware`, `api.FixedResource`, and `api.FixedAmount` do not exist. Enforcement extractors live in the `middleware/*` packages; the `pkg/api` package only provides `Config`, `Handler.GetUsage`, `FromHeader`, and `FromContext`.
 
 ## Performance Considerations
 

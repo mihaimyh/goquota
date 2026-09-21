@@ -83,10 +83,10 @@ go get github.com/mihaimyh/goquota/pkg/billing/revenuecat
 
 ### Required Fields
 
-- **Manager**: The `goquota.Manager` instance that will be updated
-- **TierMapping**: Maps RevenueCat entitlement/product IDs to goquota tiers
-- **WebhookSecret**: RevenueCat webhook secret for verifying incoming webhook requests
-- **APIKey**: RevenueCat API key for outbound API calls (e.g. SyncUser)
+- **Manager**: The `goquota.Manager` instance that will be updated (**required**; `NewProvider` fails without it)
+- **WebhookSecret**: RevenueCat webhook secret for verifying incoming webhook requests (required to serve `WebhookHandler()`; if empty the handler returns `503`)
+- **APIKey**: RevenueCat API key for outbound API calls (required for `SyncUser`; the webhook path works without it)
+- **TierMapping**: Maps RevenueCat entitlement/product IDs to goquota tiers (defaults to the `"explorer"` fallback if no `"*"`/`"default"` entry is present)
 
 ### Optional Fields
 
@@ -815,6 +815,18 @@ if err != nil {
 }
 ```
 
+### CheckoutURL / PortalURL
+
+Not supported. RevenueCat purchases happen through its client SDKs and subscription management happens through the App Store / Google Play settings, so both methods satisfy the `billing.Provider` interface by returning `billing.ErrNotSupported`:
+
+```go
+func (p *Provider) CheckoutURL(ctx context.Context, userID, tier, successURL, cancelURL string) (string, error)
+func (p *Provider) PortalURL(ctx context.Context, userID, returnURL string) (string, error)
+// => "", fmt.Errorf("%w: ...", billing.ErrNotSupported)
+```
+
+If your code needs `CheckoutURL`/`PortalURL`, guard with `errors.Is(err, billing.ErrNotSupported)` before swapping to Stripe.
+
 ### MapEntitlementToTier
 
 Maps a RevenueCat entitlement ID to a goquota tier.
@@ -862,6 +874,11 @@ if err == billing.ErrUserNotFound {
 
 if err == billing.ErrProviderAPIError {
     // RevenueCat API returned an error
+}
+
+// Unsupported operation (CheckoutURL / PortalURL on RevenueCat)
+if errors.Is(err, billing.ErrNotSupported) {
+    // Route the user to the appropriate client-side flow instead
 }
 ```
 

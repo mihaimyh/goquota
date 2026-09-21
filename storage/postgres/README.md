@@ -45,21 +45,33 @@ CREATE DATABASE goquota;
 
 ### 2. Run Migrations
 
-Execute the migration file to create the required tables:
+Execute the migration files in order to create the required tables:
 
 ```bash
 psql -d goquota -f storage/postgres/migrations/001_initial_schema.sql
+psql -d goquota -f storage/postgres/migrations/002_forever_periods.sql
+psql -d goquota -f storage/postgres/migrations/003_usage_period_type_key.sql
 ```
 
-Or manually run the SQL from `storage/postgres/migrations/001_initial_schema.sql`.
+Or manually run the SQL from the files in `storage/postgres/migrations/`.
 
-### 3. Required Tables
+> `New()` also calls `ensureMergeTables` and `ensureUsagePeriodTypeKey` at startup, so the merge/seal tables and the usage unique index are created automatically if missing. Running the migrations explicitly is still recommended for production.
 
-The schema creates the following tables:
-- `entitlements` - User subscription tiers
-- `quota_usage` - Quota consumption tracking
-- `consumption_records` - Audit trail for consumption (with expiration)
-- `refund_records` - Audit trail for refunds (with expiration)
+### 3. Tables
+
+The schema creates (or `New()` ensures) the following tables:
+
+| Table | Purpose |
+| ----- | ------- |
+| `entitlements` | User subscription tiers |
+| `quota_usage` | Quota consumption tracking |
+| `consumption_records` | Audit trail for consumption (with expiration) |
+| `refund_records` | Audit trail for refunds (with expiration) |
+| `top_up_records` | Idempotency records for credit top-ups |
+| `merge_records` | Durable idempotency records for `MergeUser` |
+| `identity_seals` | Tombstones written when `MergeUser` seals a source identity |
+
+Table names are configurable via `Config` (`EntitlementsTable`, `UsageTable`, `ConsumptionRecordsTable`, `RefundRecordsTable`, `TopUpRecordsTable`, `MergeRecordsTable`, `IdentitySealsTable`).
 
 ## Connection String
 

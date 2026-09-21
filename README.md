@@ -158,7 +158,8 @@ storage, _ := firestoreStorage.New(client, firestoreStorage.Config{
 1. **TTL Policy Configuration (Required)**
 
    - The library adds an `expiresAt` field to consumption and refund documents for automatic cleanup
-   - **You must configure a Time-to-Live (TTL) policy** in Google Cloud Console or via Terraform for the `consumptions` and `refunds` collections targeting the `expiresAt` field
+   - **You must configure a Time-to-Live (TTL) policy** in Google Cloud Console or via Terraform for the `billing_consumptions` and `billing_refunds` collections targeting the `expiresAt` field
+   - These are the default collection names; if you override `Config.ConsumptionsCollection` or `Config.RefundsCollection`, configure TTL on your custom names
    - Without TTL policies, documents will accumulate indefinitely despite the field presence
    - Configure TTL policies:
      - **Google Cloud Console**: Navigate to Firestore → Data → Select collection → Enable TTL → Choose `expiresAt` field
@@ -303,7 +304,14 @@ RateLimits: map[string]goquota.RateLimitConfig{
 }
 ```
 
-Rate limits are checked **before** quota consumption, so rate-limited requests don't consume quota. When a rate limit is exceeded, the system returns `ErrRateLimitExceeded` with reset time information.
+Rate limits are checked **before** quota consumption, so rate-limited requests don't consume quota. When a rate limit is exceeded, `Consume` returns a `*goquota.RateLimitExceededError` carrying `Info` (remaining, reset time, limit) and `RetryAfter`. It is **not** the `goquota.ErrRateLimitExceeded` sentinel, so match it with `errors.As`:
+
+```go
+var rl *goquota.RateLimitExceededError
+if errors.As(err, &rl) {
+    log.Printf("rate limited: %d remaining, retry in %s", rl.Info.Remaining, rl.RetryAfter)
+}
+```
 
 **HTTP Middleware Integration** - Rate limit headers are automatically added:
 
@@ -512,14 +520,23 @@ The Stripe billing provider supports one-time credit purchases:
 
 ```go
 import (
+    "context"
+
+    "github.com/mihaimyh/goquota/pkg/billing"
     "github.com/mihaimyh/goquota/pkg/billing/stripe"
 )
 
 // Create Stripe provider
-stripeProvider, _ := stripe.NewProvider(billing.Config{
-    Manager: manager,
-    Secret:  os.Getenv("STRIPE_WEBHOOK_SECRET"),
-    // ... other config
+stripeProvider, _ := stripe.NewProvider(stripe.Config{
+    Config: billing.Config{
+        Manager: manager,
+        TierMapping: map[string]string{
+            "price_1ABC123": "pro",
+        },
+    },
+    // Required for Stripe: API key for outbound calls, webhook secret for signature verification.
+    StripeAPIKey:        os.Getenv("STRIPE_API_KEY"),
+    StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
 })
 
 // Create checkout URL for one-time payment (credit pack)
@@ -588,16 +605,49 @@ psql -d goquota -f storage/postgres/migrations/002_forever_periods.sql
 
 ### Soft Limits & Warnings
 
-Receive notifications when a user is nearing their limit.
+Receive notifications when a user is nearing their limit. Warnings fire when usage crosses a configured threshold, expressed as a **fraction of the limit in the range `[0, 1]`** (e.g. `0.8` for 80%).
+
+Warnings require two parts:
+
+1. **Thresholds** per resource in `TierConfig.WarningThresholds` (the feature is inert without them).
+2. A **handler** that implements the `goquota.WarningHandler` interface, supplied either globally via `Config.WarningHandler` or per-request via `goquota.WithWarningHandler(ctx, ...)`.
 
 ```go
-manager.SetWarningCallback(func(ctx context.Context, userID, resource string, pctUsed float64) {
-    if pctUsed >= 80.0 {
-        fmt.Printf("Warning: User %s used %.2f%% of %s quota\n", userID, pctUsed, resource)
-        // Send email alert, etc.
-    }
-})
+// 1. Declare thresholds when configuring the tier.
+config := goquota.Config{
+    DefaultTier: "free",
+    Tiers: map[string]goquota.TierConfig{
+        "free": {
+            MonthlyQuotas: map[string]int{"api_calls": 100},
+            WarningThresholds: map[string][]float64{
+                "api_calls": {0.5, 0.8, 0.9}, // fractions, not percentages
+            },
+        },
+    },
+    // 2a. Global handler (applies to every request)
+    WarningHandler: myWarningHandler{},
+}
+
+manager, _ := goquota.NewManager(storage, &config)
+
+// 2. Implement the handler. threshold is a fraction in [0, 1].
+type myWarningHandler struct{}
+
+func (myWarningHandler) OnWarning(ctx context.Context, usage *goquota.Usage, threshold float64) {
+    pct := float64(usage.Used) / float64(usage.Limit) * 100
+    fmt.Printf("Warning: user %s reached %.0f%% of %s (%.1f%% used)\n",
+        usage.UserID, threshold*100, usage.Resource, pct)
+}
 ```
+
+To override the handler for a single request (for example, inside HTTP middleware), use the context helper:
+
+```go
+ctx = goquota.WithWarningHandler(ctx, myWarningHandler{})
+_, err := manager.Consume(ctx, "user123", "api_calls", 1, goquota.PeriodTypeMonthly)
+```
+
+> There is no `Manager.SetWarningCallback` method. Configure `Config.WarningHandler` at construction time or `goquota.WithWarningHandler` per request.
 
 ### Admin Operations
 
@@ -780,17 +830,18 @@ usage, err := manager.GetUsageAfterConsume(
 
 ### Audit Trail
 
-Track all quota changes for compliance, debugging, and customer support.
+Track administrative quota changes for compliance, debugging, and customer support.
 
-**Automatic Logging** - Configure an audit logger:
+**Automatic Logging** - Audit logging is a *storage capability*, not a Manager option. The Manager logs an entry whenever its configured `Storage` also implements the `goquota.AuditLogger` interface. There is no `Manager.SetAuditLogger` method; wire it up by wrapping or extending your storage backend:
 
 ```go
-// Implement the AuditLogger interface or use a provided implementation
-type CustomAuditLogger struct {
+// Your storage type must itself implement goquota.AuditLogger (in addition to Storage).
+type AuditLoggerStorage struct {
+    goquota.Storage // embed the real storage (memory, redis, postgres, ...)
     db *sql.DB
 }
 
-func (l *CustomAuditLogger) LogAuditEntry(ctx context.Context, entry *goquota.AuditLogEntry) error {
+func (l *AuditLoggerStorage) LogAuditEntry(ctx context.Context, entry *goquota.AuditLogEntry) error {
     _, err := l.db.ExecContext(ctx,
         "INSERT INTO audit_logs (user_id, resource, action, amount, timestamp, actor, reason) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         entry.UserID, entry.Resource, entry.Action, entry.Amount, entry.Timestamp, entry.Actor, entry.Reason,
@@ -798,22 +849,25 @@ func (l *CustomAuditLogger) LogAuditEntry(ctx context.Context, entry *goquota.Au
     return err
 }
 
-func (l *CustomAuditLogger) GetAuditLogs(ctx context.Context, filter goquota.AuditLogFilter) ([]*goquota.AuditLogEntry, error) {
+func (l *AuditLoggerStorage) GetAuditLogs(ctx context.Context, filter goquota.AuditLogFilter) ([]*goquota.AuditLogEntry, error) {
     // Query and return audit logs based on filter
     // ...
 }
 
-// Set audit logger on manager
-manager.SetAuditLogger(auditLogger)
+// The wrapper implements both Storage and AuditLogger, so pass it to NewManager.
+manager, _ := goquota.NewManager(&AuditLoggerStorage{Storage: storage, db: db}, &config)
 ```
+
+`Manager.logAuditEntry` only attempts a write when the storage satisfies `AuditLogger`; if it does not, operations proceed silently and `GetAuditLogs` returns an error.
 
 **Query Audit History:**
 
 ```go
 // Get all quota changes for a user
+start := time.Now().Add(-30 * 24 * time.Hour) // *time.Time, not time.Time
 logs, err := manager.GetAuditLogs(ctx, goquota.AuditLogFilter{
     UserID:    "user123",
-    StartTime: time.Now().Add(-30 * 24 * time.Hour), // Last 30 days
+    StartTime: &start, // Last 30 days
 })
 
 // Filter by resource
@@ -826,21 +880,25 @@ logs, err = manager.GetAuditLogs(ctx, goquota.AuditLogFilter{
 for _, log := range logs {
     fmt.Printf("%s: %s %s %d units (actor: %s, reason: %s)\n",
         log.Timestamp.Format(time.RFC3339),
-        log.Action,      // "consume", "refund", "set_usage", "grant_credit"
+        log.Action,      // see "Logged Actions" below
         log.Resource,
         log.Amount,
-        log.Actor,       // "system", "admin:john@company.com"
-        log.Reason,      // "Normal consumption", "Service outage compensation"
+        log.Actor,       // "system"
+        log.Reason,
     )
 }
 ```
 
 **Logged Actions:**
 
-- Quota consumption (with idempotency key)
-- Refunds (with reason)
-- Admin operations (SetUsage, GrantOneTimeCredit, ResetUsage, DrainRemaining, MergeUser)
-- Tier changes (with proration details)
+The Manager emits audit entries for these `Action` values (all currently written with `Actor: "system"`):
+
+- `admin_set` — `SetUsage` (and therefore `ResetUsage`, which delegates to `SetUsage`)
+- `admin_grant_credit` — `GrantOneTimeCredit`
+- `drain_remaining` — `DrainRemaining`
+- `merge_user` — `MergeUser`
+
+`Consume`, `Refund`, `ApplyTierChange`, and `TopUpLimit`/`RefundCredits` are **not** currently audit-logged; use the metrics/observability integrations if you need those events.
 
 ### Clock Skew Protection
 
@@ -975,16 +1033,44 @@ When deploying multiple instances of your application with fallback strategies e
 
 ### Metrics
 
-The library exposes Prometheus metrics by default via the `metrics` package.
+Metrics are **not enabled by default**. Implementations are provided in `pkg/goquota/metrics/prometheus`; inject one through `Config.Metrics` (otherwise the manager uses `NoopMetrics`):
 
-- `goquota_ops_total{operation="consume", status="success"}`
-- `goquota_ops_latency_seconds`
-- `goquota_usage_ratio`
-- `goquota_fallback_usage_total{trigger="circuit_open"}`
-- `goquota_optimistic_consumption_total`
-- `goquota_fallback_hits_total{strategy="cache"}`
-- `goquota_rate_limit_check_duration_seconds{resource="api_calls"}`
-- `goquota_rate_limit_exceeded_total{resource="api_calls"}`
+```go
+import (
+    prommetrics "github.com/mihaimyh/goquota/pkg/goquota/metrics/prometheus"
+    "github.com/prometheus/client_golang/prometheus"
+)
+
+metrics := prommetrics.NewMetrics(prometheus.DefaultRegisterer, "goquota")
+// or, to register on the default registerer:
+// metrics := prommetrics.DefaultMetrics("goquota")
+
+config := goquota.Config{
+    // ...
+    Metrics: metrics,
+}
+```
+
+Every metric name is prefixed with the namespace you pass to `NewMetrics`/`DefaultMetrics` (e.g. namespace `"goquota"` produces `goquota_quota_consumption_total`). The exported series are:
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `quota_consumption_total` | Counter | `resource`, `tier`, `success` |
+| `quota_consumption_amount` | Histogram | `resource`, `tier` |
+| `quota_check_duration_seconds` | Histogram | `resource` |
+| `cache_hits_total` / `cache_misses_total` | Counter | `type` |
+| `storage_operation_duration_seconds` | Histogram | `operation` |
+| `storage_operation_errors_total` | Counter | `operation` |
+| `circuit_breaker_state_changes_total` | Counter | `state` |
+| `fallback_usage_total` | Counter | `trigger` |
+| `optimistic_consumption_total` | Counter | — |
+| `fallback_hits_total` | Counter | `strategy` |
+| `rate_limit_check_duration_seconds` | Histogram | `resource` |
+| `rate_limit_exceeded_total` | Counter | `resource` |
+| `quota_warnings_total` | Counter | `resource`, `tier`, `threshold` |
+| `idempotency_hits_total` | Counter | `operation_type` |
+
+Usage-API and forever-credits series (for example `usage_api_requests_total`, `forever_credits_balance`, `orphaned_forever_credits_total`) are also exported; see `pkg/goquota/metrics/prometheus/prometheus.go` for the full list.
 
 ## Billing Provider Integration
 
@@ -1012,7 +1098,8 @@ provider, _ := revenuecat.NewProvider(billing.Config{
         "premium_monthly": "premium",
         "*":               "free",
     },
-    Secret: os.Getenv("REVENUECAT_SECRET"),
+    WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+    APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
 })
 
 // Register webhook endpoint
@@ -1185,20 +1272,23 @@ import (
     httpMiddleware "github.com/mihaimyh/goquota/middleware/http"
 )
 
-// Create middleware
-quotaMiddleware := httpMiddleware.Middleware(httpMiddleware.Config{
+// Create middleware (note: Middleware takes a *Config pointer)
+quotaMiddleware := httpMiddleware.Middleware(&httpMiddleware.Config{
     Manager:     manager,
     GetUserID:   httpMiddleware.FromHeader("X-User-ID"),
     GetResource: httpMiddleware.FixedResource("api_calls"),
     GetAmount:   httpMiddleware.FixedAmount(1),
     PeriodType:  goquota.PeriodTypeDaily,
-    // Optional: Only blocking if over 100% of limit, but warn at 80%
-    UseSoftLimit: false,
+    // Optional custom warning handling. If omitted, the middleware installs
+    // httpMiddleware.DefaultWarningHandler, which adds X-Quota-Warning-* headers.
+    // OnWarning: func(w http.ResponseWriter, r *http.Request, usage *goquota.Usage, threshold float64) { ... },
 })
 
 // Apply to handler
 http.Handle("/api/endpoint", quotaMiddleware(yourHandler))
 ```
+
+> Warnings are threshold-driven, not a boolean. Add `WarningThresholds` to the tier config (values in `[0, 1]`); see [Soft Limits & Warnings](#soft-limits--warnings).
 
 The middleware automatically handles both quota limits and rate limits. When a rate limit is exceeded, it returns `429 Too Many Requests` with appropriate headers.
 
@@ -1399,7 +1489,7 @@ app.Use(func(c *fiber.Ctx) error {
 api := app.Group("/api")
 api.Use(fiberMiddleware.Middleware(fiberMiddleware.Config{
     Manager:     manager,
-    GetUserID:   fiberMiddleware.FromLocals("UserID"), // Recommended: Extract from locals
+    GetUserID:   fiberMiddleware.FromContext("UserID"), // Recommended: Extract from locals
     GetResource: fiberMiddleware.FixedResource("api_calls"),
     GetAmount:   fiberMiddleware.FixedAmount(1),
     PeriodType:  goquota.PeriodTypeMonthly,
@@ -1412,17 +1502,19 @@ api.Get("/data", func(c *fiber.Ctx) error {
 
 **Fiber-Specific Extractors:**
 
-- `FromLocals(key)` - Extract from Fiber locals (recommended for auth middleware integration)
+- `FromContext(key)` - Extract from Fiber locals (recommended for auth middleware integration; Fiber stores values via `c.Locals`)
 - `FromHeader(headerName)` - Extract from HTTP header
-- `FromParams(paramName)` - Extract from route parameter
+- `FromParam(paramName)` - Extract from route parameter
 - `FromQuery(queryName)` - Extract from query parameter
+
+> Fiber's extractors are `FromContext`/`FromHeader`/`FromParam`/`FromQuery` plus `IdempotencyKeyFromHeader`, `IdempotencyKeyFromContext`, `FixedResource`, `FromRoute`, `FixedAmount`, and `DynamicCost`. There are no `FromLocals` or `FromParams` helpers.
 
 **Custom Error Responses:**
 
 ```go
 api.Use(fiberMiddleware.Middleware(fiberMiddleware.Config{
     Manager:     manager,
-    GetUserID:   fiberMiddleware.FromLocals("UserID"),
+    GetUserID:   fiberMiddleware.FromContext("UserID"),
     GetResource: fiberMiddleware.FixedResource("api_calls"),
     GetAmount:   fiberMiddleware.FixedAmount(1),
     PeriodType:  goquota.PeriodTypeMonthly,
@@ -1470,6 +1562,10 @@ See the [examples](examples/) directory:
 - [HTTP Server](examples/http-server/)
 - [Gin Framework](examples/gin/)
 - [Echo Framework](examples/echo/)
+- [Chi Framework](examples/chi/)
+- [Gorilla Mux](examples/gorilla/)
+- [Caching](examples/caching/)
+- [Observability](examples/observability/) - Prometheus metrics and zerolog
 - [Fallback Strategies](examples/fallback/)
 - [Rate Limiting](examples/rate-limiting/)
 - [Comprehensive Example](examples/comprehensive/) - **All features in one example with Docker support**
@@ -1478,18 +1574,95 @@ See the [examples](examples/) directory:
 
 ### Manager Interface
 
-```go
-// Core Operations
-Consume(ctx, userID, resource, amount, periodType, opts ...ConsumeOption) (int, error)
-Refund(ctx, req *RefundRequest) error
-GetQuota(ctx, userID, resource, periodType) (*Usage, error)
-GetEffectiveQuota(ctx, userID, resource) (*EffectiveQuota, error) // ledger merge
-GetMeterQuota(ctx, userID, resource) (*MeterQuota, error)         // UI meter merge
+The `Manager` is a concrete struct (not an interface). Its public methods are:
 
-// Management
-SetEntitlement(ctx, entitlement) error
-ApplyTierChange(ctx, userID, oldTier, newTier, resource) error
-SetWarningCallback(callback)
+```go
+// Construction
+func NewManager(storage Storage, config *Config) (*Manager, error)
+func (c *Config) Validate() error
+
+// Reads
+GetQuota(ctx, userID, resource string, periodType PeriodType) (*Usage, error)
+GetCurrentCycle(ctx, userID string) (Period, error)
+GetEntitlement(ctx, userID string) (*Entitlement, error)
+GetEffectiveQuota(ctx, userID, resource string) (*EffectiveQuota, error) // ledger merge
+GetMeterQuota(ctx, userID, resource string) (*MeterQuota, error)         // UI meter merge
+
+// Consumption
+Consume(ctx, userID, resource string, amount int, periodType PeriodType, opts ...ConsumeOption) (int, error)
+ConsumeWithResult(ctx, userID, resource string, amount int, periodType PeriodType, opts ...ConsumeOption) (*ConsumeResult, error)
+TryConsume(ctx, userID, resource string, amount int, periodType PeriodType, opts ...ConsumeOption) (*TryConsumeResult, error)
+GetUsageAfterConsume(ctx, userID, resource string, amount int, periodType PeriodType, opts ...ConsumeOption) (*Usage, error)
+
+// Refunds
+Refund(ctx, req *RefundRequest) error
+RefundFromConsume(ctx, req *RefundFromConsumeRequest) error
+RefundCredits(ctx, userID, resource string, amount int, reason string, opts ...RefundCreditsOption) error
+
+// Credits
+TopUpLimit(ctx, userID, resource string, amount int, opts ...TopUpOption) error
+
+// Management / admin
+SetEntitlement(ctx, entitlement *Entitlement) error
+ApplyTierChange(ctx, userID, oldTier, newTier, resource string) error
+UpdateTimezone(ctx, userID, timezone string) error
+SetUsage(ctx, userID, resource string, periodType PeriodType, amount int) error
+GrantOneTimeCredit(ctx, userID, resource string, amount int) error
+ResetUsage(ctx, userID, resource string, periodType PeriodType) error
+DrainRemaining(ctx, userID, resource string, periodType PeriodType) error
+MergeUser(ctx, req *MergeUserRequest) (*MergeUserResult, error)
+
+// Audit
+GetAuditLogs(ctx, filter AuditLogFilter) ([]*AuditLogEntry, error)
+```
+
+**Options and helpers:**
+
+```go
+WithIdempotencyKey(key string) ConsumeOption
+WithDryRun(dryRun bool) ConsumeOption
+WithTopUpIdempotencyKey(key string) TopUpOption
+WithRefundIdempotencyKey(key string) RefundCreditsOption
+WithWarningHandler(ctx context.Context, handler WarningHandler) context.Context
+```
+
+> Warning handlers are set through `Config.WarningHandler` or `WithWarningHandler` — there is no `Manager.SetWarningCallback` method.
+
+### Core Types
+
+```go
+type WarningHandler interface {
+    OnWarning(ctx context.Context, usage *Usage, threshold float64) // threshold is a fraction in [0, 1]
+}
+
+type ConsumeResult struct {
+    NewUsed    int
+    Limit      int
+    Remaining  int
+    Percentage float64
+    Period     PeriodType // concrete period charged (never "auto")
+}
+
+type AuditLogFilter struct {
+    UserID    string
+    Resource  string
+    Action    string
+    StartTime *time.Time // pointer
+    EndTime   *time.Time // pointer
+    Limit     int
+}
+```
+
+### Errors
+
+```go
+ErrQuotaExceeded, ErrInvalidTier, ErrInvalidAmount, ErrEntitlementNotFound,
+ErrStorageUnavailable, ErrInvalidPeriod, ErrFallbackUnavailable, ErrStaleCache,
+ErrOptimisticLimitExceeded, ErrRateLimitExceeded, ErrIdempotencyKeyExists,
+ErrUnsupportedOperation, ErrSameUser, ErrUserSealed, ErrInvalidMergeRequest
+
+// Returned as *RateLimitExceededError (use errors.As, not ==), with:
+//   Info *RateLimitInfo; RetryAfter time.Duration
 ```
 
 ## Testing

@@ -242,14 +242,20 @@ For complete documentation, see [RevenueCat Provider Documentation](revenuecat/R
 
 ### Config Fields
 
-| Field           | Type                | Required | Description                                            |
-| --------------- | ------------------- | -------- | ------------------------------------------------------ |
-| `Manager`       | `*goquota.Manager`  | Yes      | The goquota Manager instance                           |
-| `TierMapping`   | `map[string]string` | Yes      | Maps provider IDs to goquota tiers                     |
-| `WebhookSecret` | `string`            | Yes      | Webhook secret for verifying incoming webhook requests |
-| `APIKey`        | `string`            | Yes      | API key for outbound API calls (e.g. SyncUser)         |
-| `HTTPClient`    | `*http.Client`      | No       | Custom HTTP client (default: 10s timeout)              |
-| `EnableHMAC`    | `bool`              | No       | Enable HMAC signature verification                     |
+`billing.Config` is the **base** configuration embedded by provider-specific configs. RevenueCat accepts it directly (`revenuecat.NewProvider(billing.Config{...})`); Stripe wraps it (`stripe.NewProvider(stripe.Config{Config: billing.Config{...}})`).
+
+| Field             | Type                                     | Required | Description                                                          |
+| ----------------- | ---------------------------------------- | -------- | -------------------------------------------------------------------- |
+| `Manager`         | `*goquota.Manager`                       | Yes      | The goquota Manager instance                                         |
+| `TierMapping`     | `map[string]string`                      | Yes      | Maps provider IDs to goquota tiers (`"*"`/`"default"` = fallback)    |
+| `WebhookSecret`   | `string`                                 | Yes*     | Webhook secret for verifying incoming requests (RevenueCat)          |
+| `APIKey`          | `string`                                 | Yes*     | API key for outbound API calls such as `SyncUser` (RevenueCat)       |
+| `HTTPClient`      | `*http.Client`                           | No       | Custom HTTP client (default: 10s timeout)                            |
+| `EnableHMAC`      | `bool`                                   | No       | Enable HMAC-SHA256 signature verification                            |
+| `Metrics`         | `billing.Metrics`                        | No       | Metrics collector (default: `billing.NoopMetrics`)                   |
+| `WebhookCallback` | `func(context.Context, WebhookEvent) error` | No    | Side effect after a committed webhook update (see Webhook Callbacks)  |
+
+\* RevenueCat requires both. Stripe uses provider-specific `StripeWebhookSecret` / `StripeAPIKey` fields instead, and accepts either one (the other may be empty, disabling that capability).
 
 ### Tier Mapping Examples
 
@@ -701,16 +707,21 @@ The Stripe provider is fully implemented with support for webhooks, user synchro
 ### Quick Start
 
 ```go
-import "github.com/mihaimyh/goquota/pkg/billing/stripe"
+import (
+    "github.com/mihaimyh/goquota/pkg/billing"
+    "github.com/mihaimyh/goquota/pkg/billing/stripe"
+)
 
-provider, err := stripe.NewProvider(billing.Config{
-    Manager:       manager,
-    TierMapping:   map[string]string{
-        "price_1ABC123": "pro",      // Stripe Price ID → goquota tier
-        "price_1DEF456": "premium",
+provider, err := stripe.NewProvider(stripe.Config{
+    Config: billing.Config{
+        Manager: manager,
+        TierMapping: map[string]string{
+            "price_1ABC123": "pro", // Stripe Price ID → goquota tier
+            "price_1DEF456": "premium",
+        },
     },
-    WebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
-    APIKey:        os.Getenv("STRIPE_API_KEY"),
+    StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+    StripeAPIKey:        os.Getenv("STRIPE_API_KEY"),
 })
 ```
 
@@ -809,14 +820,16 @@ func main() {
     })
 
     // 2. Create Stripe provider
-    provider, _ := stripe.NewProvider(billing.Config{
-        Manager: manager,
-        TierMapping: map[string]string{
-            "price_1ABC123": "pro",      // Replace with your Stripe Price IDs
-            "price_1DEF456": "premium",
+    provider, _ := stripe.NewProvider(stripe.Config{
+        Config: billing.Config{
+            Manager: manager,
+            TierMapping: map[string]string{
+                "price_1ABC123": "pro", // Replace with your Stripe Price IDs
+                "price_1DEF456": "premium",
+            },
         },
-        WebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
-        APIKey:        os.Getenv("STRIPE_API_KEY"),
+        StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+        StripeAPIKey:        os.Getenv("STRIPE_API_KEY"),
     })
 
     // 3. Register webhook
@@ -880,6 +893,8 @@ func main() {
 
 ### PayPal (Planned)
 
+> **Not implemented.** There is no `pkg/billing/paypal` package in this repository; the snippet below is illustrative of the intended shape only and will not compile.
+
 ```go
 import "github.com/mihaimyh/goquota/pkg/billing/paypal"
 
@@ -895,19 +910,34 @@ provider, err := paypal.NewProvider(billing.Config{
 
 ### Switching Providers
 
-Switching providers requires only configuration changes:
+Switching providers changes only the constructor and its provider-specific config; the rest of your application uses the shared `billing.Provider` interface:
 
 ```go
-// Before: RevenueCat
-provider, _ := revenuecat.NewProvider(config)
+// Before: RevenueCat (takes billing.Config directly)
+var provider billing.Provider
+provider, _ = revenuecat.NewProvider(billing.Config{
+    Manager:       manager,
+    TierMapping:   tierMapping,
+    WebhookSecret: os.Getenv("REVENUECAT_WEBHOOK_SECRET"),
+    APIKey:        os.Getenv("REVENUECAT_SECRET_API_KEY"),
+})
 
-// After: Stripe
-provider, _ := stripe.NewProvider(config)
+// After: Stripe (takes stripe.Config, which embeds billing.Config)
+provider, _ = stripe.NewProvider(stripe.Config{
+    Config: billing.Config{
+        Manager:     manager,
+        TierMapping: tierMapping,
+    },
+    StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+    StripeAPIKey:        os.Getenv("STRIPE_API_KEY"),
+})
 
 // Application code unchanged!
 http.Handle("/webhooks/billing", provider.WebhookHandler())
 tier, _ := provider.SyncUser(ctx, userID)
 ```
+
+> `CheckoutURL`/`PortalURL` are not supported by RevenueCat and return `billing.ErrNotSupported`, so guard those calls if you need to swap providers freely.
 
 ## Examples
 
@@ -1044,19 +1074,35 @@ type Provider interface {
     Name() string
     WebhookHandler() http.Handler
     SyncUser(ctx context.Context, userID string) (string, error)
+    CheckoutURL(ctx context.Context, userID, tier, successURL, cancelURL string) (string, error)
+    PortalURL(ctx context.Context, userID, returnURL string) (string, error)
 }
 ```
+
+> `revenuecat.Provider` implements `CheckoutURL`/`PortalURL` by returning `billing.ErrNotSupported`, because RevenueCat purchases and subscription management happen through the client SDKs / store settings.
 
 ### Config
 
 ```go
+// Base config, shared by all providers.
 type Config struct {
-    Manager       *goquota.Manager
-    TierMapping   map[string]string
-    WebhookSecret string
-    APIKey        string
-    HTTPClient    *http.Client  // Optional
-    EnableHMAC    bool          // Optional
+    Manager         *goquota.Manager
+    TierMapping     map[string]string
+    WebhookSecret   string
+    APIKey          string
+    HTTPClient      *http.Client  // Optional
+    EnableHMAC      bool          // Optional
+    Metrics         Metrics       // Optional
+    WebhookCallback func(context.Context, WebhookEvent) error // Optional
+}
+
+// Stripe adds provider-specific fields and embeds the base config.
+type stripe.Config struct {
+    billing.Config
+    StripeAPIKey        string
+    StripeWebhookSecret string
+    CustomerIDResolver  func(context.Context, string) (string, error) // Optional fast path
+    TierWeights         map[string]int                                // Optional priority
 }
 ```
 
@@ -1064,11 +1110,14 @@ type Config struct {
 
 ```go
 var (
-    ErrProviderNotConfigured  = errors.New("billing provider not configured")
+    ErrProviderNotConfigured   = errors.New("billing provider not configured")
     ErrInvalidWebhookSignature = errors.New("invalid webhook signature")
     ErrInvalidWebhookPayload   = errors.New("invalid webhook payload")
     ErrUserNotFound            = errors.New("user not found in billing provider")
-    ErrProviderAPIError         = errors.New("billing provider API error")
+    ErrProviderAPIError        = errors.New("billing provider API error")
+    ErrTierNotConfigured       = errors.New("tier not configured in tier mapping")
+    ErrCustomerNotFound        = errors.New("customer not found in billing provider")
+    ErrNotSupported            = errors.New("operation not supported by this provider")
 )
 ```
 

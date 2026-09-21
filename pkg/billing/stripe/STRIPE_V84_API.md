@@ -4,7 +4,7 @@ This document describes how the Stripe Go SDK v84 is used in the `goquota` Strip
 
 ## Overview
 
-The Stripe provider uses **stripe-go v84.1.0**, which introduces a breaking change in how billing period fields are accessed (moved from `Subscription` to `SubscriptionItem` in API version 2025-03-31.basil).
+The Stripe provider uses **stripe-go v84** (see `go.mod` for the pinned patch version, currently v84.4.1), which introduces a breaking change in how billing period fields are accessed (moved from `Subscription` to `SubscriptionItem` in API version 2025-03-31.basil).
 
 ## Key Changes from v83 to v84
 

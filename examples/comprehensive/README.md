@@ -32,6 +32,7 @@ This example demonstrates all goquota features in a single application:
    # Run migrations (from project root)
    psql -h localhost -U postgres -d goquota -f storage/postgres/migrations/001_initial_schema.sql
    psql -h localhost -U postgres -d goquota -f storage/postgres/migrations/002_forever_periods.sql
+   psql -h localhost -U postgres -d goquota -f storage/postgres/migrations/003_usage_period_type_key.sql
    ```
 
 3. **Run the example**:

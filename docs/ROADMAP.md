@@ -12,11 +12,11 @@ This document outlines planned enhancements to make goquota a comprehensive, pro
 
 - Anniversary-based billing cycles
 - Prorated quota adjustments for tier changes
-- Daily and monthly quota periods
-- Pluggable storage (Firestore, in-memory)
+- Daily, monthly, and forever (pre-paid credit) quota periods
+- Pluggable storage (Redis, PostgreSQL, Firestore, in-memory, tiered Hot/Cold)
 - Transaction-safe quota consumption
 - HTTP middleware integration
-- Multi-framework support (Chi, Gin, Gorilla)
+- Multi-framework middleware (standard `net/http`, Gin, Echo, Fiber)
 
 ---
 
