@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mihaimyh/goquota/pkg/billing"
 	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
@@ -132,10 +133,16 @@ func (p *Provider) applyTransferredEntitlement(
 		return err
 	}
 
-	return p.invokeWebhookCallback(
-		ctx, userID, previousTier, ent.Tier, eventType, ent.UpdatedAt, ent.ExpiresAt,
-		map[string]interface{}{"event_type": eventType, "transfer_role": "to"},
-	)
+	return p.invokeWebhookCallback(ctx, billing.WebhookEvent{
+		UserID:         userID,
+		PreviousTier:   previousTier,
+		NewTier:        ent.Tier,
+		Provider:       providerName,
+		EventType:      eventType,
+		EventTimestamp: ent.UpdatedAt,
+		ExpiresAt:      ent.ExpiresAt,
+		Metadata:       map[string]interface{}{"event_type": eventType, "transfer_role": "to"},
+	})
 }
 
 func (p *Provider) downgradeTransferredSource(
@@ -173,10 +180,15 @@ func (p *Provider) downgradeTransferredSource(
 		return err
 	}
 
-	return p.invokeWebhookCallback(
-		ctx, userID, previousTier, ent.Tier, eventType, ent.UpdatedAt, nil,
-		map[string]interface{}{"event_type": eventType, "transfer_role": "from"},
-	)
+	return p.invokeWebhookCallback(ctx, billing.WebhookEvent{
+		UserID:         userID,
+		PreviousTier:   previousTier,
+		NewTier:        ent.Tier,
+		Provider:       providerName,
+		EventType:      eventType,
+		EventTimestamp: ent.UpdatedAt,
+		Metadata:       map[string]interface{}{"event_type": eventType, "transfer_role": "from"},
+	})
 }
 
 func skipStaleTransfer(existing *goquota.Entitlement, eventTimestamp time.Time) bool {

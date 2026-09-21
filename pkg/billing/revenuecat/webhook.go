@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -15,27 +16,78 @@ import (
 	"github.com/mihaimyh/goquota/pkg/billing/internal"
 )
 
+// webhookEvent is the RevenueCat webhook `event` object.
+type webhookEvent struct {
+	ID               string   `json:"id"`
+	Type             string   `json:"type"`
+	AppUserID        string   `json:"app_user_id"`
+	EntitlementID    string   `json:"entitlement_id"`
+	EntitlementIDs   []string `json:"entitlement_ids"`
+	ProductID        string   `json:"product_id"`
+	ExpirationReason string   `json:"expiration_reason"`
+	ExpirationAtMs   int64    `json:"expiration_at_ms"`
+	// Support both field name variations for timestamp
+	TimestampMs      int64 `json:"timestamp_ms"`
+	EventTimestampMs int64 `json:"event_timestamp_ms"`
+	// Support both field name variations for purchase date
+	PurchaseDateMs int64 `json:"purchase_date_ms"`
+	PurchasedAtMs  int64 `json:"purchased_at_ms"`
+
+	// Billing facts surfaced on billing.WebhookEvent.
+	Store                    string  `json:"store"`
+	Currency                 string  `json:"currency"`
+	Price                    float64 `json:"price"`
+	PriceInPurchasedCurrency float64 `json:"price_in_purchased_currency"`
+	PeriodType               string  `json:"period_type"`
+}
+
 // webhookPayload represents the RevenueCat webhook payload structure
 type webhookPayload struct {
-	Event struct {
-		ID               string   `json:"id"`
-		Type             string   `json:"type"`
-		AppUserID        string   `json:"app_user_id"`
-		EntitlementID    string   `json:"entitlement_id"`
-		EntitlementIDs   []string `json:"entitlement_ids"`
-		ProductID        string   `json:"product_id"`
-		ExpirationReason string   `json:"expiration_reason"`
-		ExpirationAtMs   int64    `json:"expiration_at_ms"`
-		// Support both field name variations for timestamp
-		TimestampMs      int64 `json:"timestamp_ms"`
-		EventTimestampMs int64 `json:"event_timestamp_ms"`
-		// Support both field name variations for purchase date
-		PurchaseDateMs int64 `json:"purchase_date_ms"`
-		PurchasedAtMs  int64 `json:"purchased_at_ms"`
-	} `json:"event"`
+	Event webhookEvent `json:"event"`
 
 	Subscriber   *entitlementContainer `json:"subscriber,omitempty"`
 	CustomerInfo *entitlementContainer `json:"customer_info,omitempty"`
+}
+
+// purchasedPriceCents returns the price the customer actually paid, preferring
+// the purchased-currency amount, in minor units. Zero when the event has none.
+func purchasedPriceCents(e webhookEvent) int64 {
+	price := e.PriceInPurchasedCurrency
+	if price <= 0 {
+		price = e.Price
+	}
+	if price <= 0 {
+		return 0
+	}
+	return int64(math.Round(price * 100))
+}
+
+// purchaseTime returns when the current billing period started, or nil.
+func purchaseTime(e webhookEvent) *time.Time {
+	ms := e.PurchasedAtMs
+	if ms == 0 {
+		ms = e.PurchaseDateMs
+	}
+	if ms <= 0 {
+		return nil
+	}
+	t := time.UnixMilli(ms).UTC()
+	return &t
+}
+
+// cancellationState maps a RevenueCat event type to auto-renew state: true when
+// auto-renew was disabled, false when it is (re)enabled, and nil when the event
+// does not speak to cancellation (so consumers keep their stored state).
+func cancellationState(eventType string) *bool {
+	cancelAtPeriodEnd := false
+	switch strings.ToUpper(strings.TrimSpace(eventType)) {
+	case "CANCELLATION":
+		cancelAtPeriodEnd = true
+	case "UNCANCELLATION", "INITIAL_PURCHASE", "RENEWAL", "PRODUCT_CHANGE":
+	default:
+		return nil
+	}
+	return &cancelAtPeriodEnd
 }
 
 type entitlementContainer struct {

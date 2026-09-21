@@ -364,9 +364,26 @@ func (p *Provider) processWebhookEvent(ctx context.Context, payload *webhookPayl
 		"entitlement_id": entitlementID,
 		"event_type":     payload.Event.Type,
 	}
-	if err := p.invokeWebhookCallback(
-		ctx, userID, previousTier, effectiveTier, eventType, eventTimestamp, expiresAt, metadata,
-	); err != nil {
+	event := billing.WebhookEvent{
+		UserID:         userID,
+		PreviousTier:   previousTier,
+		NewTier:        effectiveTier,
+		Provider:       providerName,
+		EventType:      eventType,
+		EventTimestamp: eventTimestamp,
+		ExpiresAt:      expiresAt,
+		Metadata:       metadata,
+
+		EventID:           strings.TrimSpace(payload.Event.ID),
+		ProductID:         productID,
+		Store:             strings.TrimSpace(payload.Event.Store),
+		Currency:          strings.ToUpper(strings.TrimSpace(payload.Event.Currency)),
+		PriceCents:        purchasedPriceCents(payload.Event),
+		PeriodType:        strings.ToUpper(strings.TrimSpace(payload.Event.PeriodType)),
+		PurchasedAt:       purchaseTime(payload.Event),
+		CancelAtPeriodEnd: cancellationState(eventType),
+	}
+	if err := p.invokeWebhookCallback(ctx, event); err != nil {
 		return err
 	}
 
@@ -400,32 +417,16 @@ func startOfDayUTC(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 
-// invokeWebhookCallback calls the configured webhook callback if present
-func (p *Provider) invokeWebhookCallback(
-	ctx context.Context,
-	userID, previousTier, newTier, eventType string,
-	eventTimestamp time.Time,
-	expiresAt *time.Time,
-	metadata map[string]interface{},
-) error {
+// invokeWebhookCallback calls the configured webhook callback if present.
+func (p *Provider) invokeWebhookCallback(ctx context.Context, event billing.WebhookEvent) error {
 	if p.webhookCallback == nil {
 		return nil
 	}
-
-	if metadata == nil {
-		metadata = make(map[string]interface{})
+	if event.Metadata == nil {
+		event.Metadata = make(map[string]interface{})
 	}
-
-	event := billing.WebhookEvent{
-		UserID:         userID,
-		PreviousTier:   previousTier,
-		NewTier:        newTier,
-		Provider:       providerName,
-		EventType:      eventType,
-		EventTimestamp: eventTimestamp,
-		ExpiresAt:      expiresAt,
-		Metadata:       metadata,
+	if event.Provider == "" {
+		event.Provider = providerName
 	}
-
 	return p.webhookCallback(ctx, event)
 }

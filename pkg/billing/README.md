@@ -552,8 +552,27 @@ type WebhookEvent struct {
     EventTimestamp time.Time              // When the event occurred
     ExpiresAt      *time.Time             // Subscription expiration (nil for lifetime)
     Metadata       map[string]interface{} // Provider-specific metadata
+
+    // Billing facts (populated by providers that expose them; RevenueCat today).
+    EventID           string     // Provider event id (RevenueCat event.id / Stripe evt_...)
+    ProductID         string     // Store product / price identifier
+    Store             string     // "PLAY_STORE", "APP_STORE", "stripe"
+    Currency          string     // ISO-4217 code for PriceCents
+    PriceCents        int64      // Purchased amount in minor units (4999 == 49.99)
+    PeriodType        string     // RevenueCat: NORMAL, TRIAL, INTRO
+    PurchasedAt       *time.Time // When the current period started
+    CancelAtPeriodEnd *bool      // true = auto-renew off, false = on, nil = event says nothing
 }
 ```
+
+`CancelAtPeriodEnd` is intentionally tri-state: **nil means the event does not speak
+to cancellation**, so consumers must not clear stored state on nil. Only
+cancellation-relevant events set it (RevenueCat `CANCELLATION` → true;
+`INITIAL_PURCHASE`/`RENEWAL`/`UNCANCELLATION`/`PRODUCT_CHANGE` → false).
+
+`DeriveBillingPeriod(purchasedAt, expiresAt)` classifies an interval as
+`billing.PeriodAnnual`, `billing.PeriodMonthly`, or `""` when it cannot be
+determined (trials, weekly plans, lifetime access).
 
 ### Provider-Specific Metadata
 
