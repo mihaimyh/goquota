@@ -45,7 +45,7 @@ func main() {
 	storage := memory.New()
 	manager, err := goquota.NewManager(storage, &config)
 	if err != nil {
-		logger.Error("Failed to create manager", goquota.Field{"error", err})
+		logger.Error("Failed to create manager", goquota.Field{Key: "error", Value: err})
 		os.Exit(1)
 	}
 
@@ -54,7 +54,7 @@ func main() {
 		fmt.Println("Prometheus metrics available at http://localhost:8080/metrics")
 		http.Handle("/metrics", promhttp.Handler())
 		if err := http.ListenAndServe(":8080", nil); err != nil {
-			logger.Error("Metrics server failed", goquota.Field{"error", err})
+			logger.Error("Metrics server failed", goquota.Field{Key: "error", Value: err})
 		}
 	}()
 
@@ -66,9 +66,9 @@ func main() {
 	for i := 1; i <= 15; i++ {
 		_, err := manager.Consume(ctx, userID, "requests", 1, goquota.PeriodTypeMonthly)
 		if err != nil {
-			logger.Warn("Consumption failed", goquota.Field{"error", err}, goquota.Field{"attempt", i})
+			logger.Warn("Consumption failed", goquota.Field{Key: "error", Value: err}, goquota.Field{Key: "attempt", Value: i})
 		} else {
-			logger.Info("Consumption successful", goquota.Field{"attempt", i})
+			logger.Info("Consumption successful", goquota.Field{Key: "attempt", Value: i})
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
