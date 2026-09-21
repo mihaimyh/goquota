@@ -300,11 +300,8 @@ func (m *Metrics) RecordFallbackHit(strategy string) {
 	m.fallbackHitsTotal.WithLabelValues(strategy).Inc()
 }
 
-func (m *Metrics) RecordRateLimitCheck(_, resource string, allowed bool, duration time.Duration) {
+func (m *Metrics) RecordRateLimitCheck(_, resource string, _ bool, duration time.Duration) {
 	m.rateLimitCheckDuration.WithLabelValues(resource).Observe(duration.Seconds())
-	if !allowed {
-		m.rateLimitExceededTotal.WithLabelValues(resource).Inc()
-	}
 }
 
 func (m *Metrics) RecordRateLimitExceeded(_, resource string) {

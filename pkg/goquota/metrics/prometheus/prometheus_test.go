@@ -1,12 +1,16 @@
 package prommetrics
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+
+	"github.com/mihaimyh/goquota/pkg/goquota"
+	"github.com/mihaimyh/goquota/storage/memory"
 )
 
 // Phase 8.2: Metrics Tests
@@ -207,5 +211,60 @@ func TestPrometheusMetrics_ConsumptionLabels(t *testing.T) {
 	// Verify multiple time series (different label combinations)
 	if len(consumptionMetric.Metric) < 3 {
 		t.Errorf("Expected at least 3 time series, got %d", len(consumptionMetric.Metric))
+	}
+}
+
+// TestPrometheusMetrics_RateLimitExceededNotDoubleCounted is a regression test
+// for OBS-1: Manager records via both RecordRateLimitCheck and
+// RecordRateLimitExceeded, so the adapter must only increment the counter once.
+func TestPrometheusMetrics_RateLimitExceededNotDoubleCounted(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	metrics := NewMetrics(reg, "test")
+
+	mgr, err := goquota.NewManager(memory.New(), &goquota.Config{
+		DefaultTier: "free",
+		Metrics:     metrics,
+		Tiers: map[string]goquota.TierConfig{
+			"free": {
+				Name:          "free",
+				MonthlyQuotas: map[string]int{"api_calls": 1000},
+				RateLimits: map[string]goquota.RateLimitConfig{
+					"api_calls": {Algorithm: "token_bucket", Rate: 1, Burst: 1, Window: time.Minute},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx := context.Background()
+	if _, err := mgr.Consume(ctx, "u1", "api_calls", 1, goquota.PeriodTypeMonthly); err != nil {
+		t.Fatalf("first consume should succeed: %v", err)
+	}
+	if _, err := mgr.Consume(ctx, "u1", "api_calls", 1, goquota.PeriodTypeMonthly); err == nil {
+		t.Fatal("second consume should be rate limited")
+	}
+
+	fams, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var sum float64
+	found := false
+	for _, f := range fams {
+		if f.GetName() != "test_rate_limit_exceeded_total" {
+			continue
+		}
+		found = true
+		for _, m := range f.GetMetric() {
+			sum += m.GetCounter().GetValue()
+		}
+	}
+	if !found {
+		t.Fatal("rate_limit_exceeded_total metric not found")
+	}
+	if sum != 1 {
+		t.Fatalf("rate_limit_exceeded_total=%v after exactly 1 exceeded event; expected 1", sum)
 	}
 }
