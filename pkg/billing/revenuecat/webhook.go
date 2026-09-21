@@ -39,6 +39,7 @@ type webhookEvent struct {
 	Price                    float64 `json:"price"`
 	PriceInPurchasedCurrency float64 `json:"price_in_purchased_currency"`
 	PeriodType               string  `json:"period_type"`
+	CancelReason             string  `json:"cancel_reason"`
 }
 
 // webhookPayload represents the RevenueCat webhook payload structure
@@ -49,17 +50,18 @@ type webhookPayload struct {
 	CustomerInfo *entitlementContainer `json:"customer_info,omitempty"`
 }
 
-// purchasedPriceCents returns the price the customer actually paid, preferring
-// the purchased-currency amount, in minor units. Zero when the event has none.
-func purchasedPriceCents(e webhookEvent) int64 {
-	price := e.PriceInPurchasedCurrency
-	if price <= 0 {
-		price = e.Price
+// purchasedPrice returns the amount the customer paid in minor units and its
+// ISO currency. RevenueCat's `price` is always USD while `currency` is the
+// transaction currency, so `price` may only be paired with USD.
+func purchasedPrice(e webhookEvent) (int64, string) {
+	if e.PriceInPurchasedCurrency > 0 {
+		return int64(math.Round(e.PriceInPurchasedCurrency * 100)),
+			strings.ToUpper(strings.TrimSpace(e.Currency))
 	}
-	if price <= 0 {
-		return 0
+	if e.Price > 0 {
+		return int64(math.Round(e.Price * 100)), "USD"
 	}
-	return int64(math.Round(price * 100))
+	return 0, strings.ToUpper(strings.TrimSpace(e.Currency))
 }
 
 // purchaseTime returns when the current billing period started, or nil.
@@ -75,19 +77,26 @@ func purchaseTime(e webhookEvent) *time.Time {
 	return &t
 }
 
-// cancellationState maps a RevenueCat event type to auto-renew state: true when
-// auto-renew was disabled, false when it is (re)enabled, and nil when the event
-// does not speak to cancellation (so consumers keep their stored state).
-func cancellationState(eventType string) *bool {
-	cancelAtPeriodEnd := false
+// cancellationState maps a RevenueCat event type + cancel_reason to auto-renew
+// state: true when auto-renew is off, false when it is (re)enabled, and nil when
+// the event does not establish it. CANCELLATION also fires for refunds, where
+// auto-renew can remain active, so those reasons stay nil.
+func cancellationState(eventType, cancelReason string) *bool {
+	off := true
+	on := false
 	switch strings.ToUpper(strings.TrimSpace(eventType)) {
+	case "UNCANCELLATION", "INITIAL_PURCHASE", "RENEWAL", "PRODUCT_CHANGE", "SUBSCRIPTION_EXTENDED", "REFUND_REVERSED":
+		return &on
 	case "CANCELLATION":
-		cancelAtPeriodEnd = true
-	case "UNCANCELLATION", "INITIAL_PURCHASE", "RENEWAL", "PRODUCT_CHANGE":
+		switch strings.ToUpper(strings.TrimSpace(cancelReason)) {
+		case "CUSTOMER_SUPPORT", "BILLING_ERROR":
+			return nil
+		default:
+			return &off
+		}
 	default:
 		return nil
 	}
-	return &cancelAtPeriodEnd
 }
 
 type entitlementContainer struct {

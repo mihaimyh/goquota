@@ -565,10 +565,20 @@ type WebhookEvent struct {
 }
 ```
 
-`CancelAtPeriodEnd` is intentionally tri-state: **nil means the event does not speak
-to cancellation**, so consumers must not clear stored state on nil. Only
-cancellation-relevant events set it (RevenueCat `CANCELLATION` → true;
-`INITIAL_PURCHASE`/`RENEWAL`/`UNCANCELLATION`/`PRODUCT_CHANGE` → false).
+`CancelAtPeriodEnd` is intentionally tri-state: **nil means the event does not
+speak to cancellation**, so consumers must not clear stored state on nil. Only
+cancellation-relevant events set it:
+- RevenueCat `CANCELLATION` → true **unless** `cancel_reason` is
+  `CUSTOMER_SUPPORT` or `BILLING_ERROR` (a refund or billing failure can leave
+  auto-renew active), in which case it stays nil; `INITIAL_PURCHASE`/`RENEWAL`/
+  `UNCANCELLATION`/`PRODUCT_CHANGE` → false.
+- Stripe `cancel_at_period_end` is authoritative on the subscription, so it is
+  always set (true/false) for subscription events.
+
+`Currency`/`PriceCents` are always a matched pair. Note RevenueCat's `price` is
+**USD** while `currency` is the transaction currency, so when only `price` is
+present the provider reports `USD`; `price_in_purchased_currency` is preferred.
+`CancelReason` carries RevenueCat's `cancel_reason` verbatim.
 
 `DeriveBillingPeriod(purchasedAt, expiresAt)` classifies an interval as
 `billing.PeriodAnnual`, `billing.PeriodMonthly`, or `""` when it cannot be

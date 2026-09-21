@@ -60,10 +60,15 @@ type WebhookEvent struct {
 	ExpiresAt *time.Time
 
 	// CancelAtPeriodEnd reports auto-renew state. True when the provider says the
-	// subscription will not renew (e.g. RevenueCat CANCELLATION), false when it
-	// will (renewal/purchase), and nil when the event does not speak to
-	// cancellation — consumers must not clear stored state on nil.
+	// subscription will not renew, false when it will (renewal/purchase), and nil
+	// when the event does not speak to cancellation — consumers must not clear
+	// stored state on nil.
 	CancelAtPeriodEnd *bool
+
+	// CancelReason is the provider's cancellation reason when the event carries
+	// one (RevenueCat cancel_reason: UNSUBSCRIBE, BILLING_ERROR,
+	// DEVELOPER_INITIATED, PRICE_INCREASE, CUSTOMER_SUPPORT, UNKNOWN).
+	CancelReason string
 
 	// Metadata contains provider-specific additional data
 	// Stripe: Contains subscription metadata (e.g., customer.metadata, subscription.metadata)

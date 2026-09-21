@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/stripe/stripe-go/v84"
@@ -192,9 +193,19 @@ func (p *Provider) handleSubscriptionCreated(
 	if subscription.Metadata != nil {
 		metadata["subscription_metadata"] = subscription.Metadata
 	}
-	return p.invokeWebhookCallback(
-		ctx, userID, previousTier, tier, string(event.Type), eventTimestamp, expiresAt, metadata,
-	)
+	ev := billing.WebhookEvent{
+		UserID:         userID,
+		PreviousTier:   previousTier,
+		NewTier:        tier,
+		Provider:       providerName,
+		EventType:      string(event.Type),
+		EventTimestamp: eventTimestamp,
+		ExpiresAt:      expiresAt,
+		EventID:        event.ID,
+		Metadata:       metadata,
+	}
+	applyStripeSubscriptionFacts(&ev, &subscription)
+	return p.invokeWebhookCallback(ctx, ev)
 }
 
 // handleSubscriptionUpdated processes customer.subscription.updated events
@@ -272,9 +283,19 @@ func (p *Provider) handleSubscriptionUpdated(
 	if subscription.Metadata != nil {
 		metadata["subscription_metadata"] = subscription.Metadata
 	}
-	return p.invokeWebhookCallback(
-		ctx, userID, previousTier, tier, string(event.Type), eventTimestamp, expiresAt, metadata,
-	)
+	ev := billing.WebhookEvent{
+		UserID:         userID,
+		PreviousTier:   previousTier,
+		NewTier:        tier,
+		Provider:       providerName,
+		EventType:      string(event.Type),
+		EventTimestamp: eventTimestamp,
+		ExpiresAt:      expiresAt,
+		EventID:        event.ID,
+		Metadata:       metadata,
+	}
+	applyStripeSubscriptionFacts(&ev, &subscription)
+	return p.invokeWebhookCallback(ctx, ev)
 }
 
 // handleSubscriptionDeleted processes customer.subscription.deleted events
@@ -399,9 +420,19 @@ func (p *Provider) handleInvoicePaymentSucceeded(
 	if sub.Metadata != nil {
 		metadata["subscription_metadata"] = sub.Metadata
 	}
-	return p.invokeWebhookCallback(
-		ctx, userID, previousTier, tier, string(event.Type), eventTimestamp, expiresAt, metadata,
-	)
+	ev := billing.WebhookEvent{
+		UserID:         userID,
+		PreviousTier:   previousTier,
+		NewTier:        tier,
+		Provider:       providerName,
+		EventType:      string(event.Type),
+		EventTimestamp: eventTimestamp,
+		ExpiresAt:      expiresAt,
+		EventID:        event.ID,
+		Metadata:       metadata,
+	}
+	applyStripeSubscriptionFacts(&ev, sub)
+	return p.invokeWebhookCallback(ctx, ev)
 }
 
 // handleInvoicePaymentFailed processes invoice.payment_failed events
@@ -561,9 +592,19 @@ func (p *Provider) handleCheckoutSessionCompleted(
 		if session.Metadata != nil {
 			metadata["session_metadata"] = session.Metadata
 		}
-		if callbackErr := p.invokeWebhookCallback(
-			ctx, userID, previousTier, tier, string(event.Type), eventTimestamp, expiresAt, metadata,
-		); callbackErr != nil {
+		ev := billing.WebhookEvent{
+			UserID:         userID,
+			PreviousTier:   previousTier,
+			NewTier:        tier,
+			Provider:       providerName,
+			EventType:      string(event.Type),
+			EventTimestamp: eventTimestamp,
+			ExpiresAt:      expiresAt,
+			EventID:        event.ID,
+			Metadata:       metadata,
+		}
+		applyStripeSubscriptionFacts(&ev, sub)
+		if callbackErr := p.invokeWebhookCallback(ctx, ev); callbackErr != nil {
 			return callbackErr
 		}
 	}
@@ -787,31 +828,50 @@ func startOfDayUTC(t time.Time) time.Time {
 }
 
 // invokeWebhookCallback calls the configured webhook callback if present
-func (p *Provider) invokeWebhookCallback(
-	ctx context.Context,
-	userID, previousTier, newTier, eventType string,
-	eventTimestamp time.Time,
-	expiresAt *time.Time,
-	metadata map[string]interface{},
-) error {
+// invokeWebhookCallback calls the configured webhook callback if present.
+func (p *Provider) invokeWebhookCallback(ctx context.Context, event billing.WebhookEvent) error {
 	if p.webhookCallback == nil {
 		return nil
 	}
-
-	if metadata == nil {
-		metadata = make(map[string]interface{})
+	if event.Metadata == nil {
+		event.Metadata = make(map[string]interface{})
 	}
-
-	event := billing.WebhookEvent{
-		UserID:         userID,
-		PreviousTier:   previousTier,
-		NewTier:        newTier,
-		Provider:       providerName,
-		EventType:      eventType,
-		EventTimestamp: eventTimestamp,
-		ExpiresAt:      expiresAt,
-		Metadata:       metadata,
+	if event.Provider == "" {
+		event.Provider = providerName
 	}
-
 	return p.webhookCallback(ctx, event)
+}
+
+// applyStripeSubscriptionFacts copies the billing facts a Stripe subscription
+// already carries onto the webhook event. Price and the current billing period
+// live on the subscription *item* (and its price), not the subscription itself.
+func applyStripeSubscriptionFacts(event *billing.WebhookEvent, sub *stripe.Subscription) {
+	if event == nil || sub == nil {
+		return
+	}
+	cancelAtPeriodEnd := sub.CancelAtPeriodEnd
+	event.CancelAtPeriodEnd = &cancelAtPeriodEnd
+	event.Store = "stripe"
+	event.Currency = strings.ToUpper(string(sub.Currency))
+	if sub.Items == nil || len(sub.Items.Data) == 0 {
+		return
+	}
+	item := sub.Items.Data[0]
+	if item.Price != nil {
+		event.ProductID = item.Price.ID
+		if item.Price.UnitAmount > 0 {
+			event.PriceCents = item.Price.UnitAmount
+		}
+		if event.Currency == "" {
+			event.Currency = strings.ToUpper(string(item.Price.Currency))
+		}
+	}
+	if item.CurrentPeriodStart > 0 {
+		started := time.Unix(item.CurrentPeriodStart, 0).UTC()
+		event.PurchasedAt = &started
+	}
+	if event.ExpiresAt == nil && item.CurrentPeriodEnd > 0 {
+		ends := time.Unix(item.CurrentPeriodEnd, 0).UTC()
+		event.ExpiresAt = &ends
+	}
 }

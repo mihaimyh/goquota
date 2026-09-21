@@ -364,6 +364,7 @@ func (p *Provider) processWebhookEvent(ctx context.Context, payload *webhookPayl
 		"entitlement_id": entitlementID,
 		"event_type":     payload.Event.Type,
 	}
+	priceCents, currency := purchasedPrice(payload.Event)
 	event := billing.WebhookEvent{
 		UserID:         userID,
 		PreviousTier:   previousTier,
@@ -377,11 +378,12 @@ func (p *Provider) processWebhookEvent(ctx context.Context, payload *webhookPayl
 		EventID:           strings.TrimSpace(payload.Event.ID),
 		ProductID:         productID,
 		Store:             strings.TrimSpace(payload.Event.Store),
-		Currency:          strings.ToUpper(strings.TrimSpace(payload.Event.Currency)),
-		PriceCents:        purchasedPriceCents(payload.Event),
+		Currency:          currency,
+		PriceCents:        priceCents,
 		PeriodType:        strings.ToUpper(strings.TrimSpace(payload.Event.PeriodType)),
 		PurchasedAt:       purchaseTime(payload.Event),
-		CancelAtPeriodEnd: cancellationState(eventType),
+		CancelAtPeriodEnd: cancellationState(eventType, payload.Event.CancelReason),
+		CancelReason:      strings.ToUpper(strings.TrimSpace(payload.Event.CancelReason)),
 	}
 	if err := p.invokeWebhookCallback(ctx, event); err != nil {
 		return err

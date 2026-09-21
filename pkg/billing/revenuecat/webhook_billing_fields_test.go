@@ -84,12 +84,51 @@ func TestWebhookCallback_CancellationState(t *testing.T) {
 	eventTime := time.Now()
 	payload := createTestPayload("test_user_123", "premium", eventTime)
 	payload.Event.Type = "CANCELLATION"
+	payload.Event.CancelReason = "UNSUBSCRIBE"
 	payload.Event.ExpirationAtMs = eventTime.AddDate(0, 1, 0).UnixMilli()
 
 	event := captureBillingEvent(t, payload)
 
 	if event.CancelAtPeriodEnd == nil || !*event.CancelAtPeriodEnd {
 		t.Fatalf("CancelAtPeriodEnd = %v, want true", event.CancelAtPeriodEnd)
+	}
+	if event.CancelReason != "UNSUBSCRIBE" {
+		t.Errorf("CancelReason = %q, want UNSUBSCRIBE", event.CancelReason)
+	}
+}
+
+// A refund-triggered CANCELLATION must not claim auto-renew was stopped: the
+// subscription can still renew (RevenueCat docs).
+func TestWebhookCallback_CancellationStateRefundStaysUnknown(t *testing.T) {
+	eventTime := time.Now()
+	payload := createTestPayload("test_user_123", "premium", eventTime)
+	payload.Event.Type = "CANCELLATION"
+	payload.Event.CancelReason = "CUSTOMER_SUPPORT"
+	payload.Event.ExpirationAtMs = eventTime.AddDate(0, 1, 0).UnixMilli()
+
+	event := captureBillingEvent(t, payload)
+
+	if event.CancelAtPeriodEnd != nil {
+		t.Fatalf("CancelAtPeriodEnd = %v, want nil", *event.CancelAtPeriodEnd)
+	}
+}
+
+// RevenueCat's `price` is USD; when the purchase-currency amount is absent the
+// pair must not mix a non-USD `currency` with a USD amount.
+func TestWebhookCallback_PriceFallsBackToUSD(t *testing.T) {
+	eventTime := time.Now()
+	payload := createTestPayload("test_user_123", "premium", eventTime)
+	payload.Event.Currency = "EUR"
+	payload.Event.Price = 49.99 // USD
+	payload.Event.PriceInPurchasedCurrency = 0
+
+	event := captureBillingEvent(t, payload)
+
+	if event.PriceCents != 4999 {
+		t.Errorf("PriceCents = %d, want 4999", event.PriceCents)
+	}
+	if event.Currency != "USD" {
+		t.Errorf("Currency = %q, want USD", event.Currency)
 	}
 }
 
