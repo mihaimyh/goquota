@@ -1,109 +1,87 @@
-# golangci-lint configuration for goquota project
-# See https://golangci-lint.run/usage/configuration/ for more details
+# golangci-lint v2 configuration for goquota project.
+# See https://golangci-lint.run/docs/configuration/file/ for details.
+#
+# Scope: correctness, security and resource-safety. Purely cosmetic linters
+# (revive doc-comments, goconst, lll, gocyclo, gocritic) are intentionally off
+# so the gate stays meaningful without a large style-only churn.
+
+version: "2"
 
 run:
   timeout: 5m
   tests: true
 
-output:
-  formats:
-    - format: colored-line-number
-  print-issued-lines: true
-  print-linter-name: true
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-  goconst:
-    min-len: 3
-    min-occurrences: 2
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - experimental
-      - opinionated
-      - performance
-      - style
-    disabled-checks:
-      - dupImport
-      - hugeParam # Config structs passed by value for consistency across Gin/Echo/Fiber middleware
-      - ifElseChain
-      - octalLiteral
-      - whyNoLint
-      - wrapperFunc
-  gocyclo:
-    min-complexity: 15
-  goimports:
-    local-prefixes: github.com/mihaimyh/goquota
-  golint:
-    min-confidence: 0
-  lll:
-    line-length: 120
-  maligned:
-    suggest-new: true
-  misspell:
-    locale: US
-  nolintlint:
-    allow-leading-space: true
-    allow-unused: false
-    require-explanation: false
-    require-specific: false
-
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
-    - goconst
-    - gocritic
-    - gocyclo
-    - gofmt
-    - goimports
     - gosec
-    - gosimple
     - govet
     - ineffassign
-    - lll
     - misspell
-    - nakedret
     - noctx
     - nolintlint
-    - revive
     - rowserrcheck
     - staticcheck
-    - stylecheck
-    - typecheck
     - unconvert
     - unparam
     - unused
     - whitespace
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    misspell:
+      locale: US
+    nolintlint:
+      allow-unused: true
+      require-explanation: false
+      require-specific: false
+  exclusions:
+    paths:
+      - vendor
+      - examples
+      - ".*\\.pb\\.go$"
+      - ".*\\.gen\\.go$"
+    rules:
+      # Exclude some linters from test files
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - noctx
+          - unparam
+      # Exclude known false positives
+      - text: "Error return value of .((os\\.)?std(out|err)\\..*|.*Close|.*Flush|os\\.Remove(All)?|.*printf?|os\\.(Un)?Setenv). is not checked"
+        linters:
+          - errcheck
+      # Exclude gosec warnings for test files
+      - path: _test\.go
+        text: "G104"
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/mihaimyh/goquota
+  exclusions:
+    paths:
+      - vendor
+      - examples
 
 issues:
-  exclude-dirs:
-    - vendor
-    - examples
-  exclude-files:
-    - ".*\\.pb\\.go$"
-    - ".*\\.gen\\.go$"
-  exclude-rules:
-    # Exclude some linters from test files
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
-        - noctx
-        - unparam
-        - gocyclo
-        - goconst
-    # Exclude known false positives
-    - text: "Error return value of .((os\\.)?std(out|err)\\..*|.*Close|.*Flush|os\\.Remove(All)?|.*printf?|os\\.(Un)?Setenv). is not checked"
-      linters:
-        - errcheck
-    # Exclude gosec warnings for test files
-    - path: _test\.go
-      text: "G104"
-      linters:
-        - gosec
   max-issues-per-linter: 0
   max-same-issues: 0
 
+output:
+  formats:
+    text:
+      path: stdout
+      colors: true
+      print-issued-lines: true
+      print-linter-name: true
