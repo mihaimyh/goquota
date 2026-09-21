@@ -188,6 +188,9 @@ func (m *Manager) GrantPromotion(ctx context.Context, req *PromotionRequest) (*E
 func (m *Manager) RevokePromotion(ctx context.Context, userID string) error
 func (m *Manager) GetEffectiveTier(ctx context.Context, userID string) (string, error)
 
+// Drop this instance's cached entitlement (multi-instance propagation).
+func (m *Manager) InvalidateEntitlement(userID string)
+
 // Startup capability check.
 func SupportsPromotions(storage Storage) bool
 func (m *Manager) PromotionsSupported() bool
@@ -233,6 +236,26 @@ manager.GrantPromotion(ctx, &goquota.PromotionRequest{
   manual grants. Use the audit log / your own notification path for promotion
   lifecycle events.
 
+### Multi-instance deployments
+
+Promotion state is cached per instance (`Config.CacheConfig.EntitlementTTL`,
+default 5 minutes). `GrantPromotion` / `RevokePromotion` invalidate the cache on
+the instance that performs them, but other instances keep serving their copy
+until the TTL elapses, so a **revoked** promotion can be over-granted for that
+window. Close it explicitly over your own transport:
+
+```go
+// instance performing the grant/revoke
+manager.GrantPromotion(ctx, req)
+bus.Publish(ctx, req.UserID)
+
+// every instance, on receipt (including the publisher)
+manager.InvalidateEntitlement(userID)
+```
+
+`Manager.InvalidateEntitlement` is a local, in-memory operation and is safe for
+unknown users. A short `EntitlementTTL` is the zero-infrastructure alternative.
+
 ### Storage contract
 
 `SetEntitlement` preserves a stored promotion when the incoming
@@ -260,6 +283,31 @@ Backends:
 | Tiered (hot/cold) | delegates to cold, then hot | write-through, cold is source of truth |
 | Circuit-breaker wrapper | delegates to inner storage | returns `ErrUnsupportedOperation` when the inner store has no capability |
 
+### Conformance suite
+
+The overlay semantics are verified by a shared suite so the contract is defined
+once instead of re-implemented per adapter. Every promotion-capable backend runs
+it:
+
+```go
+func TestPromotionConformance(t *testing.T) {
+    promotiontest.Run(t, func(t *testing.T) promotiontest.Store {
+        return newStore(t) // fresh, empty store, isolated by user ID
+    })
+}
+```
+
+It asserts round-trip and replacement, `ErrEntitlementNotFound` for an unknown
+identity, idempotent clear, provider-write preservation, caller-mutation
+isolation, base-field invariance, and that promotion writes do not modify
+`UpdatedAt` (the anchor for provider webhook idempotency). memory, tiered,
+Firestore, Redis and Postgres all run it.
+
+> Introducing the suite surfaced two Postgres divergences: promotion writes bumped
+> `updated_at`, and `SetEntitlement` ignored the caller's `UpdatedAt`. Both can
+> cause a legitimate, in-flight payment webhook to be dropped. They are fixed in
+> the same change.
+
 Postgres deployments must apply the column migration (the adapter also adds it
 lazily with `ADD COLUMN IF NOT EXISTS`):
 
@@ -286,8 +334,9 @@ effective tier and, when a promotion is active, a `promotion` block:
 
 - **MergeUser does not move promotions.** Merging identities transfers usage and
   forever credits; promotions are intentionally out of scope so that identity
-  migration never grants access the target did not have. Grant explicitly after a
-  merge if required.
+  migration never grants access the target did not have. The dropped overlay is
+  reported in `MergeUserResult.DroppedPromotion` and logged as a warning, so the
+  caller can grant explicitly after the merge instead of losing it silently.
 - **No tier ranking.** Tier names are application-defined, so the library cannot
   decide that `premium > pro`. A promotion always overrides the base while
   active; whether granting it makes sense is the caller's policy.

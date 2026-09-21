@@ -193,6 +193,18 @@ func (m *Manager) MergeUser(ctx context.Context, req *MergeUserRequest) (*MergeU
 		m.metrics.RecordIdempotencyHit("merge")
 	}
 
+	// A promotion is an explicit grant, so the merge does not move it to the
+	// target. Surface the loss instead of dropping it silently.
+	if result != nil && sourceEnt != nil && sourceEnt.Promotion != nil {
+		promo := *sourceEnt.Promotion
+		result.DroppedPromotion = &promo
+		m.logger.Warn("merge_user did not carry the source promotion to the target",
+			Field{"sourceUserId", req.SourceUserID},
+			Field{"targetUserId", req.TargetUserID},
+			Field{"promotionTier", promo.Tier},
+		)
+	}
+
 	m.cache.InvalidateEntitlement(req.SourceUserID)
 	m.cache.InvalidateEntitlement(req.TargetUserID)
 	for _, item := range items {

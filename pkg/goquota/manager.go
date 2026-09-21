@@ -1539,6 +1539,25 @@ func (m *Manager) GetEntitlement(ctx context.Context, userID string) (*Entitleme
 	return ent, nil
 }
 
+// InvalidateEntitlement drops this instance's cached entitlement for userID.
+//
+// GrantPromotion and RevokePromotion invalidate the cache on the instance that
+// performs them. In a multi-instance deployment the other instances keep serving
+// their cached copy until Config.CacheConfig.EntitlementTTL elapses, so a revoked
+// promotion can be over-granted for that window (and a grant can be delayed).
+// Call this on every instance when a change is observed out of band, e.g. from a
+// pub/sub message carrying the user ID:
+//
+//	// publisher (the instance that granted/revoked)
+//	bus.Publish(ctx, userID)
+//	// subscriber (every instance, including the publisher)
+//	manager.InvalidateEntitlement(userID)
+//
+// It is a local, in-memory operation and is safe to call for unknown users.
+func (m *Manager) InvalidateEntitlement(userID string) {
+	m.cache.InvalidateEntitlement(userID)
+}
+
 // tryFallbackEntitlement attempts to get entitlement from fallback strategies
 func (m *Manager) tryFallbackEntitlement(ctx context.Context, userID string, err error) *Entitlement {
 	if m.fallbackStrategy == nil || !m.fallbackStrategy.ShouldFallback(err) {

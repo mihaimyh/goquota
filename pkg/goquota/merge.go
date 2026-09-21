@@ -47,6 +47,14 @@ type MergeTransfer struct {
 type MergeUserResult struct {
 	IdempotentReplay bool
 	Transfers        []MergeTransfer
+	// DroppedPromotion is the source identity's promotion overlay. MergeUser
+	// deliberately does not carry it to the target: a promotion is an explicit
+	// grant, and an identity merge must never widen the target's access. It is
+	// reported so the caller can re-grant it on the target deliberately instead
+	// of losing it silently. Nil when the source had no promotion.
+	//
+	// Populated by Manager.MergeUser (adapters do not need to persist it).
+	DroppedPromotion *TierPromotion
 }
 
 // MergeItem is one resource pair the storage merge applies atomically.

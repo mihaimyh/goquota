@@ -238,6 +238,15 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 		return fmt.Errorf("failed to marshal promotion: %w", err)
 	}
 
+	// UpdatedAt is caller-owned: billing providers stamp it with the event
+	// timestamp and rely on it for webhook idempotency (an event is skipped when
+	// it is not newer than the stored value). Persist it faithfully; only stamp
+	// the server time when the caller left it zero.
+	updatedAt := ent.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+
 	// COALESCE(EXCLUDED.promotion, <table>.promotion) preserves an existing
 	// promotion when the incoming entitlement does not set one, so provider
 	// writes cannot erase it. Clear via RevokePromotion / ClearPromotion.
@@ -251,7 +260,7 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 				updated_at = EXCLUDED.updated_at,
 				promotion = COALESCE(EXCLUDED.promotion, %s.promotion)`,
 			s.config.EntitlementsTable, s.config.EntitlementsTable),
-		ent.UserID, ent.Tier, ent.SubscriptionStartDate, ent.ExpiresAt, time.Now().UTC(), promotionJSON,
+		ent.UserID, ent.Tier, ent.SubscriptionStartDate, ent.ExpiresAt, updatedAt, promotionJSON,
 	)
 
 	if err != nil {

@@ -67,7 +67,7 @@ func (s *Storage) SetPromotion(
 	}
 
 	tag, err := s.pool.Exec(ctx, fmt.Sprintf(
-		`UPDATE %s SET promotion = $1, updated_at = NOW() WHERE user_id = $2`,
+		`UPDATE %s SET promotion = $1 WHERE user_id = $2`,
 		s.config.EntitlementsTable), raw, userID)
 	if err != nil {
 		return fmt.Errorf("failed to set promotion: %w", err)
@@ -85,7 +85,7 @@ func (s *Storage) ClearPromotion(ctx context.Context, userID string) error {
 	}
 
 	_, err := s.pool.Exec(ctx, fmt.Sprintf(
-		`UPDATE %s SET promotion = NULL, updated_at = NOW() WHERE user_id = $1`,
+		`UPDATE %s SET promotion = NULL WHERE user_id = $1`,
 		s.config.EntitlementsTable), userID)
 	if err != nil {
 		return fmt.Errorf("failed to clear promotion: %w", err)
