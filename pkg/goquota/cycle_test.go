@@ -433,3 +433,15 @@ func TestCurrentCycleForStart_Jan31DriftPrevention(t *testing.T) {
 		})
 	}
 }
+
+// BenchmarkCurrentCycleForStart guards against reintroducing the O(months) scan;
+// the zero-value start date must stay O(1) (was ~4.8ms before the fix).
+func BenchmarkCurrentCycleForStart(b *testing.B) {
+	now := time.Now().UTC()
+	start := time.Time{}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		CurrentCycleForStart(start, now)
+	}
+}

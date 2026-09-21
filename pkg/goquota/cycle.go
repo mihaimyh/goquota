@@ -27,26 +27,25 @@ func CurrentCycleForStart(start, now time.Time) (cycleStart, cycleEnd time.Time)
 		return s, end
 	}
 
-	// Track the original day-of-month to preserve billing anniversary
-	// This anchor day is used to prevent date drift across months with different lengths
+	// Track the original day-of-month to preserve billing anniversary.
+	// The month offset is computed arithmetically (with a small adjustment)
+	// instead of scanning month by month, so this stays O(1) even for very old
+	// or zero-value start dates.
 	originalDay := s.Day()
-	monthsElapsed := 0
+	monthsElapsed := (n.Year()-s.Year())*12 + int(n.Month()) - int(s.Month())
 
-	for {
-		// Calculate cycle start by adding months to original start date
+	// Snap to the greatest cycle start not after now. addMonthsSafeWithDay can
+	// land past `now` when the anniversary day is later in the month than n's
+	// day, so step back (at most once).
+	cycleStart = addMonthsSafeWithDay(s, monthsElapsed, originalDay)
+	for cycleStart.After(n) {
+		monthsElapsed--
 		cycleStart = addMonthsSafeWithDay(s, monthsElapsed, originalDay)
-		cycleEnd = addMonthsSafeWithDay(s, monthsElapsed+1, originalDay)
-
-		// Cycle is [cycleStart, cycleEnd) where cycleEnd is exclusive
-		// For a cycle Jan 15 - Feb 15, it means [Jan 15 00:00:00, Feb 15 00:00:00)
-		// Times on Feb 15 (like Feb 15 12:00:00) are NOT in this cycle
-		// They should be in the next cycle [Feb 15, Mar 15)
-		// So we return the cycle if now < cycleEnd
-		if cycleEnd.After(n) {
-			return cycleStart, cycleEnd
-		}
-		monthsElapsed++
 	}
+
+	// Cycle is [cycleStart, cycleEnd) where cycleEnd is exclusive.
+	cycleEnd = addMonthsSafeWithDay(s, monthsElapsed+1, originalDay)
+	return cycleStart, cycleEnd
 }
 
 // addMonthsSafeWithDay adds months while preserving the target day-of-month when possible.
