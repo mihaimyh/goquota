@@ -286,3 +286,27 @@ func TestPrometheusMetrics_DefaultMetricsIdempotent(t *testing.T) {
 		t.Fatal("DefaultMetrics returned different instances for the same namespace")
 	}
 }
+
+// TestPrometheusMetrics_HybridBillingIsCounter is a regression test for OBS-3:
+// hybrid_billing_users_total is only ever incremented (per consumption) and is
+// named "_total", so it must be a counter, not a gauge.
+func TestPrometheusMetrics_HybridBillingIsCounter(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg, "test")
+	m.RecordHybridBillingUser("u1")
+
+	fams, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, f := range fams {
+		if f.GetName() != "test_hybrid_billing_users_total" {
+			continue
+		}
+		if f.GetType() != dto.MetricType_COUNTER {
+			t.Fatalf("hybrid_billing_users_total type = %s, want COUNTER", f.GetType())
+		}
+		return
+	}
+	t.Fatal("hybrid_billing_users_total metric not found")
+}

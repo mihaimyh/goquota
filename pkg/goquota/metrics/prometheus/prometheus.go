@@ -39,7 +39,7 @@ type Metrics struct {
 	foreverCreditsConsumptionTotal  *prometheus.CounterVec
 	foreverCreditsConsumptionAmount *prometheus.HistogramVec
 	orphanedForeverCreditsTotal     *prometheus.CounterVec
-	hybridBillingUsersTotal         *prometheus.GaugeVec
+	hybridBillingUsersTotal         *prometheus.CounterVec
 
 	// Quota health metrics
 	quotaWarningsTotal         *prometheus.CounterVec
@@ -194,10 +194,10 @@ func NewMetrics(reg prometheus.Registerer, namespace string) *Metrics {
 			Help:      "Total number of orphaned forever credits (not in current tier).",
 		}, []string{"resource"}),
 
-		hybridBillingUsersTotal: factory.NewGaugeVec(prometheus.GaugeOpts{
+		hybridBillingUsersTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "hybrid_billing_users_total",
-			Help:      "Number of users with both monthly and forever credits active.",
+			Help:      "Total hybrid (monthly + forever credits) consumption events.",
 		}, []string{}),
 
 		// Quota health metrics
