@@ -13,7 +13,7 @@
 // The suite encodes the guarantees documented in docs/PROMOTIONS.md, most
 // importantly that a promotion is an overlay: promotion writes never modify the
 // provider-owned base fields (Tier, SubscriptionStartDate, UpdatedAt), and a
-// provider write with a nil Promotion never erases an existing one. Centralising
+// provider write with a nil Promotion never erases an existing one. Centralizing
 // these checks means the contract is only as strong as one implementation, not
 // as the weakest hand-written copy per adapter.
 package promotiontest
@@ -58,17 +58,16 @@ func Run(t *testing.T, newStore Factory) {
 	t.Run("WritesLeaveUpdatedAtUntouched", func(t *testing.T) { testWritesLeaveUpdatedAtUntouched(t, store) })
 }
 
-// seed creates a base entitlement with fixed base fields and returns it.
-func seed(t *testing.T, store Store, userID, tier string) *goquota.Entitlement {
+// seed creates a base entitlement with fixed base fields.
+func seed(t *testing.T, store Store, userID string) {
 	t.Helper()
 	ent := &goquota.Entitlement{
 		UserID:                userID,
-		Tier:                  tier,
+		Tier:                  "free",
 		SubscriptionStartDate: baseTime,
 		UpdatedAt:             baseTime,
 	}
 	require.NoError(t, store.SetEntitlement(context.Background(), ent))
-	return ent
 }
 
 func mustGet(t *testing.T, store Store, userID string) *goquota.Entitlement {
@@ -82,7 +81,7 @@ func mustGet(t *testing.T, store Store, userID string) *goquota.Entitlement {
 func testRoundTrip(t *testing.T, store Store) {
 	ctx := context.Background()
 	userID := userPrefix + "-roundtrip"
-	seed(t, store, userID, "free")
+	seed(t, store, userID)
 
 	grantedAt := baseTime.Add(-time.Hour)
 	expiresAt := baseTime.Add(30 * 24 * time.Hour)
@@ -121,7 +120,7 @@ func testRoundTrip(t *testing.T, store Store) {
 func testReplacesExisting(t *testing.T, store Store) {
 	ctx := context.Background()
 	userID := userPrefix + "-replace"
-	seed(t, store, userID, "free")
+	seed(t, store, userID)
 
 	require.NoError(t, store.SetPromotion(ctx, userID, &goquota.TierPromotion{
 		Tier: "premium", ExpiresAt: baseTime.Add(24 * time.Hour),
@@ -152,7 +151,7 @@ func testMissingEntitlement(t *testing.T, store Store) {
 func testClearIsIdempotent(t *testing.T, store Store) {
 	ctx := context.Background()
 	userID := userPrefix + "-clear"
-	seed(t, store, userID, "free")
+	seed(t, store, userID)
 	require.NoError(t, store.SetPromotion(ctx, userID, &goquota.TierPromotion{
 		Tier: "premium", ExpiresAt: baseTime.Add(time.Hour),
 	}))
@@ -168,7 +167,7 @@ func testClearIsIdempotent(t *testing.T, store Store) {
 func testBaseWritePreserves(t *testing.T, store Store) {
 	ctx := context.Background()
 	userID := userPrefix + "-base-write"
-	seed(t, store, userID, "free")
+	seed(t, store, userID)
 	require.NoError(t, store.SetPromotion(ctx, userID, &goquota.TierPromotion{
 		Tier: "premium", ExpiresAt: baseTime.Add(time.Hour),
 	}))
@@ -192,7 +191,7 @@ func testBaseWritePreserves(t *testing.T, store Store) {
 func testClearPreservesBaseFields(t *testing.T, store Store) {
 	ctx := context.Background()
 	userID := userPrefix + "-clear-base"
-	seed(t, store, userID, "free")
+	seed(t, store, userID)
 
 	before := mustGet(t, store, userID)
 	require.NoError(t, store.SetPromotion(ctx, userID, &goquota.TierPromotion{
@@ -212,7 +211,7 @@ func testClearPreservesBaseFields(t *testing.T, store Store) {
 func testWritesLeaveUpdatedAtUntouched(t *testing.T, store Store) {
 	ctx := context.Background()
 	userID := userPrefix + "-updated-at"
-	seed(t, store, userID, "free")
+	seed(t, store, userID)
 
 	before := mustGet(t, store, userID)
 
