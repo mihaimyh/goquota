@@ -61,7 +61,13 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Discover Resources and record metrics
-	resources := h.discoverResourcesWithMetrics(ctx, userID)
+	resources, discoverErr := h.discoverResourcesWithMetrics(ctx, userID)
+	if discoverErr != nil {
+		status = statusError
+		errorType = "storage_error"
+		h.handleError(w, r, fmt.Errorf("failed to discover resources: %w", discoverErr), http.StatusInternalServerError)
+		return
+	}
 
 	// 4. Build response for each resource
 	resourceUsage, buildErr := h.buildResourceUsageMap(ctx, userID, resources, ent, &errorType)
@@ -124,9 +130,12 @@ func (h *Handler) getEntitlementAndTier(
 }
 
 // discoverResourcesWithMetrics discovers resources and records metrics
-func (h *Handler) discoverResourcesWithMetrics(ctx context.Context, userID string) []string {
+func (h *Handler) discoverResourcesWithMetrics(ctx context.Context, userID string) ([]string, error) {
 	totalResources := len(h.config.KnownResources)
-	resources := h.discoverResources(ctx, userID)
+	resources, err := h.discoverResources(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
 
 	if h.config.Metrics != nil && totalResources > 0 {
 		filteredCount := len(resources)
@@ -142,7 +151,7 @@ func (h *Handler) discoverResourcesWithMetrics(ctx context.Context, userID strin
 		h.config.Metrics.RecordUsageAPIResourcesDiscovered(len(resources))
 	}
 
-	return resources
+	return resources, nil
 }
 
 // buildResourceUsageMap builds the resource usage map
@@ -203,13 +212,13 @@ func (h *Handler) sendUsageResponse(
 //
 // Note: If KnownResources is not provided, returns empty list (resources cannot be discovered
 // without a starting point since tier config is not accessible).
-func (h *Handler) discoverResources(ctx context.Context, userID string) []string {
+func (h *Handler) discoverResources(ctx context.Context, userID string) ([]string, error) {
 	resourceSet := make(map[string]bool)
 
 	// 1. Get candidate resources (apply ResourceFilter early for performance)
 	// Without KnownResources, we cannot efficiently discover resources since tier config is not accessible
 	if len(h.config.KnownResources) == 0 {
-		return []string{}
+		return []string{}, nil
 	}
 
 	// Pre-filter: If ResourceFilter is set, only check those resources
@@ -219,25 +228,16 @@ func (h *Handler) discoverResources(ctx context.Context, userID string) []string
 		candidates = h.config.ResourceFilter(candidates)
 	}
 
-	// 2. Add filtered candidates to resource set
-	for _, resource := range candidates {
-		resourceSet[resource] = true
-	}
-
-	// 3. Query quotas for filtered candidates to discover active ones
-	// This discovers:
+	// 2. Query quotas for filtered candidates to discover active ones:
 	// - Resources from tier config (monthly quotas)
 	// - Orphaned credits (forever credits not in current tier)
-	// Only queries resources that passed the filter (performance optimization)
-	allResourcesToCheck := make([]string, 0, len(resourceSet))
-	for resource := range resourceSet {
-		allResourcesToCheck = append(allResourcesToCheck, resource)
-	}
-
-	// Query quotas to discover active resources
-	// Include resource if it has any quota (limit > 0, used > 0, or limit == -1)
-	for _, resource := range allResourcesToCheck {
-		if h.hasActiveQuota(ctx, userID, resource) {
+	// Only candidates that actually have a quota or credits are returned.
+	for _, resource := range candidates {
+		active, err := h.hasActiveQuota(ctx, userID, resource)
+		if err != nil {
+			return nil, fmt.Errorf("failed to discover resource %q: %w", resource, err)
+		}
+		if active {
 			resourceSet[resource] = true
 		}
 	}
@@ -248,28 +248,31 @@ func (h *Handler) discoverResources(ctx context.Context, userID string) []string
 		resources = append(resources, resource)
 	}
 
-	return resources
+	return resources, nil
 }
 
-// hasActiveQuota checks if a resource has any active quota (monthly or forever)
-func (h *Handler) hasActiveQuota(ctx context.Context, userID, resource string) bool {
+// hasActiveQuota reports whether a resource has any active quota (monthly or
+// forever) and propagates storage errors so callers can surface outages.
+func (h *Handler) hasActiveQuota(ctx context.Context, userID, resource string) (bool, error) {
 	// Check monthly quota (discovers tier config resources)
 	monthlyUsage, err := h.config.Manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeMonthly)
-	if err == nil && monthlyUsage != nil {
-		if monthlyUsage.Limit > 0 || monthlyUsage.Used > 0 || monthlyUsage.Limit == -1 {
-			return true
-		}
+	if err != nil {
+		return false, err
+	}
+	if monthlyUsage != nil && (monthlyUsage.Limit > 0 || monthlyUsage.Used > 0 || monthlyUsage.Limit == -1) {
+		return true, nil
 	}
 
 	// Check forever credits (discovers orphaned credits)
 	foreverUsage, err := h.config.Manager.GetQuota(ctx, userID, resource, goquota.PeriodTypeForever)
-	if err == nil && foreverUsage != nil {
-		if foreverUsage.Limit > 0 || foreverUsage.Used > 0 {
-			return true
-		}
+	if err != nil {
+		return false, err
+	}
+	if foreverUsage != nil && (foreverUsage.Limit > 0 || foreverUsage.Used > 0) {
+		return true, nil
 	}
 
-	return false
+	return false, nil
 }
 
 // buildResourceUsage builds the ResourceUsage for a single resource.

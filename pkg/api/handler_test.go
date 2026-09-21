@@ -915,3 +915,31 @@ func TestUsageAPI_MetricStatusIsOutcome(t *testing.T) {
 		}
 	}
 }
+
+// TestUsageAPI_ExcludesInactiveResources is a regression test for API-3:
+// discoverResources must actually filter to resources with an active quota or
+// credits (hasActiveQuota is not dead code).
+func TestUsageAPI_ExcludesInactiveResources(t *testing.T) {
+	handler, err := NewHandler(Config{
+		Manager:        newTestManager(),
+		GetUserID:      func(*http.Request) string { return testUserID },
+		KnownResources: []string{testResource, "ghost_resource"},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create handler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.GetUsage(rec, httptest.NewRequest(http.MethodGet, "/usage", nil))
+
+	var resp UsageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := resp.Resources["ghost_resource"]; ok {
+		t.Fatalf("inactive resource should be excluded: %+v", resp.Resources)
+	}
+	if _, ok := resp.Resources[testResource]; !ok {
+		t.Fatalf("active resource %q should be included: %+v", testResource, resp.Resources)
+	}
+}
