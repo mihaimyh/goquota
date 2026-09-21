@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -304,4 +305,43 @@ func TestStorage_CheckRateLimit_TokenBucket_ZeroRateBlocks(t *testing.T) {
 	allowed, _, _, err = storage.CheckRateLimit(ctx, req)
 	require.NoError(t, err)
 	assert.False(t, allowed, "Rate=0 token bucket must block once drained")
+}
+
+// TestStorage_CheckRateLimit_EvictsIdleKeys is a regression test for unbounded
+// growth: idle rate-limit keys must be evicted periodically.
+func TestStorage_CheckRateLimit_EvictsIdleKeys(t *testing.T) {
+	store := New()
+	ctx := context.Background()
+	base := time.Now().UTC()
+	req := &goquota.RateLimitRequest{
+		Resource:  "api_calls",
+		Algorithm: "token_bucket",
+		Rate:      1000,
+		Window:    10 * time.Millisecond,
+		Burst:     1000,
+		Now:       base,
+	}
+
+	for i := 0; i < 50; i++ {
+		req.UserID = fmt.Sprintf("u%d", i)
+		if _, _, _, err := store.CheckRateLimit(ctx, req); err != nil {
+			t.Fatalf("rate limit %d: %v", i, err)
+		}
+	}
+	if len(store.tokenBuckets) != 50 {
+		t.Fatalf("expected 50 buckets, got %d", len(store.tokenBuckets))
+	}
+
+	// Advance beyond the full-refill duration (10ms) and trigger a sweep.
+	req.UserID = "trigger"
+	req.Now = base.Add(time.Second)
+	for i := 0; i < 300; i++ {
+		if _, _, _, err := store.CheckRateLimit(ctx, req); err != nil {
+			t.Fatalf("trigger %d: %v", i, err)
+		}
+	}
+
+	if len(store.tokenBuckets) > 5 {
+		t.Fatalf("idle token buckets were not evicted: %d remain", len(store.tokenBuckets))
+	}
 }

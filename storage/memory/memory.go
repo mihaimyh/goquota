@@ -19,6 +19,7 @@ type tokenBucketState struct {
 	capacity   int
 	refillRate int
 	window     time.Duration
+	lastSeen   time.Time
 }
 
 // slidingWindowState represents the state of a sliding window
@@ -27,6 +28,7 @@ type slidingWindowState struct {
 	timestamps []time.Time
 	window     time.Duration
 	limit      int
+	lastSeen   time.Time
 }
 
 // Storage implements goquota.Storage using in-memory maps
@@ -40,6 +42,7 @@ type Storage struct {
 	mergeRecords   map[string]*goquota.MergeUserResult   // keyed by idempotency key (durable)
 	tokenBuckets   map[string]*tokenBucketState          // keyed by userID:resource
 	slidingWindows map[string]*slidingWindowState        // keyed by userID:resource
+	accessCount    int                                   // for periodically evicting idle rate-limit keys
 }
 
 // Now returns the current time.
@@ -343,6 +346,18 @@ func (s *Storage) CheckRateLimit(_ context.Context, req *goquota.RateLimitReques
 
 	key := rateLimitKey(req.UserID, req.Resource)
 
+	// Periodically evict idle keys so long-lived stores do not grow unbounded.
+	s.mu.Lock()
+	s.accessCount++
+	sweep := s.accessCount >= 256
+	if sweep {
+		s.accessCount = 0
+	}
+	s.mu.Unlock()
+	if sweep {
+		s.evictIdleRateLimits(req.Now)
+	}
+
 	switch req.Algorithm {
 	case "token_bucket":
 		return s.checkTokenBucket(key, req)
@@ -376,6 +391,7 @@ func (s *Storage) checkTokenBucket(key string, req *goquota.RateLimitRequest) (b
 
 	bucket.mu.Lock()
 	defer bucket.mu.Unlock()
+	bucket.lastSeen = req.Now
 
 	// Refill tokens based on elapsed time
 	elapsed := req.Now.Sub(bucket.lastRefill)
@@ -432,6 +448,7 @@ func (s *Storage) checkSlidingWindow(key string, req *goquota.RateLimitRequest) 
 
 	window.mu.Lock()
 	defer window.mu.Unlock()
+	window.lastSeen = req.Now
 
 	// Remove timestamps outside the window. Default validStart to the end of the
 	// slice so that when every timestamp has expired the window is fully cleared
@@ -495,6 +512,33 @@ func intMin(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// evictIdleRateLimits removes rate-limit entries that are equivalent to fresh
+// ones: sliding windows with no in-window timestamps and token buckets idle long
+// enough to have refilled to capacity.
+func (s *Storage) evictIdleRateLimits(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for key, b := range s.tokenBuckets {
+		b.mu.Lock()
+		if b.refillRate > 0 && b.capacity > 0 {
+			fullAfter := time.Duration(int64(b.window) * int64(b.capacity) / int64(b.refillRate))
+			if now.Sub(b.lastSeen) >= fullAfter {
+				delete(s.tokenBuckets, key)
+			}
+		}
+		b.mu.Unlock()
+	}
+
+	for key, w := range s.slidingWindows {
+		w.mu.Lock()
+		if now.Sub(w.lastSeen) >= w.window {
+			delete(s.slidingWindows, key)
+		}
+		w.mu.Unlock()
+	}
 }
 
 // Clear removes all data (useful for testing)
