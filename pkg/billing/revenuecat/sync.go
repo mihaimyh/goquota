@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -39,7 +40,7 @@ func (p *Provider) syncUserFromAPI(ctx context.Context, userID string) (string, 
 	}
 
 	// Build API URL
-	url := fmt.Sprintf("%s/subscribers/%s", revenueCatAPIBaseURL, userID)
+	url := fmt.Sprintf("%s/subscribers/%s", revenueCatAPIBaseURL, neturl.PathEscape(userID))
 	endpoint := "/subscribers/{id}"
 
 	// Create request

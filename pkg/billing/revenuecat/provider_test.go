@@ -7,8 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -3786,5 +3788,51 @@ func TestProvider_MultiEntitlement_TierResolutionDeterministic(t *testing.T) {
 
 	if len(seen) > 1 {
 		t.Fatalf("tier resolution is nondeterministic across identical payloads: %v", seen)
+	}
+}
+
+// captureSyncTransport records the outbound request URL for SyncUser tests.
+type captureSyncTransport struct{ url *url.URL }
+
+func (c *captureSyncTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.url = r.URL
+	return &http.Response{
+		StatusCode: http.StatusNotFound,
+		Status:     "404 Not Found",
+		Body:       io.NopCloser(strings.NewReader("")),
+		Header:     make(http.Header),
+		Request:    r,
+	}, nil
+}
+
+// TestSyncUserEscapesUserID is a regression test for BILLING-4: the subscriber
+// id must be URL-escaped so it cannot alter the outbound request path/query.
+func TestSyncUserEscapesUserID(t *testing.T) {
+	manager, err := goquota.NewManager(memory.New(), &goquota.Config{
+		DefaultTier: testTierExplorer,
+		Tiers:       map[string]goquota.TierConfig{testTierExplorer: {Name: testTierExplorer}},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	tr := &captureSyncTransport{}
+	provider, err := NewProvider(billing.Config{
+		Manager:    manager,
+		APIKey:     "audit-key",
+		HTTPClient: &http.Client{Transport: tr},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create provider: %v", err)
+	}
+
+	if _, err := provider.SyncUser(context.Background(), "user/with?special"); err != nil {
+		t.Fatalf("SyncUser: %v", err)
+	}
+	if tr.url == nil {
+		t.Fatal("no outbound request captured")
+	}
+	if !strings.Contains(tr.url.EscapedPath(), "user%2Fwith%3Fspecial") {
+		t.Fatalf("userID was not URL-escaped: escaped_path=%q raw_url=%q", tr.url.EscapedPath(), tr.url.String())
 	}
 }
