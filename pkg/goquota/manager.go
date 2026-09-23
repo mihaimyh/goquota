@@ -907,7 +907,14 @@ func (m *Manager) ConsumeWithResult(ctx context.Context, userID, resource string
 		}
 		if existing != nil {
 			m.metrics.RecordIdempotencyHit("consume")
-			return m.consumeResultFromRecord(ctx, existing)
+			result, err := m.consumeResultFromRecord(ctx, existing)
+			if err != nil {
+				return nil, err
+			}
+			// Nothing was debited: mark it so a caller can distinguish a replay
+			// from a real charge without reading the consumption records itself.
+			result.Replayed = true
+			return result, nil
 		}
 	}
 

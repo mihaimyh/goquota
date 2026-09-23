@@ -111,6 +111,13 @@ func TestConsumeWithResult_IdempotentReplayPreservesPeriod(t *testing.T) {
 	assert.Equal(t, first.Period, replay.Period)
 	assert.Equal(t, first.NewUsed, replay.NewUsed)
 	assert.Equal(t, first.Limit, replay.Limit)
+
+	// A replay must be distinguishable from a real charge. Without this a caller
+	// cannot tell that nothing was debited, which is how a "the quota never
+	// moves" report stayed invisible until the raw consumption records were
+	// read by hand.
+	assert.False(t, first.Replayed, "a real charge is not a replay")
+	assert.True(t, replay.Replayed, "the second call under the same key is a replay")
 }
 
 func TestConsumeWithResult_ExplicitPeriodField(t *testing.T) {

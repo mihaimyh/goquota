@@ -667,6 +667,11 @@ type ConsumeResult struct {
 	// Promotion is the promotion overlay that was in effect for the charged
 	// period, or nil.
 	Promotion *TierPromotion
+	// Replayed reports that this result was rebuilt from an earlier consumption
+	// under the same idempotency key, so nothing was debited now. NewUsed, Limit
+	// and Period describe that original charge. Callers that record usage or fire
+	// side-effects should treat a replay as a no-op.
+	Replayed bool
 }
 
 // EffectiveQuota is the merged ledger view of a resource across a tier's ConsumptionOrder.
