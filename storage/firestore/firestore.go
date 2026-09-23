@@ -685,14 +685,11 @@ func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*
 
 	data := snap.Data()
 
-	const dailyPeriodType = "daily"
-	periodTypeStr := getString(data, "periodType")
-	var periodType goquota.PeriodType
-	if periodTypeStr == dailyPeriodType {
-		periodType = goquota.PeriodTypeDaily
-	} else {
-		periodType = goquota.PeriodTypeMonthly
-	}
+	periodType := periodTypeFromRecord(
+		getString(data, "periodType"),
+		getTime(data, "periodStart"),
+		getTime(data, "periodEnd"),
+	)
 
 	record := &goquota.RefundRecord{
 		RefundID: getString(data, "refundId"),
@@ -739,14 +736,11 @@ func (s *Storage) GetConsumptionRecord(ctx context.Context, idempotencyKey strin
 
 	data := snap.Data()
 
-	const dailyPeriodType = "daily"
-	periodTypeStr := getString(data, "periodType")
-	var periodType goquota.PeriodType
-	if periodTypeStr == dailyPeriodType {
-		periodType = goquota.PeriodTypeDaily
-	} else {
-		periodType = goquota.PeriodTypeMonthly
-	}
+	periodType := periodTypeFromRecord(
+		getString(data, "periodType"),
+		getTime(data, "periodStart"),
+		getTime(data, "periodEnd"),
+	)
 
 	record := &goquota.ConsumptionRecord{
 		ConsumptionID: getString(data, "consumptionId"),
@@ -1192,6 +1186,33 @@ func getTime(data map[string]interface{}, key string) time.Time {
 		return v
 	}
 	return time.Time{}
+}
+
+// periodTypeFromRecord maps a stored period back to its domain period type.
+//
+// This used to read as "daily, else monthly", which silently turned a forever
+// consumption (pre-paid credits) into a monthly one. The damage was not just a
+// mislabelled replay: RefundFromConsume resolves PeriodTypeAuto from the
+// consumption record, so it would refund a pool that was never charged.
+func periodTypeFromRecord(stored string, start, end time.Time) goquota.PeriodType {
+	switch goquota.PeriodType(stored) {
+	case goquota.PeriodTypeDaily:
+		return goquota.PeriodTypeDaily
+	case goquota.PeriodTypeMonthly:
+		return goquota.PeriodTypeMonthly
+	case goquota.PeriodTypeForever:
+		return goquota.PeriodTypeForever
+	}
+
+	// Records written before the field existed: infer from the cycle so an
+	// unrecognised value cannot claim the wrong pool either.
+	if end.Year() > 9000 {
+		return goquota.PeriodTypeForever
+	}
+	if !start.IsZero() && end.Sub(start) <= 48*time.Hour {
+		return goquota.PeriodTypeDaily
+	}
+	return goquota.PeriodTypeMonthly
 }
 
 func getBool(data map[string]interface{}, key string) bool {
