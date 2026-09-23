@@ -674,6 +674,21 @@ type ConsumeResult struct {
 	Replayed bool
 }
 
+// RefundResult describes what a refund call actually did.
+//
+// Refund returns only an error, which cannot express "an earlier refund under the
+// same idempotency key was already applied": that made an idempotent no-op look
+// exactly like a real refund to every caller.
+type RefundResult struct {
+	// Period is the pool the refund was applied to.
+	Period PeriodType
+	// Amount is the quota returned to the user; 0 when nothing moved.
+	Amount int
+	// Replayed reports that this key had already been refunded, so the ledger was
+	// left untouched by this call.
+	Replayed bool
+}
+
 // EffectiveQuota is the merged ledger view of a resource across a tier's ConsumptionOrder.
 // Used and Limit are sums of finite periods (Limit == -1 means unlimited overall).
 // Limit stays stable as forever/bonus credits are spent (unlike MeterQuota).

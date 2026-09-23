@@ -1579,14 +1579,28 @@ func (m *Manager) tryFallbackEntitlement(ctx context.Context, userID string, err
 	return nil
 }
 
-// Refund returns consumed quota back to the user
-// This is useful for handling failed operations or cancellations
+// Refund returns consumed quota back to the user.
+// This is useful for handling failed operations or cancellations.
+//
+// Callers that need to know whether the quota actually moved should use
+// [Manager.RefundWithResult].
 func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
+	_, err := m.refundWithResult(ctx, req)
+	return err
+}
+
+// RefundWithResult is [Manager.Refund] plus a description of what it did, so a
+// caller can tell an applied refund from an idempotent replay.
+func (m *Manager) RefundWithResult(ctx context.Context, req *RefundRequest) (*RefundResult, error) {
+	return m.refundWithResult(ctx, req)
+}
+
+func (m *Manager) refundWithResult(ctx context.Context, req *RefundRequest) (*RefundResult, error) {
 	if req.Amount < 0 {
-		return ErrInvalidAmount
+		return nil, ErrInvalidAmount
 	}
 	if req.Amount == 0 {
-		return nil // No-op
+		return &RefundResult{}, nil // No-op
 	}
 
 	// Namespace idempotency keys by user so consumption and refund records
@@ -1604,17 +1618,17 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 				Field{"idempotencyKey", req.IdempotencyKey},
 				Field{"error", err},
 			)
-			return err
+			return nil, err
 		}
 		if existing != nil {
-			// Duplicate refund request - return success (idempotent)
+			// Duplicate refund request: the quota already moved for this key.
 			m.logger.Info("duplicate refund request ignored",
 				Field{"userId", req.UserID},
 				Field{"resource", req.Resource},
 				Field{"idempotencyKey", req.IdempotencyKey},
 			)
 			m.metrics.RecordIdempotencyHit("refund")
-			return nil
+			return &RefundResult{Period: existing.Period.Type, Replayed: true}, nil
 		}
 	}
 
@@ -1635,7 +1649,7 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 		// Attempt to resolve the period type from the original consumption
 		resolvedType, resolvedPeriod, err := m.resolveRefundPeriod(ctx, &refundReq)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		refundReq.PeriodType = resolvedType
 		period = resolvedPeriod
@@ -1660,7 +1674,7 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 		period = Period{Start: start, End: end, Type: PeriodTypeForever}
 
 	default:
-		return ErrInvalidPeriod
+		return nil, ErrInvalidPeriod
 	}
 
 	// Set period in request so storage uses the correct cycle
@@ -1699,9 +1713,10 @@ func (m *Manager) Refund(ctx context.Context, req *RefundRequest) error {
 			Field{"amount", req.Amount},
 			Field{"error", err},
 		)
+		return nil, err
 	}
 
-	return err
+	return &RefundResult{Period: refundReq.PeriodType, Amount: refundReq.Amount}, nil
 }
 
 // TopUpLimit atomically increments the limit for a resource with PeriodTypeForever
