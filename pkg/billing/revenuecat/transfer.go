@@ -134,11 +134,11 @@ func (p *Provider) applyTransferredEntitlement(
 	}
 
 	return p.invokeWebhookCallback(ctx, billing.WebhookEvent{
-		UserID:         userID,
-		PreviousTier:   previousTier,
-		NewTier:        ent.Tier,
-		Provider:       providerName,
-		EventType:      event.Type,
+		UserID:       userID,
+		PreviousTier: previousTier,
+		NewTier:      ent.Tier,
+		Provider:     providerName,
+		EventType:    event.Type,
 		// The provider id is the consumer's only way to record that this event was
 		// applied. Omitting it made every consumer that dedupes on it answer
 		// RevenueCat with a 500, and processTransferEvent aborts on the first
@@ -187,11 +187,11 @@ func (p *Provider) downgradeTransferredSource(
 	}
 
 	return p.invokeWebhookCallback(ctx, billing.WebhookEvent{
-		UserID:         userID,
-		PreviousTier:   previousTier,
-		NewTier:        ent.Tier,
-		Provider:       providerName,
-		EventType:      event.Type,
+		UserID:       userID,
+		PreviousTier: previousTier,
+		NewTier:      ent.Tier,
+		Provider:     providerName,
+		EventType:    event.Type,
 		// Same reasoning as the "to" side: without the provider id the consumer
 		// cannot record the event, and an unacknowledged transfer leaves the
 		// source account entitled.
