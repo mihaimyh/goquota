@@ -64,13 +64,13 @@ func (p *Provider) processTransferEvent(ctx context.Context, payload *webhookPay
 		if snapshot == nil {
 			continue
 		}
-		if err := p.applyTransferredEntitlement(ctx, destID, snapshot, eventTimestamp, payload.Event.Type); err != nil {
+		if err := p.applyTransferredEntitlement(ctx, destID, snapshot, eventTimestamp, payload.Event); err != nil {
 			return err
 		}
 	}
 
 	for _, sourceID := range fromIDs {
-		if err := p.downgradeTransferredSource(ctx, sourceID, eventTimestamp, payload.Event.Type); err != nil {
+		if err := p.downgradeTransferredSource(ctx, sourceID, eventTimestamp, payload.Event); err != nil {
 			return err
 		}
 	}
@@ -105,7 +105,7 @@ func (p *Provider) applyTransferredEntitlement(
 	userID string,
 	snapshot *goquota.Entitlement,
 	eventTimestamp time.Time,
-	eventType string,
+	event webhookEvent,
 ) error {
 	existing, err := p.manager.GetEntitlement(ctx, userID)
 	if err != nil && err != goquota.ErrEntitlementNotFound {
@@ -138,10 +138,16 @@ func (p *Provider) applyTransferredEntitlement(
 		PreviousTier:   previousTier,
 		NewTier:        ent.Tier,
 		Provider:       providerName,
-		EventType:      eventType,
+		EventType:      event.Type,
+		// The provider id is the consumer's only way to record that this event was
+		// applied. Omitting it made every consumer that dedupes on it answer
+		// RevenueCat with a 500, and processTransferEvent aborts on the first
+		// callback error - so the source account was left on premium until a
+		// retry. A transfer that is not acknowledged is a double entitlement.
+		EventID:        strings.TrimSpace(event.ID),
 		EventTimestamp: ent.UpdatedAt,
 		ExpiresAt:      ent.ExpiresAt,
-		Metadata:       map[string]interface{}{"event_type": eventType, "transfer_role": "to"},
+		Metadata:       map[string]interface{}{"event_type": event.Type, "transfer_role": "to"},
 	})
 }
 
@@ -149,7 +155,7 @@ func (p *Provider) downgradeTransferredSource(
 	ctx context.Context,
 	userID string,
 	eventTimestamp time.Time,
-	eventType string,
+	event webhookEvent,
 ) error {
 	existing, err := p.manager.GetEntitlement(ctx, userID)
 	if err != nil && err != goquota.ErrEntitlementNotFound {
@@ -185,9 +191,13 @@ func (p *Provider) downgradeTransferredSource(
 		PreviousTier:   previousTier,
 		NewTier:        ent.Tier,
 		Provider:       providerName,
-		EventType:      eventType,
+		EventType:      event.Type,
+		// Same reasoning as the "to" side: without the provider id the consumer
+		// cannot record the event, and an unacknowledged transfer leaves the
+		// source account entitled.
+		EventID:        strings.TrimSpace(event.ID),
 		EventTimestamp: ent.UpdatedAt,
-		Metadata:       map[string]interface{}{"event_type": eventType, "transfer_role": "from"},
+		Metadata:       map[string]interface{}{"event_type": event.Type, "transfer_role": "from"},
 	})
 }
 

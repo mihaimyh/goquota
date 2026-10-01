@@ -116,6 +116,13 @@ func TestProvider_Webhook_Transfer_MissingAppUserID_MovesEntitlement(t *testing.
 		if ev.EventType != "TRANSFER" {
 			t.Fatalf("callback EventType=%q, want TRANSFER", ev.EventType)
 		}
+		// Regression: the TRANSFER path built its callback event without the
+		// provider id, so a consumer could not record the event and answered
+		// RevenueCat with a 500 on every delivery - which also aborted the
+		// downgrade of the source account until a retry.
+		if ev.EventID != "BC96ECDA-ED24-453C-8A70-0A81DCD97390" {
+			t.Fatalf("callback EventID=%q, want the payload id", ev.EventID)
+		}
 		if ev.UserID == sourceID && ev.NewTier == testTierExplorer {
 			sawSourceFree = true
 		}
