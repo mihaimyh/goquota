@@ -999,6 +999,25 @@ func (s *Storage) topUpKey(idempotencyKey string) string {
 	return fmt.Sprintf("%s%s%s", s.config.KeyPrefix, s.config.TopUpKeySuffix, idempotencyKey)
 }
 
+// tokenBucketTTL returns the TTL for a token bucket key. The bucket refills
+// floor(rate * elapsed / window) tokens, so an empty bucket needs
+// ceil(capacity/rate) full windows to become full again. A shorter TTL lets an
+// idle depleted bucket expire and restart at a full burst, granting more
+// requests than the configured rate. minimum is the sliding-window TTL used as
+// a floor so small buckets keep the existing cleanup behavior.
+func tokenBucketTTL(window time.Duration, capacity, rate int, minimum int64) int64 {
+	windowSeconds := int64(window.Seconds())
+	if windowSeconds <= 0 || capacity <= 0 || rate <= 0 {
+		return minimum
+	}
+
+	fullRefill := int64((capacity+rate-1)/rate) * windowSeconds // ceil(capacity/rate) windows
+	if fullRefill < minimum {
+		return minimum
+	}
+	return fullRefill
+}
+
 // AddLimit implements goquota.Storage
 func (s *Storage) AddLimit(
 	ctx context.Context, userID, resource string, amount int, period goquota.Period, idempotencyKey string,
@@ -1125,15 +1144,20 @@ func (s *Storage) CheckRateLimit(ctx context.Context, req *goquota.RateLimitRequ
 	nowUnix := req.Now.Unix()
 	ttl := int64(req.Window.Seconds() * 2) // Store for 2x window to allow cleanup
 
+	burst := req.Burst
+	if burst <= 0 {
+		burst = req.Rate
+	}
+
 	var result interface{}
 	var err error
 
 	switch req.Algorithm {
 	case "token_bucket":
-		burst := req.Burst
-		if burst <= 0 {
-			burst = req.Rate
-		}
+		// A depleted bucket needs ceil(burst/rate) windows to refill. Keeping the
+		// key alive for only 2 windows let an idle bucket expire and start again
+		// with a full burst, which allows more than the configured rate.
+		ttl = tokenBucketTTL(req.Window, burst, req.Rate, ttl)
 		result, err = s.scripts["tokenBucket"].Run(
 			ctx,
 			s.client,

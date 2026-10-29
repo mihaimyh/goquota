@@ -480,6 +480,98 @@ func TestStorage_ConsumeQuota_Sync(t *testing.T) {
 	assert.Equal(t, 10, coldUsage.Used)
 }
 
+// blockingCold gates cold ConsumeQuota calls so a test can hold an async
+// consumption in flight while another operation runs.
+type blockingCold struct {
+	*memory.Storage
+	consumeEntered chan struct{}
+	consumeRelease chan struct{}
+	refundApplied  chan struct{}
+}
+
+func (b *blockingCold) ConsumeQuota(
+	ctx context.Context, req *goquota.ConsumeRequest,
+) (int, error) {
+	select {
+	case b.consumeEntered <- struct{}{}:
+	default:
+	}
+	<-b.consumeRelease
+	return b.Storage.ConsumeQuota(ctx, req)
+}
+
+func (b *blockingCold) RefundQuota(ctx context.Context, req *goquota.RefundRequest) error {
+	select {
+	case b.refundApplied <- struct{}{}:
+	default:
+	}
+	return b.Storage.RefundQuota(ctx, req)
+}
+
+// TestStorage_RefundQuota_WaitsForPendingAsyncConsumption guards TSM-02: a
+// refund reached cold storage before the queued consume it refunds, so the
+// stores diverged (hot 0, cold 10).
+func TestStorage_RefundQuota_WaitsForPendingAsyncConsumption(t *testing.T) {
+	hot := memory.New()
+	cold := &blockingCold{
+		Storage:        memory.New(),
+		consumeEntered: make(chan struct{}, 1),
+		consumeRelease: make(chan struct{}),
+		refundApplied:  make(chan struct{}, 1),
+	}
+	storage, err := New(Config{Hot: hot, Cold: cold, AsyncUsageSync: true})
+	require.NoError(t, err)
+	defer storage.Close()
+
+	ctx := context.Background()
+	period := goquota.Period{
+		Start: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:   time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC),
+		Type:  goquota.PeriodTypeMonthly,
+	}
+
+	_, err = storage.ConsumeQuota(ctx, &goquota.ConsumeRequest{
+		UserID:   "user1",
+		Resource: "api_calls",
+		Amount:   10,
+		Tier:     "pro",
+		Period:   period,
+		Limit:    100,
+	})
+	require.NoError(t, err)
+	<-cold.consumeEntered // the async job is in flight, cold not yet written
+
+	refundDone := make(chan error, 1)
+	go func() {
+		refundDone <- storage.RefundQuota(ctx, &goquota.RefundRequest{
+			UserID:     "user1",
+			Resource:   "api_calls",
+			Amount:     10,
+			Period:     period,
+			PeriodType: goquota.PeriodTypeMonthly,
+		})
+	}()
+
+	// The refund must not touch cold storage while the consumption is pending.
+	select {
+	case <-cold.refundApplied:
+		close(cold.consumeRelease)
+		<-refundDone
+		t.Fatal("refund reached cold storage before the pending consumption was applied")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(cold.consumeRelease)
+	require.NoError(t, <-refundDone)
+
+	for name, store := range map[string]goquota.Storage{"hot": hot, "cold": cold} {
+		usage, err := store.GetUsage(ctx, "user1", "api_calls", period)
+		require.NoError(t, err)
+		require.NotNil(t, usage, "%s usage missing", name)
+		assert.Equal(t, 0, usage.Used, "%s store diverged after consume+refund", name)
+	}
+}
+
 // --- Record Retrieval Read-Through Tests (Critical for Idempotency) ---
 
 func TestStorage_GetConsumptionRecord_ReadThrough(t *testing.T) {

@@ -4,8 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mihaimyh/goquota/pkg/goquota"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
 // The stored period type has to survive the round-trip.

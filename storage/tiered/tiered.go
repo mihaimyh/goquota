@@ -120,6 +120,36 @@ func (s *Storage) startWorker() {
 	}()
 }
 
+// flushSyncQueue waits until every job queued by the async consumption path has
+// been applied to cold storage. Write-through operations that undo or adjust a
+// consumption (refund, add limit, subtract limit) call it first so the cold
+// store cannot apply them out of order (netquota TSM-02).
+//
+// It is a no-op when async sync is disabled (cold writes are synchronous) or
+// when the worker has already shut down.
+func (s *Storage) flushSyncQueue() {
+	if !s.conf.AsyncUsageSync {
+		return
+	}
+
+	// The sentinel runs after every job enqueued before it, giving a barrier
+	// for writes already accepted by the queue.
+	done := make(chan struct{})
+	select {
+	case s.syncQueue <- func() error {
+		close(done)
+		return nil
+	}:
+	case <-s.shutdown:
+		return
+	}
+
+	select {
+	case <-done:
+	case <-s.shutdown:
+	}
+}
+
 // --- Strategy: Read-Through (Hot → Cold → Populate Hot) ---
 
 // Compile-time interface conformance checks.
@@ -284,6 +314,10 @@ func (s *Storage) AddLimit(
 	period goquota.Period,
 	idempotencyKey string,
 ) error {
+	// Apply pending async consumptions first, otherwise this limit change can
+	// reach cold storage before the consumption it is meant to follow.
+	s.flushSyncQueue()
+
 	// Critical financial data: Write Cold first
 	if err := s.cold.AddLimit(ctx, userID, resource, amount, period, idempotencyKey); err != nil {
 		return err
@@ -304,6 +338,10 @@ func (s *Storage) SubtractLimit(
 	period goquota.Period,
 	idempotencyKey string,
 ) error {
+	// Apply pending async consumptions first, otherwise this limit change can
+	// reach cold storage before the consumption it is meant to follow.
+	s.flushSyncQueue()
+
 	// 1. Write Cold (Durability)
 	if err := s.cold.SubtractLimit(ctx, userID, resource, amount, period, idempotencyKey); err != nil {
 		return err
@@ -316,6 +354,10 @@ func (s *Storage) SubtractLimit(
 
 // RefundQuota implements goquota.Storage with write-through strategy.
 func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) error {
+	// Apply pending async consumptions first: a refund must not reach cold
+	// storage before the consumption it refunds, or the stores diverge.
+	s.flushSyncQueue()
+
 	// 1. Write Cold (Financial record - durability first)
 	if err := s.cold.RefundQuota(ctx, req); err != nil {
 		return err

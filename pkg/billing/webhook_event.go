@@ -36,6 +36,14 @@ type WebhookEvent struct {
 	// Stripe evt_...). Use it for your own deduplication/audit trail.
 	EventID string
 
+	// ProviderObjectID is the provider object the event is about
+	// (Stripe: checkout session id cs_..., charge id ch_...).
+	ProviderObjectID string
+
+	// PaymentIntentID is the Stripe payment intent id, empty when the event
+	// carries none.
+	PaymentIntentID string
+
 	// ProductID is the store product / price identifier the event concerns.
 	ProductID string
 

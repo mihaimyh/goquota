@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stripe/stripe-go/v84"
+
 	"github.com/mihaimyh/goquota/pkg/billing"
 	"github.com/mihaimyh/goquota/pkg/goquota"
 	"github.com/mihaimyh/goquota/storage/memory"
@@ -234,5 +236,59 @@ func TestBuildCreditPackCheckoutParams_PaymentIntentMetadata(t *testing.T) {
 	if params.PaymentIntentData.Metadata["user_id"] != "user-1" ||
 		params.PaymentIntentData.Metadata["resource"] != "credits" {
 		t.Fatalf("PaymentIntent metadata missing: %+v", params.PaymentIntentData.Metadata)
+	}
+}
+
+// TestBuildCheckoutParams_ManagedPaymentsDisabled is a regression test: newer
+// Stripe accounts enable Managed Payments by default, which then rejects
+// sessions whose line items have no product tax code. Both checkout builders
+// must opt out explicitly (netquota b1c7128).
+func TestBuildCheckoutParams_ManagedPaymentsDisabled(t *testing.T) {
+	const extraKey = "managed_payments[enabled]"
+
+	tests := []struct {
+		name   string
+		params *stripe.CheckoutSessionCreateParams
+	}{
+		{
+			name: "subscription",
+			params: buildSubscriptionCheckoutParams(
+				"user-1", "price_pro_monthly", "https://ok", "https://cancel",
+			),
+		},
+		{
+			name: "credit pack",
+			params: buildCreditPackCheckoutParams(
+				"user-1", "credits", 500, "https://ok", "https://cancel",
+			),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.params.Extra == nil {
+				t.Fatal("no extra params set: Stripe Managed Payments would stay enabled")
+			}
+			if got := tc.params.Extra.Get(extraKey); got != "false" {
+				t.Fatalf("%s = %q, want \"false\"", extraKey, got)
+			}
+		})
+	}
+}
+
+// TestBuildSubscriptionCheckoutParams_Metadata verifies the subscription
+// builder still injects user_id on the subscription, which the webhook handler
+// reads.
+func TestBuildSubscriptionCheckoutParams_Metadata(t *testing.T) {
+	params := buildSubscriptionCheckoutParams("user-1", "price_pro_monthly", "https://ok", "https://cancel")
+
+	if params.Mode == nil || *params.Mode != string(stripe.CheckoutSessionModeSubscription) {
+		t.Fatalf("Mode = %v, want subscription", params.Mode)
+	}
+	if params.SubscriptionData == nil {
+		t.Fatal("SubscriptionData is nil: webhook handler cannot resolve user_id")
+	}
+	if params.SubscriptionData.Metadata["user_id"] != "user-1" {
+		t.Fatalf("subscription metadata = %+v, want user_id user-1", params.SubscriptionData.Metadata)
 	}
 }

@@ -3,6 +3,7 @@ package goquota
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -446,7 +447,9 @@ func (c *Config) validateWarningThresholds(tierName string, tierConfig TierConfi
 
 	for resource, thresholds := range tierConfig.WarningThresholds {
 		for i, threshold := range thresholds {
-			if threshold < 0 || threshold > 1 {
+			// NaN never compares true against the range checks, so it must be
+			// rejected explicitly: a NaN threshold silently disables warnings.
+			if math.IsNaN(threshold) || threshold < 0 || threshold > 1 {
 				errs = append(errs, fmt.Errorf(
 					"tier '%s' resource '%s' warning threshold[%d] is out of range [0, 1]: %f",
 					tierName, resource, i, threshold))

@@ -53,7 +53,11 @@ func (p *Provider) processTransferEvent(ctx context.Context, payload *webhookPay
 	rawFrom, rawTo := parseTransferIdentities(body)
 	fromIDs := filterAppUserIDs(rawFrom)
 	toIDs := filterAppUserIDs(rawTo)
-	if len(fromIDs) == 0 && len(toIDs) == 0 {
+
+	// Both sides are required before anything is written. Downgrading the
+	// sources without a destination to receive the entitlement silently strips
+	// a paying subscriber (netquota ac4d823).
+	if len(fromIDs) == 0 || len(toIDs) == 0 {
 		return nil
 	}
 

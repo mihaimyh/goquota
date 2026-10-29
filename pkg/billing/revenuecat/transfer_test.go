@@ -198,3 +198,79 @@ func TestProvider_Webhook_InitialPurchase_StillRequiresAppUserID(t *testing.T) {
 		t.Fatalf("body=%q, want missing user id", w.Body.String())
 	}
 }
+
+// TestProvider_Webhook_Transfer_EmptyDestination_LeavesSourceEntitled is the
+// RC-01 regression: a TRANSFER whose transferred_to list is empty after
+// filtering used to downgrade the source without granting anything, silently
+// stripping a paying subscriber (netquota ac4d823).
+func TestProvider_Webhook_Transfer_EmptyDestination_LeavesSourceEntitled(t *testing.T) {
+	ctx := context.Background()
+	manager := mockManager(t)
+	sourceID := "RyPO5L6jmjUbNLME44ZihFuXDgh1"
+	expires := time.Now().UTC().Add(24 * time.Hour)
+
+	if err := manager.SetEntitlement(ctx, &goquota.Entitlement{
+		UserID:                sourceID,
+		Tier:                  testTierScholar,
+		SubscriptionStartDate: time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC),
+		ExpiresAt:             &expires,
+		UpdatedAt:             time.Now().UTC().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("seed source entitlement: %v", err)
+	}
+
+	var callbacks []billing.WebhookEvent
+	provider, err := NewProvider(billing.Config{
+		Manager: manager,
+		TierMapping: map[string]string{
+			"scholar_monthly": testTierScholar,
+			"*":               testTierExplorer,
+		},
+		WebhookSecret: testSecret,
+		WebhookCallback: func(_ context.Context, event billing.WebhookEvent) error {
+			callbacks = append(callbacks, event)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"event": map[string]any{
+			"id":                 "6B7CA5A2-2F6F-4C13-9A31-0E1B8D7A5C44",
+			"type":               "TRANSFER",
+			"event_timestamp_ms": time.Now().UnixMilli(),
+			"transferred_from":   []string{"$RCAnonymousID:55ec31deddd44def88cdb99fdf85009c", sourceID},
+			"transferred_to":     []string{},
+			"environment":        "SANDBOX",
+			"store":              "PLAY_STORE",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", testBearerSecret)
+	w := httptest.NewRecorder()
+	provider.handleWebhook(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("TRANSFER status=%d body=%q, want 200", w.Code, w.Body.String())
+	}
+
+	source, err := manager.GetEntitlement(ctx, sourceID)
+	if err != nil {
+		t.Fatalf("source entitlement: %v", err)
+	}
+	if source.Tier != testTierScholar {
+		t.Fatalf("source tier=%q, want unchanged %q", source.Tier, testTierScholar)
+	}
+	if source.ExpiresAt == nil || !source.ExpiresAt.Equal(expires) {
+		t.Fatalf("source ExpiresAt=%v, want unchanged %v", source.ExpiresAt, expires)
+	}
+	if len(callbacks) != 0 {
+		t.Fatalf("callbacks=%d, want none: %+v", len(callbacks), callbacks)
+	}
+}

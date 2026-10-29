@@ -4,9 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/mihaimyh/goquota/pkg/goquota"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mihaimyh/goquota/pkg/goquota"
 )
 
 // A refund replay has to be distinguishable from an applied refund.
@@ -56,7 +57,7 @@ func TestRefundWithResult_ReportsReplay(t *testing.T) {
 	assert.Equal(t, 0, usage.Used, "a replayed refund must not credit twice")
 }
 
-// Refund keeps its signature and behaviour; the result is simply discarded.
+// Refund keeps its signature and behavior; the result is simply discarded.
 func TestRefund_StillReturnsOnlyAnError(t *testing.T) {
 	ctx := context.Background()
 	manager := newOverflowTestManager(t, 5)
@@ -69,7 +70,7 @@ func TestRefund_StillReturnsOnlyAnError(t *testing.T) {
 	_, err := manager.Consume(ctx, userID, "receipt_scan", 1, goquota.PeriodTypeDaily)
 	require.NoError(t, err)
 
-	var refundErr error = manager.Refund(ctx, &goquota.RefundRequest{
+	refundErr := manager.Refund(ctx, &goquota.RefundRequest{
 		UserID:         userID,
 		Resource:       "receipt_scan",
 		Amount:         1,

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -112,6 +114,8 @@ func (p *Provider) processWebhookEvent(ctx context.Context, event *stripe.Event)
 		return p.handleCheckoutSessionCompleted(ctx, event, eventTimestamp)
 	case "payment_intent.refunded":
 		return p.handlePaymentIntentRefunded(ctx, event, eventTimestamp)
+	case "charge.refunded":
+		return p.handleChargeRefunded(ctx, event, eventTimestamp)
 	default:
 		// Unknown event type - ignore silently
 		return nil
@@ -449,16 +453,22 @@ func (p *Provider) handleInvoicePaymentFailed(_ context.Context, event *stripe.E
 	return nil
 }
 
-// handleCheckoutSessionCompleted processes checkout.session.completed events
-// CRITICAL: This immediately calls SetEntitlement after patching metadata
-//
-//nolint:gocyclo // Complex business logic with metadata patching and entitlement updates
+// handleCheckoutSessionCompleted processes checkout.session.completed events.
+// Only paid one-time (payment mode) sessions that carry credit-pack metadata
+// move quota; subscription purchases are owned by the subscription events.
 func (p *Provider) handleCheckoutSessionCompleted(
 	ctx context.Context, event *stripe.Event, eventTimestamp time.Time,
 ) error {
 	var session stripe.CheckoutSession
 	if err := json.Unmarshal(event.Data.Raw, &session); err != nil {
 		return fmt.Errorf("failed to unmarshal checkout session: %w", err)
+	}
+
+	// customer.subscription.* and invoice.payment_succeeded own the entitlement
+	// for subscriptions; granting here as well would apply the same purchase
+	// twice when Stripe delivers this event after the subscription events.
+	if session.Mode == stripe.CheckoutSessionModeSubscription {
+		return nil
 	}
 
 	userID := ""
@@ -469,147 +479,63 @@ func (p *Provider) handleCheckoutSessionCompleted(
 		return fmt.Errorf("metadata.user_id missing on checkout session %s", session.ID)
 	}
 
-	// Check if this is a payment (one-time) or subscription checkout
-	if session.Mode == stripe.CheckoutSessionModePayment {
-		// Handle one-time payment (credit top-up)
-		// Only process if it has the required metadata for credit top-ups
-		// If not, it's likely a different type of payment and we should ignore it gracefully
-		if session.Metadata != nil && session.Metadata["resource"] != "" {
-			err := p.handlePaymentCheckout(ctx, &session, eventTimestamp)
-			if err == nil {
-				// Record checkout session completed for payment
-				tier := "unknown"
-				if session.Metadata != nil {
-					// Try to get tier from metadata if available
-					if t, ok := session.Metadata["tier"]; ok {
-						tier = t
-					}
-				}
-				p.metrics.RecordCheckoutSessionCompleted(providerName, tier, "payment")
-
-				// Record revenue estimate (amount in cents, convert to dollars)
-				if session.AmountTotal > 0 {
-					revenueAmount := float64(session.AmountTotal) / 100.0
-					p.metrics.RecordRevenueEstimate(providerName, tier, "one-time", revenueAmount)
-				}
-			}
-			return err
-		}
-		// Payment checkout without credit top-up metadata - ignore gracefully
-		// This is not an error, just a checkout we don't need to process
+	// Checkout completes before the money lands for delayed payment methods
+	// (SEPA, Boleto). Granting credits here would hand out the pack for a
+	// payment that may still fail.
+	if session.PaymentStatus != stripe.CheckoutSessionPaymentStatusPaid {
+		p.metrics.RecordWebhookEvent(providerName, string(event.Type), "ignored")
 		return nil
 	}
 
-	subscriptionID := ""
-	if session.Subscription != nil {
-		subscriptionID = session.Subscription.ID
-	}
-	if subscriptionID == "" {
-		// Not a subscription checkout - ignore
+	// Only credit-pack sessions carry the resource metadata. Any other
+	// one-time payment is not ours to process, so ignore it gracefully.
+	if session.Metadata["resource"] == "" {
 		return nil
 	}
 
-	// API key is required for subscription checkout processing
-	if p.stripeClient == nil {
-		return fmt.Errorf("STRIPE_API_KEY required for subscription checkout processing")
-	}
-
-	// 1. Patch Stripe subscription metadata (if needed)
-	sub, err := p.stripeClient.V1Subscriptions.Retrieve(ctx, subscriptionID, nil)
-	if err != nil {
-		return fmt.Errorf("failed to fetch subscription: %w", err)
-	}
-
-	if sub.Metadata == nil || sub.Metadata["user_id"] == "" {
-		// Update subscription metadata on Stripe
-		params := &stripe.SubscriptionUpdateParams{}
-		params.AddMetadata("user_id", userID)
-		sub, err = p.stripeClient.V1Subscriptions.Update(ctx, subscriptionID, params)
-		if err != nil {
-			return fmt.Errorf("failed to patch subscription metadata: %w", err)
-		}
-		// Sub is already updated, no need to re-fetch
-	}
-
-	// 2. IMMEDIATELY update GoQuota entitlement (don't wait for next webhook)
-	tier, expiresAt, startDate := p.extractTierFromSubscription(sub)
-
-	// Get existing entitlement for timestamp comparison
-	existing, err := p.manager.GetEntitlement(ctx, userID)
-	if err != nil && err != goquota.ErrEntitlementNotFound {
+	if err := p.handlePaymentCheckout(ctx, &session, eventTimestamp); err != nil {
 		return err
 	}
 
-	// Timestamp-based idempotency
-	if existing != nil && !eventTimestamp.After(existing.UpdatedAt) {
-		return nil
-	}
-
-	var subscriptionStartDate time.Time
-	if existing != nil && !existing.SubscriptionStartDate.IsZero() {
-		subscriptionStartDate = existing.SubscriptionStartDate
-	} else if startDate != nil {
-		subscriptionStartDate = startOfDayUTC(startDate.UTC())
-	} else {
-		subscriptionStartDate = startOfDayUTC(time.Now().UTC())
-	}
-
-	ent := &goquota.Entitlement{
-		UserID:                userID,
-		Tier:                  tier,
-		SubscriptionStartDate: subscriptionStartDate,
-		ExpiresAt:             expiresAt,
-		UpdatedAt:             eventTimestamp,
-	}
-
-	// Determine previous tier for callback (extracted earlier at line 450)
-	previousTier := p.defaultTier
-	if existing != nil {
-		previousTier = existing.Tier
-	}
-
-	err = p.manager.SetEntitlement(ctx, ent)
-	if err == nil {
-		// Record checkout session completed for subscription
-		p.metrics.RecordCheckoutSessionCompleted(providerName, tier, "subscription")
-
-		// Record revenue estimate (get amount from subscription)
-		// Estimate monthly revenue from subscription amount
-		if sub.Items != nil && len(sub.Items.Data) > 0 {
-			item := sub.Items.Data[0]
-			if item.Price != nil && item.Price.UnitAmount > 0 {
-				// Amount is in cents per billing period, convert to dollars
-				revenueAmount := float64(item.Price.UnitAmount) / 100.0
-				p.metrics.RecordRevenueEstimate(providerName, tier, "subscription", revenueAmount)
-			}
-		}
-
-		// Invoke webhook callback if configured
-		metadata := make(map[string]interface{})
-		if sub.Metadata != nil {
-			metadata["subscription_metadata"] = sub.Metadata
-		}
-		if session.Metadata != nil {
-			metadata["session_metadata"] = session.Metadata
-		}
-		ev := billing.WebhookEvent{
-			UserID:         userID,
-			PreviousTier:   previousTier,
-			NewTier:        tier,
-			Provider:       providerName,
-			EventType:      string(event.Type),
-			EventTimestamp: eventTimestamp,
-			ExpiresAt:      expiresAt,
-			EventID:        event.ID,
-			Metadata:       metadata,
-		}
-		applyStripeSubscriptionFacts(&ev, sub)
-		if callbackErr := p.invokeWebhookCallback(ctx, ev); callbackErr != nil {
-			return callbackErr
+	tier := "unknown"
+	if session.Metadata != nil {
+		// Try to get tier from metadata if available
+		if t, ok := session.Metadata["tier"]; ok {
+			tier = t
 		}
 	}
+	p.metrics.RecordCheckoutSessionCompleted(providerName, tier, "payment")
 
-	return err
+	// Record revenue estimate (amount in cents, convert to dollars)
+	if session.AmountTotal > 0 {
+		revenueAmount := float64(session.AmountTotal) / 100.0
+		p.metrics.RecordRevenueEstimate(providerName, tier, "one-time", revenueAmount)
+	}
+
+	paymentIntentID := ""
+	if session.PaymentIntent != nil {
+		paymentIntentID = session.PaymentIntent.ID
+	}
+
+	// The quota already moved; report the purchase so the consumer can mirror it
+	// in its own ledger.
+	return p.invokeWebhookCallback(ctx, billing.WebhookEvent{
+		UserID:           userID,
+		Provider:         providerName,
+		EventType:        string(event.Type),
+		EventID:          event.ID,
+		ProviderObjectID: session.ID,
+		PaymentIntentID:  paymentIntentID,
+		EventTimestamp:   eventTimestamp,
+		Store:            providerName,
+		Currency:         strings.ToUpper(string(session.Currency)),
+		PriceCents:       session.AmountTotal,
+		Metadata: map[string]interface{}{
+			"resource":          session.Metadata["resource"],
+			"credits":           int(session.AmountTotal),
+			"payment_intent_id": paymentIntentID,
+		},
+	})
 }
 
 // extractUserIDFromSubscription extracts user_id from subscription or customer metadata
@@ -764,63 +690,276 @@ func getAmountRangeFromCents(amountCents int64) string {
 	}
 }
 
-// handlePaymentIntentRefunded processes payment_intent.refunded events
+// handleChargeRefunded processes charge.refunded events.
+//
+// `amount_refunded` on a charge is cumulative, so converting it into credits
+// revokes 20, then 40, then 60 credits for three 20% refunds. Only the
+// individual refund entry describes what this event took back; a partial refund
+// without one is acknowledged instead of over-revoking.
+func (p *Provider) handleChargeRefunded(ctx context.Context, event *stripe.Event, _ time.Time) error {
+	var charge stripe.Charge
+	if err := json.Unmarshal(event.Data.Raw, &charge); err != nil {
+		return fmt.Errorf("failed to unmarshal charge: %w", err)
+	}
+
+	paymentIntentID := ""
+	if charge.PaymentIntent != nil {
+		paymentIntentID = charge.PaymentIntent.ID
+	}
+
+	metadata := p.chargeMetadata(ctx, &charge)
+	userID := metadata["user_id"]
+	resource := metadata["resource"]
+	if userID == "" || resource == "" {
+		// Refunds of subscription invoices reach this event without credit-pack
+		// metadata. They move no credits, but must still be acknowledged.
+		return p.acknowledgeNonCreditRefund(
+			ctx, event, charge.ID, paymentIntentID, charge.AmountRefunded, string(charge.Currency),
+		)
+	}
+
+	credits, identity, refundedAmount, ok := chargeRefundDecision(&charge, metadata, paymentIntentID, event.ID)
+	if !ok {
+		p.metrics.RecordWebhookEvent(providerName, string(event.Type), "ignored")
+		return nil
+	}
+
+	return p.applyCreditRefund(ctx, event, userID, resource, credits, refundedAmount,
+		identity, charge.ID, paymentIntentID, string(charge.Currency))
+}
+
+// chargeMetadata returns the metadata that describes the purchase behind a
+// charge. Stripe does not copy PaymentIntent metadata onto the Charge it
+// settles, so a credit-pack refund can arrive with an empty Charge.Metadata;
+// fall back to the payment intent, first from the payload and then from the API.
+func (p *Provider) chargeMetadata(ctx context.Context, charge *stripe.Charge) map[string]string {
+	if charge == nil {
+		return nil
+	}
+	if charge.Metadata["user_id"] != "" && charge.Metadata["resource"] != "" {
+		return charge.Metadata
+	}
+
+	paymentIntent := charge.PaymentIntent
+	if paymentIntent == nil {
+		return charge.Metadata
+	}
+	if paymentIntent.Metadata["user_id"] != "" && paymentIntent.Metadata["resource"] != "" {
+		return paymentIntent.Metadata
+	}
+	if p.stripeClient == nil {
+		return charge.Metadata
+	}
+
+	fetched, err := p.stripeClient.V1PaymentIntents.Retrieve(ctx, paymentIntent.ID, nil)
+	if err != nil || fetched == nil {
+		return charge.Metadata
+	}
+	return fetched.Metadata
+}
+
+// chargeRefundDecision works out how many credits this charge.refunded event
+// takes back and under which idempotency identity. ok is false when the event
+// cannot be turned into a credit movement and must be acknowledged untouched.
+func chargeRefundDecision(
+	charge *stripe.Charge, metadata map[string]string, paymentIntentID, eventID string,
+) (credits int, identity string, refundedAmount int64, ok bool) {
+	if charge == nil || charge.Amount <= 0 {
+		return 0, "", 0, false
+	}
+	packCredits := packCreditsFromMetadata(metadata, charge.Amount)
+
+	// Stripe lists refunds newest first, so the newest entry is the one this
+	// event reports. Guard for an unexpanded or empty list.
+	if charge.Refunds != nil && len(charge.Refunds.Data) > 0 {
+		refund := charge.Refunds.Data[0]
+		if refund == nil || refund.Amount <= 0 {
+			return 0, "", 0, false
+		}
+
+		refundedAmount = refund.Amount
+		credits = proratedCredits(packCredits, refund.Amount, charge.Amount)
+		if credits <= 0 {
+			return 0, "", refundedAmount, false
+		}
+		if isFullChargeRefund(charge) {
+			return credits, refundFullIdentity(paymentIntentID, charge.ID), refundedAmount, true
+		}
+
+		identity = refund.ID
+		if identity == "" {
+			identity = eventID
+		}
+		return credits, identity, refundedAmount, true
+	}
+
+	// Without a refund entry only a full refund can be established.
+	refundedAmount = charge.AmountRefunded
+	if refundedAmount <= 0 || !isFullChargeRefund(charge) {
+		return 0, "", refundedAmount, false
+	}
+
+	credits = proratedCredits(packCredits, refundedAmount, charge.Amount)
+	if credits <= 0 {
+		return 0, "", refundedAmount, false
+	}
+	return credits, refundFullIdentity(paymentIntentID, charge.ID), refundedAmount, true
+}
+
+// handlePaymentIntentRefunded processes payment_intent.refunded events.
 func (p *Provider) handlePaymentIntentRefunded(
 	ctx context.Context, event *stripe.Event, _ time.Time,
 ) error {
+	// stripe.PaymentIntent has no AmountRefunded field, but the webhook payload
+	// carries it; read it from the raw JSON alongside the SDK struct.
 	var paymentIntent stripe.PaymentIntent
 	if err := json.Unmarshal(event.Data.Raw, &paymentIntent); err != nil {
 		return fmt.Errorf("failed to unmarshal payment intent: %w", err)
 	}
-
-	// Lookup original top-up record by payment intent ID
-	// We need to query the top_up_records to find the original purchase
-	// For now, we'll need to store this mapping or query Stripe checkout session
-	// The simplest approach: query the checkout session that created this payment intent
-
-	// Get checkout session from payment intent metadata or search
-	// For v1, we'll require the checkout session to have the metadata
-	// In a production system, you might want to store payment_intent -> top_up mapping
-
-	// Extract from payment intent metadata if available
-	userID := ""
-	resource := ""
-	if paymentIntent.Metadata != nil {
-		userID = paymentIntent.Metadata["user_id"]
-		resource = paymentIntent.Metadata["resource"]
+	var refundPayload struct {
+		AmountRefunded int64 `json:"amount_refunded"`
 	}
+	if err := json.Unmarshal(event.Data.Raw, &refundPayload); err != nil {
+		return fmt.Errorf("failed to unmarshal payment intent refund: %w", err)
+	}
+	amountRefunded := refundPayload.AmountRefunded
 
+	userID := paymentIntent.Metadata["user_id"]
+	resource := paymentIntent.Metadata["resource"]
 	if userID == "" || resource == "" {
-		// Try to find checkout session
-		// Note: This is a simplified implementation
-		// In production, you should store the mapping payment_intent_id -> (user_id, resource, amount)
-		return fmt.Errorf("cannot determine user_id and resource for refund - metadata missing")
+		// The event carries no credit-pack metadata, so there is nothing to
+		// revoke. Report it and ack instead of failing the delivery.
+		return p.acknowledgeNonCreditRefund(
+			ctx, event, paymentIntent.ID, paymentIntent.ID,
+			amountRefunded, string(paymentIntent.Currency),
+		)
 	}
 
-	// For payment_intent.refunded, we need to retrieve the refund details
-	// For now, we'll use a simplified approach: use the original payment intent amount
-	// In production, you should track the original top-up amount and refund proportionally
-	// For v1, we'll refund the full amount (assuming full refund)
-	// Note: For partial refunds, you should listen to charge.refunded events instead
-	refundAmount := int(paymentIntent.Amount)
-	if refundAmount == 0 {
-		// No amount specified, skip
+	// This event carries no refund entry, so only a full refund can be
+	// established; charge.refunded owns partial refunds.
+	if paymentIntent.Amount <= 0 || amountRefunded != paymentIntent.Amount {
+		p.metrics.RecordWebhookEvent(providerName, string(event.Type), "ignored")
 		return nil
 	}
 
-	// Convert from cents to credits (same conversion as top-up)
-	creditsRefund := refundAmount
+	credits := proratedCredits(
+		packCreditsFromMetadata(paymentIntent.Metadata, paymentIntent.Amount),
+		amountRefunded,
+		paymentIntent.Amount,
+	)
+	if credits <= 0 {
+		p.metrics.RecordWebhookEvent(providerName, string(event.Type), "ignored")
+		return nil
+	}
 
-	// Use payment intent ID as idempotency key for refund
-	refundID := fmt.Sprintf("%s_refund", paymentIntent.ID)
+	// The payment-intent identity matches the one charge.refunded uses for the
+	// same full refund, so the two events revoke the pack once.
+	return p.applyCreditRefund(ctx, event, userID, resource, credits, amountRefunded,
+		refundFullIdentity(paymentIntent.ID, paymentIntent.ID), paymentIntent.ID, paymentIntent.ID,
+		string(paymentIntent.Currency))
+}
+
+// applyCreditRefund revokes credits and reports the movement to the webhook
+// callback.
+func (p *Provider) applyCreditRefund(
+	ctx context.Context, event *stripe.Event, userID, resource string,
+	credits int, refundedAmount int64, idempotencyKey, providerObjectID, paymentIntentID, currency string,
+) error {
 	err := p.manager.RefundCredits(
-		ctx, userID, resource, creditsRefund, "stripe_refund", goquota.WithRefundIdempotencyKey(refundID),
+		ctx, userID, resource, credits, "stripe_refund", goquota.WithRefundIdempotencyKey(idempotencyKey),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to refund credits: %w", err)
 	}
 
-	return nil
+	return p.invokeWebhookCallback(ctx, billing.WebhookEvent{
+		UserID:           userID,
+		Provider:         providerName,
+		EventType:        string(event.Type),
+		EventID:          event.ID,
+		ProviderObjectID: providerObjectID,
+		PaymentIntentID:  paymentIntentID,
+		EventTimestamp:   time.Unix(event.Created, 0),
+		Store:            providerName,
+		Currency:         strings.ToUpper(currency),
+		PriceCents:       refundedAmount,
+		Metadata: map[string]interface{}{
+			"resource":          resource,
+			"credits":           credits,
+			"payment_intent_id": paymentIntentID,
+		},
+	})
+}
+
+// acknowledgeNonCreditRefund reports a refund that carries no credit-pack
+// metadata (subscription invoice refunds, unrelated charges) and acknowledges
+// it. Returning an error here became an HTTP 500, which made Stripe retry the
+// same refund forever.
+func (p *Provider) acknowledgeNonCreditRefund(
+	ctx context.Context, event *stripe.Event, providerObjectID, paymentIntentID string,
+	refundedAmount int64, currency string,
+) error {
+	p.metrics.RecordWebhookEvent(providerName, string(event.Type), "ignored")
+
+	return p.invokeWebhookCallback(ctx, billing.WebhookEvent{
+		Provider:         providerName,
+		EventType:        string(event.Type),
+		EventID:          event.ID,
+		ProviderObjectID: providerObjectID,
+		PaymentIntentID:  paymentIntentID,
+		EventTimestamp:   time.Unix(event.Created, 0),
+		Store:            providerName,
+		Currency:         strings.ToUpper(currency),
+		PriceCents:       refundedAmount,
+	})
+}
+
+// packCreditsFromMetadata returns how many credits the purchase granted: the
+// explicit `credits` metadata when present, otherwise the 1 cent = 1 credit
+// rule (the pack amount in minor units).
+func packCreditsFromMetadata(metadata map[string]string, originalAmount int64) int {
+	if raw := strings.TrimSpace(metadata["credits"]); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	if originalAmount <= 0 {
+		return 0
+	}
+	return int(originalAmount)
+}
+
+// proratedCredits converts a refunded share of the original amount into the
+// matching share of the granted credits.
+func proratedCredits(packCredits int, refundedAmount, originalAmount int64) int {
+	if packCredits <= 0 || refundedAmount <= 0 || originalAmount <= 0 {
+		return 0
+	}
+
+	credits := int(math.Round(float64(packCredits) * float64(refundedAmount) / float64(originalAmount)))
+	if credits > packCredits {
+		credits = packCredits
+	}
+	if credits < 0 {
+		credits = 0
+	}
+	return credits
+}
+
+// isFullChargeRefund reports that the cumulative refunded amount covers the
+// whole charge.
+func isFullChargeRefund(charge *stripe.Charge) bool {
+	return charge.Amount > 0 && charge.AmountRefunded == charge.Amount
+}
+
+// refundFullIdentity is the idempotency identity of a full refund. charge.refunded
+// and payment_intent.refunded for the same refund resolve to the same key, so the
+// pack is revoked once.
+func refundFullIdentity(paymentIntentID, fallbackID string) string {
+	if paymentIntentID != "" {
+		return "refund-full:" + paymentIntentID
+	}
+	return "refund-full:" + fallbackID
 }
 
 func startOfDayUTC(t time.Time) time.Time {

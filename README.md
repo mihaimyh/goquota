@@ -358,7 +358,7 @@ newUsed, err = manager.Consume(
 // Returns the same newUsed value from first request, quota only consumed once
 ```
 
-Idempotency keys are automatically deduplicated across all storage backends and have a configurable TTL (default: 24 hours).
+Idempotency keys are automatically deduplicated across all storage backends and have a configurable TTL (default: 24 hours). Keys are scoped per operation owner: the same key from two different users never collides, and segments are percent-escaped so ids containing `:` cannot forge another user's scope. Top-up keys are additionally scoped by resource, and a key used after its TTL starts a new operation instead of replaying the old one.
 
 ### Quota Refunds
 
@@ -1308,6 +1308,15 @@ stripeProvider, _ := stripe.NewProvider(stripe.Config{
 
 > **⚠️ Best-Effort Semantics**: Due to timestamp-based idempotency, if a callback fails _after_ the entitlement is committed, webhook retries will be skipped. Implement your own idempotency or use async reconciliation for critical operations.
 
+### Stripe Event Semantics
+
+- `checkout.session.completed` only grants for **paid one-time (payment mode)** sessions that carry `resource` metadata. Subscription-mode sessions are ignored because `customer.subscription.*` and `invoice.payment_succeeded` own the entitlement; sessions whose `payment_status` is not `paid` (SEPA, Boleto) are ignored so credits are never granted before the money lands.
+- Checkout sessions send `managed_payments[enabled]=false` explicitly, so accounts where Stripe Managed Payments is on by default do not reject sessions that carry no product tax code.
+- Refunds are prorated: `charge.refunded` reads the individual refund entry, so three 20% refunds revoke 20% + 20% + 20% of the pack instead of 20% + 40% + 60%. A full refund is keyed `refund-full:<payment_intent>` so `charge.refunded` and `payment_intent.refunded` for the same refund revoke once. `payment_intent.refunded` without an entry only acts when the refund is complete.
+- A refund that carries no credit-pack metadata (subscription invoice refunds, unrelated products) moves no credits but is still reported to `WebhookCallback` instead of failing the delivery with HTTP 500.
+
+`billing.WebhookEvent` exposes the provider object for these events: `ProviderObjectID` (checkout session or charge id) and `PaymentIntentID` (empty when the event has none).
+
 **WebhookEvent Structure:**
 
 ```go
@@ -1612,6 +1621,7 @@ Fiber uses `fasthttp` instead of `net/http`, so the middleware correctly bridges
 `goquota` is designed for real-world subscription billing:
 
 - **Anniversaries**: Cycles follow the user's subscription date (e.g. Jan 15 -> Feb 15), not calendar months.
+- **No entitlement**: Users without an entitlement (anonymous, pre-signup) fall back to the **calendar month** in UTC, so a monthly quota is not reset every day.
 - **Proration**: If a user upgrades headers mid-cycle, their usage carries over proportionally.
 
   > _Example_: User consumes 50% of Basic tier. Upgrading to Pro (10x limit) means they start with 50% of Pro usage, preserving the "percent used" fairness.

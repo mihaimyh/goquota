@@ -361,12 +361,15 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 	}()
 
 	// Check idempotency (scoped to user_id) with row-level lock
-	// This prevents race conditions where multiple transactions check simultaneously
+	// This prevents race conditions where multiple transactions check simultaneously.
+	// A record whose expiry has passed is treated as absent: replays are only valid
+	// within the TTL, afterwards the key means a new operation (PGC-1).
 	if req.IdempotencyKey != "" {
 		var existingNewUsed int64
 		err := tx.QueryRow(ctx,
 			fmt.Sprintf(`SELECT new_used FROM %s 
 				WHERE user_id = $1 AND consumption_id = $2
+				  AND (expires_at IS NULL OR expires_at > NOW())
 				FOR UPDATE`, s.config.ConsumptionRecordsTable),
 			req.UserID, req.IdempotencyKey).Scan(&existingNewUsed)
 
@@ -435,11 +438,13 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 	// Check again after consumption in case another transaction inserted it
 	// This handles the race condition where two transactions both pass the initial check
 	if req.IdempotencyKey != "" {
-		// Double-check idempotency after consumption (another transaction might have inserted)
+		// Double-check idempotency after consumption (another transaction might have inserted).
+		// Expired records are ignored here too, matching the check above.
 		var existingNewUsed int64
 		err := tx.QueryRow(ctx,
 			fmt.Sprintf(`SELECT new_used FROM %s 
 				WHERE user_id = $1 AND consumption_id = $2
+				  AND (expires_at IS NULL OR expires_at > NOW())
 				FOR UPDATE`, s.config.ConsumptionRecordsTable),
 			req.UserID, req.IdempotencyKey).Scan(&existingNewUsed)
 
@@ -452,6 +457,17 @@ func (s *Storage) ConsumeQuota(ctx context.Context, req *goquota.ConsumeRequest)
 		}
 		if err != pgx.ErrNoRows {
 			return 0, fmt.Errorf("failed to re-check idempotency: %w", err)
+		}
+
+		// An expired record is invisible to the checks above, so delete it before the
+		// insert instead of colliding with it on (user_id, consumption_id).
+		_, err = tx.Exec(ctx,
+			fmt.Sprintf(`DELETE FROM %s 
+				WHERE user_id = $1 AND consumption_id = $2 AND expires_at <= NOW()`,
+				s.config.ConsumptionRecordsTable),
+			req.UserID, req.IdempotencyKey)
+		if err != nil {
+			return 0, fmt.Errorf("failed to clear expired idempotency record: %w", err)
 		}
 
 		// Still doesn't exist - safe to insert
@@ -525,12 +541,14 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 		_ = tx.Rollback(ctx)
 	}()
 
-	// Check idempotency (scoped to user_id)
+	// Check idempotency (scoped to user_id). An expired record no longer suppresses the
+	// refund: after the TTL the key means a new operation (PGC-1).
 	if req.IdempotencyKey != "" {
 		var exists bool
 		err := tx.QueryRow(ctx,
 			fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s 
-				WHERE user_id = $1 AND refund_id = $2)`, s.config.RefundRecordsTable),
+				WHERE user_id = $1 AND refund_id = $2
+				  AND (expires_at IS NULL OR expires_at > NOW()))`, s.config.RefundRecordsTable),
 			req.UserID, req.IdempotencyKey).Scan(&exists)
 
 		if err != nil {
@@ -542,6 +560,16 @@ func (s *Storage) RefundQuota(ctx context.Context, req *goquota.RefundRequest) e
 				return fmt.Errorf("failed to commit: %w", commitErr)
 			}
 			return nil
+		}
+
+		// Drop the expired row so the inserts below can record the new operation.
+		_, err = tx.Exec(ctx,
+			fmt.Sprintf(`DELETE FROM %s 
+				WHERE user_id = $1 AND refund_id = $2 AND expires_at <= NOW()`,
+				s.config.RefundRecordsTable),
+			req.UserID, req.IdempotencyKey)
+		if err != nil {
+			return fmt.Errorf("failed to clear expired refund record: %w", err)
 		}
 	}
 
@@ -677,6 +705,9 @@ func (s *Storage) ApplyTierChange(ctx context.Context, req *goquota.TierChangeRe
 // the same key. This query returns the most recent record with the given key
 // (ORDER BY timestamp DESC). The caller (Manager) must verify that
 // record.UserID matches the expected user to prevent security issues.
+//
+// Records whose expires_at has passed are not returned: the TTL bounds replay,
+// so a reused key after the TTL starts a new operation (PGC-1).
 func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*goquota.RefundRecord, error) {
 	if idempotencyKey == "" {
 		return nil, nil
@@ -690,6 +721,7 @@ func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*
 					period_type, timestamp, reason, metadata
 			FROM %s
 			WHERE refund_id = $1
+			  AND (expires_at IS NULL OR expires_at > NOW())
 			ORDER BY timestamp DESC
 			LIMIT 1`, s.config.RefundRecordsTable),
 		idempotencyKey).Scan(
@@ -730,6 +762,9 @@ func (s *Storage) GetRefundRecord(ctx context.Context, idempotencyKey string) (*
 // the same key. This query returns the most recent record with the given key
 // (ORDER BY timestamp DESC). The caller (Manager) must verify that
 // record.UserID matches the expected user to prevent security issues.
+//
+// Records whose expires_at has passed are not returned: the TTL bounds replay,
+// so a reused key after the TTL starts a new operation (PGC-1).
 func (s *Storage) GetConsumptionRecord(ctx context.Context, idempotencyKey string) (*goquota.ConsumptionRecord, error) {
 	if idempotencyKey == "" {
 		return nil, nil
@@ -743,6 +778,7 @@ func (s *Storage) GetConsumptionRecord(ctx context.Context, idempotencyKey strin
 					period_type, new_used, timestamp, metadata
 			FROM %s
 			WHERE consumption_id = $1
+			  AND (expires_at IS NULL OR expires_at > NOW())
 			ORDER BY timestamp DESC
 			LIMIT 1`, s.config.ConsumptionRecordsTable),
 		idempotencyKey).Scan(

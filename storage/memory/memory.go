@@ -103,15 +103,34 @@ func (s *Storage) SetEntitlement(_ context.Context, ent *goquota.Entitlement) er
 
 	// Store a copy to prevent external mutations
 	entCopy := *ent
-	// Deep-copy the promotion so later caller mutation cannot change stored state.
-	if entCopy.Promotion != nil {
+	if existing, ok := s.entitlements[ent.UserID]; ok {
+		// Deep-copy the promotion so later caller mutation cannot change stored state.
+		if entCopy.Promotion != nil {
+			promoCopy := *entCopy.Promotion
+			entCopy.Promotion = &promoCopy
+		} else if existing.Promotion != nil {
+			// Preserve an existing promotion when the incoming entitlement does not
+			// set one, so provider writes cannot erase a promotion. Use
+			// RevokePromotion / ClearPromotion to clear one deliberately.
+			promoCopy := *existing.Promotion
+			entCopy.Promotion = &promoCopy
+		}
+
+		// Preserve a merge tombstone when the incoming entitlement does not set
+		// one, so a later provider write cannot un-seal a merged user. MergeUser
+		// is the only path that writes these fields.
+		if !entCopy.Sealed {
+			entCopy.Sealed = existing.Sealed
+		}
+		if entCopy.MigratedTo == "" {
+			entCopy.MigratedTo = existing.MigratedTo
+		}
+		if entCopy.ExpireAt == nil && existing.ExpireAt != nil {
+			expireAt := *existing.ExpireAt
+			entCopy.ExpireAt = &expireAt
+		}
+	} else if entCopy.Promotion != nil {
 		promoCopy := *entCopy.Promotion
-		entCopy.Promotion = &promoCopy
-	} else if existing, ok := s.entitlements[ent.UserID]; ok && existing.Promotion != nil {
-		// Preserve an existing promotion when the incoming entitlement does not
-		// set one, so provider writes cannot erase a promotion. Use
-		// RevokePromotion / ClearPromotion to clear one deliberately.
-		promoCopy := *existing.Promotion
 		entCopy.Promotion = &promoCopy
 	}
 	s.entitlements[ent.UserID] = &entCopy

@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net/url"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -235,8 +237,13 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 		data["timezone"] = ent.Timezone
 	}
 
+	// Always write the field. MergeAll preserves a stored value when the key is
+	// absent, so omitting it would silently re-introduce an expiry the caller
+	// just cleared (FIRE-02).
 	if ent.ExpiresAt != nil {
 		data["expiresAt"] = *ent.ExpiresAt
+	} else {
+		data["expiresAt"] = firestore.Delete
 	}
 
 	// Only write the promotion key when set. With MergeAll, omitting it preserves
@@ -1135,7 +1142,7 @@ func (s *Storage) SubtractLimit(
 
 // rateLimitDoc returns the Firestore document reference for rate limiting
 func (s *Storage) rateLimitDoc(userID, resource string) *firestore.DocumentRef {
-	docID := fmt.Sprintf("%s_%s", userID, resource)
+	docID := joinDocID(userID, resource)
 	return s.client.Collection(s.rateLimitsCollection).Doc(docID)
 }
 
@@ -1150,6 +1157,8 @@ func intMin(a, b int) int {
 // usageDoc returns the Firestore document reference for usage tracking
 func (s *Storage) usageDoc(userID, resource string, period goquota.Period) *firestore.DocumentRef {
 	// Structure: billing_usage/{userID}/periods/{periodKey}_{resource}
+	// The period key is fixed per period, so the underscore join cannot collide
+	// across resources here; re-keying would orphan every in-flight counter.
 	periodKey := period.Key()
 	docID := fmt.Sprintf("%s_%s", periodKey, resource)
 
@@ -1157,6 +1166,25 @@ func (s *Storage) usageDoc(userID, resource string, period goquota.Period) *fire
 		Doc(userID).
 		Collection(s.usagePeriodsSub).
 		Doc(docID)
+}
+
+// joinDocID builds a Firestore document id from caller-controlled segments.
+//
+// Segments are percent-escaped and joined with "|". A plain underscore join is
+// ambiguous: (userID "a_b", resource "c") and (userID "a", resource "b_c")
+// both produce "a_b_c", so two tenants can share one document. "|" is used as
+// the separator because url.PathEscape always escapes it, so it can never
+// appear inside an escaped segment.
+//
+// Ids written in the legacy "<userID>_<resource>" form are not migrated: rate
+// limit documents live for one window at most, so re-keying them just resets a
+// short-lived window instead of risking a cross-tenant collision.
+func joinDocID(segments ...string) string {
+	escaped := make([]string, len(segments))
+	for i, segment := range segments {
+		escaped[i] = url.PathEscape(segment)
+	}
+	return strings.Join(escaped, "|")
 }
 
 // Helper functions for type conversion from Firestore data
@@ -1205,7 +1233,7 @@ func periodTypeFromRecord(stored string, start, end time.Time) goquota.PeriodTyp
 	}
 
 	// Records written before the field existed: infer from the cycle so an
-	// unrecognised value cannot claim the wrong pool either.
+	// unrecognized value cannot claim the wrong pool either.
 	if end.Year() > 9000 {
 		return goquota.PeriodTypeForever
 	}

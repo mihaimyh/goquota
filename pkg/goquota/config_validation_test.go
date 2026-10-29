@@ -1,6 +1,7 @@
 package goquota_test
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -149,4 +150,38 @@ func TestConfig_Validate(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "mismatched name")
 	})
+}
+
+// TestConfig_Validate_RejectsNonFiniteWarningThresholds guards CCD-03: NaN never
+// satisfies a range comparison, so it used to pass validation and silently
+// disable warnings.
+func TestConfig_Validate_RejectsNonFiniteWarningThresholds(t *testing.T) {
+	thresholds := map[string]float64{
+		"NaN":               math.NaN(),
+		"+Inf":              math.Inf(1),
+		"-Inf":              math.Inf(-1),
+		"out of range low":  -0.1,
+		"out of range high": 1.1,
+	}
+
+	for name, threshold := range thresholds {
+		t.Run(name, func(t *testing.T) {
+			config := goquota.Config{
+				DefaultTier: "free",
+				Tiers: map[string]goquota.TierConfig{
+					"free": {
+						Name: "free",
+						WarningThresholds: map[string][]float64{
+							"api_calls": {threshold},
+						},
+					},
+				},
+			}
+
+			err := config.Validate()
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "warning threshold")
+			assert.Contains(t, err.Error(), "out of range [0, 1]")
+		})
+	}
 }

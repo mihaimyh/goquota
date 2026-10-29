@@ -36,21 +36,7 @@ func (p *Provider) CheckoutURL(ctx context.Context, userID, tier, successURL, ca
 	// proceed. Stripe will create a new customer if customerID is empty.
 
 	// 3. Create Checkout Session
-	params := &stripe.CheckoutSessionCreateParams{
-		Mode: stripe.String(string(stripe.CheckoutSessionModeSubscription)),
-		LineItems: []*stripe.CheckoutSessionCreateLineItemParams{
-			{
-				Price:    stripe.String(priceID),
-				Quantity: stripe.Int64(1),
-			},
-		},
-		SuccessURL: stripe.String(successURL),
-		CancelURL:  stripe.String(cancelURL),
-	}
-
-	// CRITICAL: Inject metadata for webhook handler
-	params.SubscriptionData = &stripe.CheckoutSessionCreateSubscriptionDataParams{}
-	params.SubscriptionData.AddMetadata("user_id", userID)
+	params := buildSubscriptionCheckoutParams(userID, priceID, successURL, cancelURL)
 
 	// Attach existing customer if found (avoids duplicates)
 	if customerID != "" {
@@ -80,6 +66,41 @@ func (p *Provider) CheckoutURL(ctx context.Context, userID, tier, successURL, ca
 	return session.URL, nil
 }
 
+// buildSubscriptionCheckoutParams builds the Checkout Session parameters for a
+// subscription purchase (mode=subscription).
+func buildSubscriptionCheckoutParams(
+	userID, priceID, successURL, cancelURL string,
+) *stripe.CheckoutSessionCreateParams {
+	params := &stripe.CheckoutSessionCreateParams{
+		Mode: stripe.String(string(stripe.CheckoutSessionModeSubscription)),
+		LineItems: []*stripe.CheckoutSessionCreateLineItemParams{
+			{
+				Price:    stripe.String(priceID),
+				Quantity: stripe.Int64(1),
+			},
+		},
+		SuccessURL: stripe.String(successURL),
+		CancelURL:  stripe.String(cancelURL),
+	}
+
+	// CRITICAL: Inject metadata for webhook handler
+	params.SubscriptionData = &stripe.CheckoutSessionCreateSubscriptionDataParams{}
+	params.SubscriptionData.AddMetadata("user_id", userID)
+
+	disableManagedPayments(params)
+	return params
+}
+
+// disableManagedPayments opts out of Stripe Managed Payments explicitly.
+//
+// Newer Stripe accounts enable Managed Payments by default, which then rejects
+// sessions whose line items carry no product tax code. Sending the flag keeps
+// session creation valid and deterministic across accounts
+// (netquota b1c7128, StripeBillingProvider.cs:428).
+func disableManagedPayments(params *stripe.CheckoutSessionCreateParams) {
+	params.AddExtra("managed_payments[enabled]", "false")
+}
+
 // buildCreditPackCheckoutParams builds the Checkout Session parameters for a
 // one-time credit-pack purchase (mode=payment).
 func buildCreditPackCheckoutParams(
@@ -89,7 +110,7 @@ func buildCreditPackCheckoutParams(
 		"user_id":  userID,
 		"resource": resource,
 	}
-	return &stripe.CheckoutSessionCreateParams{
+	params := &stripe.CheckoutSessionCreateParams{
 		Mode: stripe.String(string(stripe.CheckoutSessionModePayment)),
 		LineItems: []*stripe.CheckoutSessionCreateLineItemParams{
 			{
@@ -113,6 +134,9 @@ func buildCreditPackCheckoutParams(
 			Metadata: metadata,
 		},
 	}
+
+	disableManagedPayments(params)
+	return params
 }
 
 // CheckoutURLForPayment creates a Stripe Checkout Session for one-time payment (credit top-up) and returns the URL.

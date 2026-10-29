@@ -36,6 +36,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net/url"
 	"strings"
 	"time"
 
@@ -233,25 +234,13 @@ func (m *Manager) GetCurrentCycle(ctx context.Context, userID string) (Period, e
 	ent, err := m.storage.GetEntitlement(ctx, userID)
 	if err != nil {
 		if err == ErrEntitlementNotFound {
-			// Use current time as start for users without entitlement
-			now := m.now(ctx)
-			start, end := CurrentCycleForStart(startOfDayUTC(now), now)
-			return Period{
-				Start: start,
-				End:   end,
-				Type:  PeriodTypeMonthly,
-			}, nil
+			// Users without an entitlement use the current calendar month
+			return monthlyPeriodForEntitlement(m.now(ctx), nil), nil
 		}
 		return Period{}, err
 	}
 
-	now := m.now(ctx)
-	start, end := CurrentCycleForStart(ent.SubscriptionStartDate, now)
-	return Period{
-		Start: start,
-		End:   end,
-		Type:  PeriodTypeMonthly,
-	}, nil
+	return monthlyPeriodForEntitlement(m.now(ctx), ent), nil
 }
 
 // GetQuota returns current usage and limit for a resource
@@ -279,13 +268,7 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 	// Calculate period based on type
 	switch periodType {
 	case PeriodTypeMonthly:
-		var start, end time.Time
-		if err == nil {
-			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, now)
-		} else {
-			start, end = CurrentCycleForStart(startOfDayUTC(now), now)
-		}
-		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
+		period = monthlyPeriodForEntitlement(now, entitlementOrNil(ent, err))
 
 	case PeriodTypeDaily:
 		period = dailyPeriodForEntitlement(now, ent)
@@ -480,13 +463,32 @@ func (m *Manager) GetQuota(ctx context.Context, userID, resource string, periodT
 	return usage, nil
 }
 
+// escapeIdempotencySegment percent-encodes one segment of a scoped
+// idempotency key. ':' is escaped, so joining segments with ':' is
+// unambiguous: ("a:b", "c") and ("a", "b:c") must not share a record.
+func escapeIdempotencySegment(segment string) string {
+	return url.QueryEscape(segment)
+}
+
 // scopedIdempotencyKey namespaces a caller-supplied idempotency key by user so
 // consumption and refund records cannot collide across identities.
 func scopedIdempotencyKey(userID, key string) string {
 	if key == "" {
 		return ""
 	}
-	return userID + ":" + key
+	return escapeIdempotencySegment(userID) + ":" + escapeIdempotencySegment(key)
+}
+
+// scopedTopUpKey namespaces a caller-supplied top-up idempotency key by user
+// and resource so the same key cannot collide across identities or resources.
+// An empty key means "no idempotency" and is returned unchanged.
+func scopedTopUpKey(userID, resource, key string) string {
+	if key == "" {
+		return ""
+	}
+	return escapeIdempotencySegment(userID) + ":" +
+		escapeIdempotencySegment(resource) + ":" +
+		escapeIdempotencySegment(key)
 }
 
 // Consume consumes quota for a resource
@@ -594,13 +596,7 @@ func (m *Manager) Consume(ctx context.Context, userID, resource string, amount i
 	var period Period
 	switch periodType {
 	case PeriodTypeMonthly:
-		var start, end time.Time
-		if err == nil {
-			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, now)
-		} else {
-			start, end = CurrentCycleForStart(startOfDayUTC(now), now)
-		}
-		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
+		period = monthlyPeriodForEntitlement(now, entitlementOrNil(ent, err))
 
 	case PeriodTypeDaily:
 		period = dailyPeriodForEntitlement(now, ent)
@@ -907,10 +903,7 @@ func (m *Manager) ConsumeWithResult(ctx context.Context, userID, resource string
 		}
 		if existing != nil {
 			m.metrics.RecordIdempotencyHit("consume")
-			result, err := m.consumeResultFromRecord(ctx, existing)
-			if err != nil {
-				return nil, err
-			}
+			result := m.consumeResultFromRecord(ctx, existing)
 			// Nothing was debited: mark it so a caller can distinguish a replay
 			// from a real charge without reading the consumption records itself.
 			result.Replayed = true
@@ -984,16 +977,16 @@ func (m *Manager) buildConsumeResult(ctx context.Context, userID, resource strin
 	return consumeResultFromUsage(usage, newUsed, periodType), nil
 }
 
-func (m *Manager) consumeResultFromRecord(ctx context.Context, record *ConsumptionRecord) (*ConsumeResult, error) {
+func (m *Manager) consumeResultFromRecord(ctx context.Context, record *ConsumptionRecord) *ConsumeResult {
 	periodType := record.Period.Type
 	usage, err := m.GetQuota(ctx, record.UserID, record.Resource, periodType)
 	if err != nil {
 		return &ConsumeResult{
 			NewUsed: record.NewUsed,
 			Period:  periodType,
-		}, nil
+		}
 	}
-	return consumeResultFromUsage(usage, record.NewUsed, periodType), nil
+	return consumeResultFromUsage(usage, record.NewUsed, periodType)
 }
 
 func consumeResultFromUsage(usage *Usage, newUsed int, periodType PeriodType) *ConsumeResult {
@@ -1655,13 +1648,7 @@ func (m *Manager) refundWithResult(ctx context.Context, req *RefundRequest) (*Re
 		period = resolvedPeriod
 
 	case PeriodTypeMonthly:
-		var start, end time.Time
-		if err == nil {
-			start, end = CurrentCycleForStart(ent.SubscriptionStartDate, now)
-		} else {
-			start, end = CurrentCycleForStart(startOfDayUTC(now), now)
-		}
-		period = Period{Start: start, End: end, Type: PeriodTypeMonthly}
+		period = monthlyPeriodForEntitlement(now, entitlementOrNil(ent, err))
 
 	case PeriodTypeDaily:
 		period = dailyPeriodForEntitlement(now, ent)
@@ -1741,8 +1728,10 @@ func (m *Manager) TopUpLimit(ctx context.Context, userID, resource string, amoun
 	end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 	period := Period{Start: start, End: end, Type: PeriodTypeForever}
 
-	// Call storage.AddLimit with idempotency key
-	err := m.storage.AddLimit(ctx, userID, resource, amount, period, topUpOpts.IdempotencyKey)
+	// Call storage.AddLimit with idempotency key scoped by user and resource so
+	// the same caller key cannot collide across identities or resources.
+	scopedKey := scopedTopUpKey(userID, resource, topUpOpts.IdempotencyKey)
+	err := m.storage.AddLimit(ctx, userID, resource, amount, period, scopedKey)
 	if err == ErrIdempotencyKeyExists {
 		// Idempotent operation - already processed, return success
 		m.logger.Info("duplicate top-up request ignored (idempotent)",

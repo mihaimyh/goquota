@@ -97,3 +97,23 @@ func startOfDayUTC(t time.Time) time.Time {
 	tt := t.UTC()
 	return time.Date(tt.Year(), tt.Month(), tt.Day(), 0, 0, 0, 0, time.UTC)
 }
+
+// startOfMonthUTC returns the start of the calendar month (00:00:00 UTC) that
+// contains the given time.
+func startOfMonthUTC(t time.Time) time.Time {
+	tt := t.UTC()
+	return time.Date(tt.Year(), tt.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+// monthlyPeriodForEntitlement returns the monthly period for now. An existing
+// entitlement anchors the cycle on its subscription start date. Without one the
+// cycle is the calendar month: anchoring on the start of the current day would
+// change the period key every day and reset monthly quotas daily (QM-01).
+func monthlyPeriodForEntitlement(now time.Time, ent *Entitlement) Period {
+	anchor := startOfMonthUTC(now)
+	if ent != nil {
+		anchor = ent.SubscriptionStartDate
+	}
+	start, end := CurrentCycleForStart(anchor, now)
+	return Period{Start: start, End: end, Type: PeriodTypeMonthly}
+}

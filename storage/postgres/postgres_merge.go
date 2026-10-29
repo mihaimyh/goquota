@@ -143,9 +143,15 @@ func (s *Storage) MergeUser(ctx context.Context, req *goquota.StorageMergeReques
 		return nil, fmt.Errorf("merge user: insert record: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		result, replayErr := s.loadMergeResult(ctx, tx, req.IdempotencyKey)
+		result, sourceUserID, targetUserID, replayErr := s.loadMergeResult(ctx, tx, req.IdempotencyKey)
 		if replayErr != nil {
 			return nil, replayErr
+		}
+		// The key is global, so a replay must prove it names the same pair; otherwise it
+		// reports a merge that never happened for this source/target (PGM-1).
+		if sourceUserID != req.SourceUserID || targetUserID != req.TargetUserID {
+			return nil, fmt.Errorf("merge idempotency key %q was used for %s -> %s, cannot replay it for %s -> %s",
+				req.IdempotencyKey, sourceUserID, targetUserID, req.SourceUserID, req.TargetUserID)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("merge user: commit replay: %w", err)
@@ -226,22 +232,28 @@ func (s *Storage) MergeUser(ctx context.Context, req *goquota.StorageMergeReques
 	return result, nil
 }
 
-func (s *Storage) loadMergeResult(ctx context.Context, tx pgx.Tx, key string) (*goquota.MergeUserResult, error) {
+// loadMergeResult returns the stored result of a merge together with the user
+// pair the key was originally used for, so replays can verify the pairing.
+func (s *Storage) loadMergeResult(
+	ctx context.Context, tx pgx.Tx, key string,
+) (*goquota.MergeUserResult, string, string, error) {
 	var raw []byte
+	var sourceUserID, targetUserID string
 	err := tx.QueryRow(ctx,
-		fmt.Sprintf(`SELECT result_json FROM %s WHERE idempotency_key = $1`, s.config.MergeRecordsTable),
+		fmt.Sprintf(`SELECT source_user_id, target_user_id, result_json FROM %s WHERE idempotency_key = $1`,
+			s.config.MergeRecordsTable),
 		key,
-	).Scan(&raw)
+	).Scan(&sourceUserID, &targetUserID, &raw)
 	if err != nil {
-		return nil, fmt.Errorf("merge user: load record: %w", err)
+		return nil, "", "", fmt.Errorf("merge user: load record: %w", err)
 	}
 	result := &goquota.MergeUserResult{}
 	if len(raw) > 0 && string(raw) != "{}" {
 		if err := json.Unmarshal(raw, result); err != nil {
-			return nil, fmt.Errorf("merge user: decode record: %w", err)
+			return nil, "", "", fmt.Errorf("merge user: decode record: %w", err)
 		}
 	}
-	return result, nil
+	return result, sourceUserID, targetUserID, nil
 }
 
 func (s *Storage) rejectSealedInTx(ctx context.Context, tx pgx.Tx, userID string, now time.Time) error {
