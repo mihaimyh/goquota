@@ -3,6 +3,9 @@ package goquota
 import (
 	"errors"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -69,4 +72,54 @@ type RateLimitExceededError struct {
 
 func (e *RateLimitExceededError) Error() string {
 	return ErrRateLimitExceeded.Error()
+}
+
+// Unwrap exposes ErrRateLimitExceeded so that errors.Is(err, ErrRateLimitExceeded)
+// matches a *RateLimitExceededError. Use errors.As when the details (Info,
+// RetryAfter) are needed.
+func (e *RateLimitExceededError) Unwrap() error {
+	return ErrRateLimitExceeded
+}
+
+// GRPCStatus implements the interface understood by google.golang.org/grpc/status,
+// so status.Code(err) returns codes.ResourceExhausted for a rate-limit denial
+// instead of codes.Unknown.
+func (e *RateLimitExceededError) GRPCStatus() *status.Status {
+	return status.New(codes.ResourceExhausted, e.Error())
+}
+
+// GRPCStatusFor maps a quota or rate-limit denial to a gRPC status so servers
+// can translate it without hand-written matching:
+//
+//	if st := goquota.GRPCStatusFor(err); st != nil {
+//		return st.Err() // codes.ResourceExhausted
+//	}
+//
+// It returns codes.ResourceExhausted for ErrQuotaExceeded, ErrRateLimitExceeded
+// and ErrOptimisticLimitExceeded (including wrapped forms), propagates the
+// status of errors that already implement GRPCStatus, and returns nil for any
+// other error or for a nil error.
+func GRPCStatusFor(err error) *status.Status {
+	if err == nil {
+		return nil
+	}
+
+	var withStatus interface {
+		GRPCStatus() *status.Status
+	}
+
+	// Quota and rate-limit denials win first so that a wrapped denial keeps the
+	// full error text, while a denial's own status still reports ResourceExhausted.
+	if errors.Is(err, ErrQuotaExceeded) ||
+		errors.Is(err, ErrRateLimitExceeded) ||
+		errors.Is(err, ErrOptimisticLimitExceeded) {
+		return status.New(codes.ResourceExhausted, err.Error())
+	}
+
+	// Any other error that already carries a gRPC status keeps it.
+	if errors.As(err, &withStatus) {
+		return withStatus.GRPCStatus()
+	}
+
+	return nil
 }

@@ -305,13 +305,16 @@ RateLimits: map[string]goquota.RateLimitConfig{
 }
 ```
 
-Rate limits are checked **before** quota consumption, so rate-limited requests don't consume quota. When a rate limit is exceeded, `Consume` returns a `*goquota.RateLimitExceededError` carrying `Info` (remaining, reset time, limit) and `RetryAfter`. It is **not** the `goquota.ErrRateLimitExceeded` sentinel, so match it with `errors.As`:
+Rate limits are checked **before** quota consumption, so rate-limited requests don't consume quota. When a rate limit is exceeded, `Consume` returns a `*goquota.RateLimitExceededError` carrying `Info` (remaining, reset time, limit) and `RetryAfter`. It unwraps to the `goquota.ErrRateLimitExceeded` sentinel, so `errors.Is` matches it and `errors.As` gives you the details:
 
 ```go
 var rl *goquota.RateLimitExceededError
 if errors.As(err, &rl) {
     log.Printf("rate limited: %d remaining, retry in %s", rl.Info.Remaining, rl.RetryAfter)
 }
+
+// Also true, because the typed error implements Unwrap:
+errors.Is(err, goquota.ErrRateLimitExceeded)
 ```
 
 **HTTP Middleware Integration** - Rate limit headers are automatically added:
@@ -1723,8 +1726,28 @@ ErrStorageUnavailable, ErrInvalidPeriod, ErrFallbackUnavailable, ErrStaleCache,
 ErrOptimisticLimitExceeded, ErrRateLimitExceeded, ErrIdempotencyKeyExists,
 ErrUnsupportedOperation, ErrSameUser, ErrUserSealed, ErrInvalidMergeRequest
 
-// Returned as *RateLimitExceededError (use errors.As, not ==), with:
+// Returned as *RateLimitExceededError, which unwraps to ErrRateLimitExceeded, with:
 //   Info *RateLimitInfo; RetryAfter time.Duration
+
+// gRPC mapping
+func (e *RateLimitExceededError) GRPCStatus() *status.Status // codes.ResourceExhausted
+func GRPCStatusFor(err error) *status.Status // quota/rate-limit denials -> ResourceExhausted, nil otherwise
+```
+
+### gRPC Servers
+
+Quota and rate-limit denials map to `codes.ResourceExhausted`, both automatically and explicitly:
+
+```go
+// Option 1: status.Code works directly on the returned error
+if status.Code(err) == codes.ResourceExhausted {
+    return status.Error(codes.ResourceExhausted, err.Error())
+}
+
+// Option 2: one mapping point for sentinels, typed errors, and wrapped forms
+if st := goquota.GRPCStatusFor(err); st != nil {
+    return st.Err()
+}
 ```
 
 ## Testing
