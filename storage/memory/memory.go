@@ -129,6 +129,13 @@ func (s *Storage) SetEntitlement(_ context.Context, ent *goquota.Entitlement) er
 			expireAt := *existing.ExpireAt
 			entCopy.ExpireAt = &expireAt
 		}
+
+		// The timezone is a user preference no provider writes; keeping it when
+		// the incoming entitlement omits it keeps daily windows aligned with the
+		// user's day instead of silently falling back to UTC.
+		if entCopy.Timezone == "" {
+			entCopy.Timezone = existing.Timezone
+		}
 	} else if entCopy.Promotion != nil {
 		promoCopy := *entCopy.Promotion
 		entCopy.Promotion = &promoCopy

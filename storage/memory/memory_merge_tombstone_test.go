@@ -35,3 +35,31 @@ func TestStorage_SetEntitlement_PreservesMergeTombstone(t *testing.T) {
 	assert.True(t, expireAt.Equal(*stored.ExpireAt))
 	assert.True(t, stored.IsSealed(time.Date(2026, 1, 20, 0, 0, 0, 0, time.UTC)))
 }
+
+// TestStorage_SetEntitlement_PreservesTimezone covers H1: the timezone is a user
+// preference no provider writes, so a provider update must not reset daily
+// windows to UTC.
+func TestStorage_SetEntitlement_PreservesTimezone(t *testing.T) {
+	storage := New()
+	ctx := context.Background()
+
+	zone := baseEntitlement("user-1", "free")
+	zone.Timezone = "Europe/Bucharest"
+	require.NoError(t, storage.SetEntitlement(ctx, zone))
+
+	// Provider webhook writes a plain entitlement (no timezone).
+	require.NoError(t, storage.SetEntitlement(ctx, baseEntitlement("user-1", "pro")))
+
+	stored, err := storage.GetEntitlement(ctx, "user-1")
+	require.NoError(t, err)
+	assert.Equal(t, "pro", stored.Tier)
+	assert.Equal(t, "Europe/Bucharest", stored.Timezone, "timezone must survive a provider write")
+
+	// An explicit timezone still wins.
+	explicit := baseEntitlement("user-1", "pro")
+	explicit.Timezone = "America/New_York"
+	require.NoError(t, storage.SetEntitlement(ctx, explicit))
+	stored, err = storage.GetEntitlement(ctx, "user-1")
+	require.NoError(t, err)
+	assert.Equal(t, "America/New_York", stored.Timezone)
+}

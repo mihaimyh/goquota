@@ -401,11 +401,18 @@ func (s *Storage) SetEntitlement(ctx context.Context, ent *goquota.Entitlement) 
 	// one, so provider webhooks/syncs cannot erase a promotion. Use
 	// RevokePromotion / ClearPromotion to clear one deliberately.
 	toStore := ent
-	if ent.Promotion == nil {
-		if existing, getErr := s.GetEntitlement(ctx, ent.UserID); getErr == nil &&
-			existing != nil && existing.Promotion != nil {
+	if ent.Promotion == nil || ent.Timezone == "" {
+		if existing, getErr := s.GetEntitlement(ctx, ent.UserID); getErr == nil && existing != nil {
 			cp := *ent
-			cp.Promotion = existing.Promotion
+			if ent.Promotion == nil && existing.Promotion != nil {
+				cp.Promotion = existing.Promotion
+			}
+			// The timezone is a user preference no provider writes; keep it when
+			// the incoming entitlement omits it, otherwise daily windows silently
+			// fall back to UTC after any provider write.
+			if ent.Timezone == "" {
+				cp.Timezone = existing.Timezone
+			}
 			toStore = &cp
 		}
 	}

@@ -1622,6 +1622,7 @@ Fiber uses `fasthttp` instead of `net/http`, so the middleware correctly bridges
 
 - **Anniversaries**: Cycles follow the user's subscription date (e.g. Jan 15 -> Feb 15), not calendar months.
 - **No entitlement**: Users without an entitlement (anonymous, pre-signup) fall back to the **calendar month** in UTC, so a monthly quota is not reset every day.
+- **Timezone**: The entitlement timezone is user data; provider webhooks and syncs never overwrite it with an empty value, so daily windows keep following the user's day.
 - **Proration**: If a user upgrades headers mid-cycle, their usage carries over proportionally.
 
   > _Example_: User consumes 50% of Basic tier. Upgrading to Pro (10x limit) means they start with 50% of Pro usage, preserving the "percent used" fairness.
